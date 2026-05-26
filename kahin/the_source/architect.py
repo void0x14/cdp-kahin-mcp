@@ -311,7 +311,7 @@ class SchemaEngine:
 
         return {"valid": len(errors) == 0, "errors": errors, "warnings": warnings}
 
-    def error_decode(self, error_code: int | None = None, error_message: str = "") -> dict:
+    def error_decode(self, error_code: int | None = None, error_message: str | None = None) -> dict:
         explanations = {
             -32601: {
                 "name": "Method not found",

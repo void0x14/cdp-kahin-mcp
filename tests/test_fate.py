@@ -1,5 +1,6 @@
 """Tests for fate.py — Pattern DB."""
 
+import os
 import tempfile
 from pathlib import Path
 
@@ -7,7 +8,9 @@ from kahin.residual_self.fate import FateDB
 
 
 def make_fate() -> FateDB:
-    return FateDB(path=Path(tempfile.mktemp(suffix=".json")))
+    fd, path = tempfile.mkstemp(suffix=".json")
+    os.close(fd)
+    return FateDB(path=Path(path))
 
 
 def test_learn_and_query():

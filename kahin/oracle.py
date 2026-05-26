@@ -115,7 +115,7 @@ async def kahin_validate_command(domain: str, command: str, parameters: dict[str
 
 
 @mcp.tool()
-async def kahin_error_decode(error_code: int | None = None, error_message: str = "") -> str:
+async def kahin_error_decode(error_code: int | None = None, error_message: str | None = None) -> str:
     """Decode a CDP error code and message to get explanation, common causes, and solutions"""
     return orjson.dumps(schema.error_decode(error_code=error_code, error_message=error_message), option=orjson.OPT_INDENT_2).decode()
 
@@ -135,9 +135,9 @@ async def _safe_cdp(domain: str, command: str, params: dict[str, Any] | None = N
         result = await _current_engine.send_cdp(domain, command, params or {})
         return orjson.dumps(result, option=orjson.OPT_INDENT_2).decode()
     except RuntimeError as e:
-        return f'{{"error": "CDP error: {e}"}}'
+        return orjson.dumps({"error": f"CDP error: {e}"}).decode()
     except Exception as e:
-        return f'{{"error": "Connection lost: {e}"}}'
+        return orjson.dumps({"error": f"Connection lost: {e}"}).decode()
 
 async def _require_engine() -> str | None:
     """Ensure engine is running. Returns error message or None."""
@@ -155,7 +155,7 @@ async def kahin_browser_start(engine: str = "shadow", headless: bool = True, por
         return "Engine already running. Stop it first with kahin_browser_stop."
 
     if port in (9222, 9240):
-        return f'{{"error": "Port {port} is RESERVED. Use a different port."}}'
+        return orjson.dumps({"error": f"Port {port} is RESERVED. Use a different port."}).decode()
 
     if engine == "shadow":
         _current_engine = Obscura()
@@ -173,13 +173,13 @@ async def kahin_browser_start(engine: str = "shadow", headless: bool = True, por
         )
     except asyncio.TimeoutError:
         _current_engine = None
-        return f'{{"error": "Engine {engine} failed to start on port {actual_port} (timeout)"}}'
+        return orjson.dumps({"error": f"Engine {engine} failed to start on port {actual_port} (timeout)"}).decode()
     except RuntimeError as e:
         _current_engine = None
-        return f'{{"error": "Engine {engine} failed: {e}"}}'
+        return orjson.dumps({"error": f"Engine {engine} failed: {e}"}).decode()
     except Exception as e:
         _current_engine = None
-        return f'{{"error": "Unexpected error starting {engine}: {e}"}}'
+        return orjson.dumps({"error": f"Unexpected error starting {engine}: {e}"}).decode()
 
     # Register event collectors
     await _current_engine.on_event(_on_cdp_event)
@@ -272,7 +272,7 @@ async def kahin_screenshot(full_page: bool = False) -> str:
         b64 = base64.b64encode(data).decode()
         return orjson.dumps({"screenshot": b64, "format": "png"}, option=orjson.OPT_INDENT_2).decode()
     except Exception as e:
-        return f'{{"error": "Screenshot failed: {e}"}}'
+        return orjson.dumps({"error": f"Screenshot failed: {e}"}).decode()
 
 
 @mcp.tool()
