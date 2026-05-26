@@ -9,16 +9,16 @@ import time
 from typing import Any
 from urllib.parse import urlparse
 
-logger = logging.getLogger(__name__)
-
 import orjson
 from mcp.server.fastmcp import FastMCP
 
 from kahin._state import _current_engine, _current_event_log, _network_requests, _console_messages, clear_state
-from kahin.the_source.architect import SchemaEngine
-from kahin.the_twins.shadow import Obscura
-from kahin.the_twins.mirage import Mirage
 from kahin.residual_self.fate import FateDB
+from kahin.the_source.architect import SchemaEngine
+from kahin.the_twins.mirage import Mirage
+from kahin.the_twins.shadow import Obscura
+
+logger = logging.getLogger(__name__)
 
 mcp = FastMCP(
     name="kahin",
@@ -354,7 +354,7 @@ async def kahin_event_history(event_type: str | None = None) -> str:
     if event_type:
         filtered = [e for e in _current_event_log if e["event"] == event_type]
     else:
-        filtered = _current_event_log[-50:]
+        filtered = list(_current_event_log)[-50:]
     return orjson.dumps(filtered, option=orjson.OPT_INDENT_2).decode()
 
 
@@ -363,7 +363,7 @@ async def kahin_list_network_requests(limit: int = 20) -> str:
     """List network requests captured from the current session."""
     if _current_engine is None:
         return "No browser engine running."
-    return orjson.dumps(_network_requests[-limit:], option=orjson.OPT_INDENT_2).decode()
+    return orjson.dumps(list(_network_requests)[-limit:], option=orjson.OPT_INDENT_2).decode()
 
 
 @mcp.tool()

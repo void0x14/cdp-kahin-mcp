@@ -91,7 +91,10 @@ class BrowserEngine(ABC):
         })
         await self._ws.send(msg)
         while True:
-            raw = await self._ws.recv()
+            try:
+                raw = await asyncio.wait_for(self._ws.recv(), timeout=30)
+            except asyncio.TimeoutError:
+                raise RuntimeError(f"{type(self).__name__}: CDP response timeout (30s) for {domain}.{command}")
             data = json.loads(raw)
             if "id" in data and data["id"] == self._msg_id:
                 if "error" in data:
