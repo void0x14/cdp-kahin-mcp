@@ -43,10 +43,11 @@ class Mirage(BrowserEngine):
 
         env = kwargs.get("env", {})
         launch_env = {
-            "DISPLAY": env.get("DISPLAY", ":99"),
             "PATH": env.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
             "HOME": env.get("HOME", "/root"),
         }
+        if "DISPLAY" in env:
+            launch_env["DISPLAY"] = env["DISPLAY"]
 
         self._process = await asyncio.create_subprocess_exec(
             *stealth_args,
