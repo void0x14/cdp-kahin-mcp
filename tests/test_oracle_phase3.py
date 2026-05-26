@@ -1,13 +1,14 @@
 """Edge case and pattern tool tests for oracle.py."""
 
 import json
+import sys
 import subprocess
 import time
 
 
 def _start():
     proc = subprocess.Popen(
-        ["python3", "-c", "from kahin.oracle import main; main()"],
+        [sys.executable, "-c", "from kahin.oracle import main; main()"],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True, cwd=".",
     )
