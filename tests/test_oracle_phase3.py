@@ -1,12 +1,12 @@
 """Edge case and pattern tool tests for oracle.py."""
 
 import json
-import sys
 import subprocess
+import sys
 import time
 
 
-def _start():
+def _start() -> subprocess.Popen:
     proc = subprocess.Popen(
         [sys.executable, "-c", "from kahin.oracle import main; main()"],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -21,7 +21,7 @@ def _start():
     return proc
 
 
-def _call(proc, name, args=None):
+def _call(proc: subprocess.Popen, name: str, args: dict | None = None) -> str:
     if args is None:
         args = {}
     req = f'{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"{name}","arguments":{json.dumps(args)}}}}}'
@@ -34,7 +34,8 @@ def _call(proc, name, args=None):
 
 # === Phase 3: Pattern Tools ===
 
-def test_pattern_learn_and_query():
+
+def test_pattern_learn_and_query() -> None:
     proc = _start()
     _call(proc, "kahin_pattern_learn", {"domain": "Page", "command": "navigate", "context": "test"})
     text = _call(proc, "kahin_pattern_query", {"domain": "Page", "limit": 10})
@@ -45,7 +46,7 @@ def test_pattern_learn_and_query():
     proc.terminate()
 
 
-def test_pattern_suggest():
+def test_pattern_suggest() -> None:
     proc = _start()
     _call(proc, "kahin_pattern_learn", {"domain": "Page", "command": "navigate"})
     _call(proc, "kahin_pattern_learn", {"domain": "Page", "command": "reload"})
@@ -56,7 +57,7 @@ def test_pattern_suggest():
     proc.terminate()
 
 
-def test_pattern_forget():
+def test_pattern_forget() -> None:
     proc = _start()
     _call(proc, "kahin_pattern_learn", {"domain": "Page", "command": "navigate"})
     text = _call(proc, "kahin_pattern_forget", {"domain": "Page", "command": "navigate"})
@@ -67,7 +68,7 @@ def test_pattern_forget():
     proc.terminate()
 
 
-def test_pattern_stats():
+def test_pattern_stats() -> None:
     proc = _start()
     _call(proc, "kahin_pattern_learn", {"domain": "Page", "command": "navigate"})
     _call(proc, "kahin_pattern_learn", {"domain": "Runtime", "command": "evaluate"})
@@ -80,7 +81,8 @@ def test_pattern_stats():
 
 # === Edge Cases ===
 
-def test_validate_empty_domain():
+
+def test_validate_empty_domain() -> None:
     proc = _start()
     text = _call(proc, "kahin_validate_command", {"domain": "", "command": "", "parameters": {}})
     data = json.loads(text)
@@ -88,7 +90,7 @@ def test_validate_empty_domain():
     proc.terminate()
 
 
-def test_list_types_nonexistent():
+def test_list_types_nonexistent() -> None:
     proc = _start()
     text = _call(proc, "kahin_list_types", {"domain": "NonExistent"})
     data = json.loads(text)
@@ -96,7 +98,7 @@ def test_list_types_nonexistent():
     proc.terminate()
 
 
-def test_find_concept_no_match():
+def test_find_concept_no_match() -> None:
     proc = _start()
     text = _call(proc, "kahin_find_concept", {"query": "zzz_nonexistent_zzz"})
     data = json.loads(text)
@@ -104,28 +106,28 @@ def test_find_concept_no_match():
     proc.terminate()
 
 
-def test_get_domain_not_found():
+def test_get_domain_not_found() -> None:
     proc = _start()
     text = _call(proc, "kahin_get_domain", {"domain": "NoSuchDomain"})
     assert "not found" in text
     proc.terminate()
 
 
-def test_get_command_not_found():
+def test_get_command_not_found() -> None:
     proc = _start()
     text = _call(proc, "kahin_get_command", {"domain": "Page", "command": "nonexistent"})
     assert "not found" in text
     proc.terminate()
 
 
-def test_get_event_not_found():
+def test_get_event_not_found() -> None:
     proc = _start()
     text = _call(proc, "kahin_get_event", {"domain": "Page", "event": "nonexistent"})
     assert "not found" in text
     proc.terminate()
 
 
-def test_browser_start_stop_noop_twice():
+def test_browser_start_stop_noop_twice() -> None:
     proc = _start()
     text1 = _call(proc, "kahin_browser_stop", {})
     assert "No engine" in text1
@@ -134,14 +136,14 @@ def test_browser_start_stop_noop_twice():
     proc.terminate()
 
 
-def test_get_type_not_found():
+def test_get_type_not_found() -> None:
     proc = _start()
     text = _call(proc, "kahin_get_type", {"domain": "Page", "type_name": "NotAType"})
     assert "not found" in text
     proc.terminate()
 
 
-def test_error_decode_no_args():
+def test_error_decode_no_args() -> None:
     proc = _start()
     text = _call(proc, "kahin_error_decode", {})
     data = json.loads(text)

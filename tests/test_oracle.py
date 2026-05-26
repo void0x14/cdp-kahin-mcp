@@ -1,12 +1,12 @@
 """Integration tests for oracle.py — MCP Server."""
 
 import json
-import sys
 import subprocess
+import sys
 import time
 
 
-def _start_server():
+def _start_server() -> subprocess.Popen:
     proc = subprocess.Popen(
         [sys.executable, "-c", "from kahin.oracle import main; main()"],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -21,7 +21,7 @@ def _start_server():
     return proc
 
 
-def test_server_initialize_and_list_tools():
+def test_server_initialize_and_list_tools() -> None:
     proc = _start_server()
     proc.stdin.write('{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}\n')
     proc.stdin.flush()
@@ -48,7 +48,7 @@ def test_server_initialize_and_list_tools():
     proc.terminate()
 
 
-def test_kahin_list_domains():
+def test_kahin_list_domains() -> None:
     proc = _start_server()
     proc.stdin.write('{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"kahin_list_domains","arguments":{}}}\n')
     proc.stdin.flush()
@@ -60,7 +60,7 @@ def test_kahin_list_domains():
     proc.terminate()
 
 
-def test_kahin_get_command():
+def test_kahin_get_command() -> None:
     proc = _start_server()
     proc.stdin.write('{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"kahin_get_command","arguments":{"domain":"Page","command":"navigate"}}}\n')
     proc.stdin.flush()
@@ -71,7 +71,7 @@ def test_kahin_get_command():
     proc.terminate()
 
 
-def test_kahin_validate_command():
+def test_kahin_validate_command() -> None:
     proc = _start_server()
     proc.stdin.write('{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"kahin_validate_command","arguments":{"domain":"Page","command":"navigate","parameters":{"urll":"test"}}}}\n')
     proc.stdin.flush()
@@ -81,7 +81,7 @@ def test_kahin_validate_command():
     proc.terminate()
 
 
-def test_kahin_error_decode():
+def test_kahin_error_decode() -> None:
     proc = _start_server()
     proc.stdin.write('{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"kahin_error_decode","arguments":{"error_code":-32601,"error_message":"Method not found: Page.navigat"}}}\n')
     proc.stdin.flush()

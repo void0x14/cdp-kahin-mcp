@@ -13,7 +13,7 @@ def make_fate() -> FateDB:
     return FateDB(path=Path(path))
 
 
-def test_learn_and_query():
+def test_learn_and_query() -> None:
     f = make_fate()
     f.learn("Page", "navigate", {"url": "https://x.com"}, "login")
     f.learn("Runtime", "evaluate", {"expression": "1+1"}, "debug")
@@ -21,7 +21,7 @@ def test_learn_and_query():
     assert len(results) == 2
 
 
-def test_query_by_domain():
+def test_query_by_domain() -> None:
     f = make_fate()
     f.learn("Page", "navigate", {"url": "https://x.com"}, "login")
     f.learn("Page", "reload", {}, "refresh")
@@ -31,7 +31,7 @@ def test_query_by_domain():
     assert len(results) == 0
 
 
-def test_suggest():
+def test_suggest() -> None:
     f = make_fate()
     f.learn("Page", "navigate", {"url": "https://x.com"})
     f.learn("Page", "reload", {})
@@ -41,7 +41,7 @@ def test_suggest():
     assert "Page.reload" not in names
 
 
-def test_frequency():
+def test_frequency() -> None:
     f = make_fate()
     f.learn("Page", "navigate", {"url": "https://x.com"})
     f.learn("Page", "navigate", {"url": "https://y.com"})
