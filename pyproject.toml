@@ -1,0 +1,22 @@
+[project]
+name = "kahin"
+version = "0.1.0"
+description = "CDP bilgisine sahip, deterministik validation yapan MCP server"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "mcp>=1.0.0",
+    "orjson>=3.10",
+    "pydantic>=2.0",
+    "Levenshtein>=0.26",
+]
+
+[project.scripts]
+kahin = "kahin.oracle:main"
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+
+[tool.pyright]
+pythonVersion = "3.14"
