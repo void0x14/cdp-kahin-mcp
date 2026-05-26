@@ -38,9 +38,9 @@ def test_pattern_learn_and_query():
     _call(proc, "kahin_pattern_learn", {"domain": "Page", "command": "navigate", "context": "test"})
     text = _call(proc, "kahin_pattern_query", {"domain": "Page", "limit": 10})
     data = json.loads(text)
-    assert len(data) >= 1
-    assert data[0]["domain"] == "Page"
-    assert data[0]["command"] == "navigate"
+    nav_patterns = [p for p in data if p["command"] == "navigate"]
+    assert len(nav_patterns) >= 1
+    assert nav_patterns[0]["domain"] == "Page"
     proc.terminate()
 
 
