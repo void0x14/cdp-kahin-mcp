@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -79,7 +80,6 @@ class FateDB:
     def stats(self) -> dict[str, Any]:
         if not self._patterns:
             return {"total": 0, "domains": 0, "top": []}
-        from collections import Counter
         domain_counts = Counter(p["domain"] for p in self._patterns)
         top = sorted(self._patterns, key=lambda p: -p["frequency"])[:5]
         return {

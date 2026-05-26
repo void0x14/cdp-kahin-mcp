@@ -39,6 +39,7 @@ class BrowserEngine(ABC):
         self._ws: websockets.WebSocketClientProtocol | None = None
         self._msg_id = 0
         self._event_callbacks: list[Callable[[EventData], None]] = []
+        self._http: httpx.AsyncClient | None = None
 
     @abstractmethod
     async def start(self, headless: bool = True, port: int = 0, **kwargs: Any) -> EngineContext:
@@ -48,14 +49,15 @@ class BrowserEngine(ABC):
         """Wait for Chrome and return the first page target's WebSocket URL."""
         deadline = time.time() + timeout
         delay = 0.1
+        if self._http is None:
+            self._http = httpx.AsyncClient(timeout=2)
         while time.time() < deadline:
             try:
-                async with httpx.AsyncClient() as client:
-                    resp = await client.get(f"http://127.0.0.1:{port}/json", timeout=2)
-                    targets = resp.json()
-                    for t in targets:
-                        if t.get("type") == "page" and t.get("webSocketDebuggerUrl"):
-                            return t["webSocketDebuggerUrl"]
+                resp = await self._http.get(f"http://127.0.0.1:{port}/json")
+                targets = resp.json()
+                for t in targets:
+                    if t.get("type") == "page" and t.get("webSocketDebuggerUrl"):
+                        return t["webSocketDebuggerUrl"]
             except (httpx.RequestError, ValueError, KeyError):
                 pass
             await asyncio.sleep(delay)
@@ -66,6 +68,9 @@ class BrowserEngine(ABC):
         if self._ws:
             await self._ws.close()
             self._ws = None
+        if self._http:
+            await self._http.aclose()
+            self._http = None
         if self._process:
             self._process.terminate()
             try:

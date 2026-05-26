@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import logging
 import time
 from typing import Any
 from urllib.parse import urlparse
+
+logger = logging.getLogger(__name__)
 
 import orjson
 from mcp.server.fastmcp import FastMCP
@@ -35,8 +38,8 @@ async def _auto_learn(domain: str, command: str, params: dict[str, Any] | None =
             parsed = urlparse(url)
             ctx = parsed.hostname or "unknown"
         fate.learn(domain, command, params or {}, context=ctx)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("auto_learn failed for %s.%s: %s", domain, command, e)
 
 
 # === PHASE 1: GRIMOIRE — CDP Knowledge ===
@@ -187,8 +190,8 @@ async def kahin_browser_start(engine: str = "shadow", headless: bool = True, por
     try:
         await _current_engine.send_cdp("Network", "enable")
         await _current_engine.send_cdp("Console", "enable")
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("Failed to enable domains: %s", e)
 
     return orjson.dumps({"status": "started", "engine": engine, "port": actual_port}, option=orjson.OPT_INDENT_2).decode()
 

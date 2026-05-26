@@ -411,7 +411,7 @@ def _parse_params(params: list[dict]) -> list[ParamInfo]:
     return [
         ParamInfo(
             name=p["name"],
-            type=p.get("type", "any"),
+            type=p.get("type", "string"),
             optional=p.get("optional", False),
             description=p.get("description", ""),
         )
