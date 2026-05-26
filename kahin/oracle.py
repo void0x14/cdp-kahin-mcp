@@ -20,6 +20,7 @@ from kahin._state import (
     clear_state,
 )
 from kahin.residual_self.fate import FateDB
+from kahin.the_twins.chassis import EventData
 from kahin.the_source.architect import SchemaEngine
 from kahin.the_twins.mirage import Mirage
 from kahin.the_twins.shadow import Obscura
@@ -220,11 +221,11 @@ async def kahin_browser_start(engine: str = "shadow", headless: bool = True, por
     return orjson.dumps({"status": "started", "engine": engine, "port": actual_port}, option=orjson.OPT_INDENT_2).decode()
 
 
-def _on_cdp_event(evt) -> None:
+def _on_cdp_event(evt: EventData) -> None:
     _current_event_log.append({"event": evt.method, "params": evt.params, "session_id": evt.session_id})
 
 
-def _on_network_event(evt) -> None:
+def _on_network_event(evt: EventData) -> None:
     if evt.method.startswith("Network."):
         _network_requests.append({
             "event": evt.method.replace("Network.", ""),
@@ -233,7 +234,7 @@ def _on_network_event(evt) -> None:
         })
 
 
-def _on_console_event(evt) -> None:
+def _on_console_event(evt: EventData) -> None:
     if evt.method == "Console.messageAdded":
         _console_messages.append(evt.params.get("message", {}))
 

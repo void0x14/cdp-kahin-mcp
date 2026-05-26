@@ -46,6 +46,26 @@ class BrowserEngine(ABC):
     async def start(self, headless: bool = True, port: int = 0, **kwargs: Any) -> EngineContext:
         ...
 
+    async def _init_engine(
+        self,
+        args: list[str],
+        env: dict[str, str] | None = None,
+        *,
+        engine_name: str,
+        port: int,
+    ) -> EngineContext:
+        self._process = await asyncio.create_subprocess_exec(
+            *args,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+            env=env,
+        )
+        page_ws = await self._wait_for_page_ws(port)
+        self._ws = await websockets.asyncio.client.connect(page_ws, max_size=2**24)
+        await self.send_cdp("Page", "enable")
+        await self.send_cdp("Runtime", "enable")
+        return EngineContext(engine_name=engine_name, ws_url=page_ws)
+
     async def _wait_for_page_ws(self, port: int, timeout: float = 15.0) -> str:
         """Wait for Chrome and return the first page target's WebSocket URL."""
         deadline = time.time() + timeout

@@ -2,11 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any
-
-import websockets
-import websockets.asyncio.client
 
 from kahin._chrome import find_chrome
 from kahin.the_twins.chassis import BrowserEngine, EngineContext
@@ -16,7 +12,7 @@ class Mirage(BrowserEngine):
     """Stealth browser engine via Camoufox (Chromium stealth mode)."""
 
     async def start(self, headless: bool = True, port: int = 9242, **kwargs: Any) -> EngineContext:
-        stealth_args = [
+        args = [
             find_chrome(),
             f"--remote-debugging-port={port}",
             "--disable-gpu",
@@ -29,7 +25,7 @@ class Mirage(BrowserEngine):
             "--disable-component-update",
         ]
         if headless:
-            stealth_args.append("--headless=new")
+            args.append("--headless=new")
 
         env = kwargs.get("env", {})
         launch_env = {
@@ -39,20 +35,4 @@ class Mirage(BrowserEngine):
         if "DISPLAY" in env:
             launch_env["DISPLAY"] = env["DISPLAY"]
 
-        self._process = await asyncio.create_subprocess_exec(
-            *stealth_args,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-            env=launch_env,
-        )
-
-        page_ws = await self._wait_for_page_ws(port)
-        self._ws = await websockets.asyncio.client.connect(page_ws, max_size=2**24)
-
-        await self.send_cdp("Page", "enable")
-        await self.send_cdp("Runtime", "enable")
-
-        return EngineContext(
-            engine_name="mirage",
-            ws_url=page_ws,
-        )
+        return await self._init_engine(args, env=launch_env, engine_name="mirage", port=port)
