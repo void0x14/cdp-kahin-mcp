@@ -25,7 +25,7 @@ mcp = FastMCP(
 )
 
 
-async def _auto_learn(domain: str, command: str, params: dict = {}) -> None:
+async def _auto_learn(domain: str, command: str, params: dict[str, Any] | None = None) -> None:
     """Auto-record a CDP pattern to FateDB."""
     try:
         from urllib.parse import urlparse
@@ -280,9 +280,9 @@ async def kahin_evaluate(expression: str) -> str:
 
 
 @mcp.tool()
-async def kahin_execute_cdp(domain: str, command: str, parameters: dict = {}) -> str:
+async def kahin_execute_cdp(domain: str, command: str, parameters: dict[str, Any] | None = None) -> str:
     """Execute a raw CDP command directly (advanced)."""
-    return await _safe_cdp(domain, command, parameters)
+    return await _safe_cdp(domain, command, parameters or {})
 
 
 # === PHASE 2: TRAINMAN — Session Tools ===
