@@ -264,9 +264,12 @@ async def kahin_screenshot(full_page: bool = False) -> str:
     err = await _require_engine()
     if err:
         return err
-    data = await _current_engine.screenshot(full_page=full_page)
-    b64 = base64.b64encode(data).decode()
-    return orjson.dumps({"screenshot": b64, "format": "png"}, option=orjson.OPT_INDENT_2).decode()
+    try:
+        data = await _current_engine.screenshot(full_page=full_page)
+        b64 = base64.b64encode(data).decode()
+        return orjson.dumps({"screenshot": b64, "format": "png"}, option=orjson.OPT_INDENT_2).decode()
+    except Exception as e:
+        return f'{{"error": "Screenshot failed: {e}"}}'
 
 
 @mcp.tool()
