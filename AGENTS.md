@@ -13,6 +13,31 @@ kahin_get_command        → OpenCode: kahin_get_command
 kahin_browser_start      → OpenCode: kahin_browser_start
 ```
 
+## Guardian Sistemi — Otomatik Hata Yakalama ve Eğitim
+
+Kahin MCP, AI modelin CDP hatalarını **otomatik yakalar** ve **doğrusunu öğretir**.
+
+### Nasıl Çalışır?
+
+```
+AI: kahin_execute_cdp(domain="Page", command="navigat", parameters={"url": "..."})
+    ↓ (otomatik validation)
+MCP: {
+  "error": "Command validation failed",
+  "validation_errors": [{"param": "navigat", "message": "Unknown command 'Page.navigat'. Did you mean 'navigate'?"}],
+  "correction": ["Typo: Page.navigat → Page.navigate"]
+}
+    ↓ (AI hatasını anlar, düzeltir)
+AI: kahin_execute_cdp(domain="Page", command="navigate", parameters={"url": "..."})
+    → {"frameId": "...", "loaderId": "..."}
+```
+
+### AI Model İçin Kural
+Sakın tahmin etme. CDP komutunda en ufak şüphen varsa:
+1. `kahin_validate_command` ile kontrol et
+2. Hata alırsan `kahin_error_decode` ile çözümle
+3. Pattern varsa `kahin_pattern_query` ile öğren
+
 ## ZORUNLU Kullanım Kuralları
 
 ### Kural 1: CDP komutu göndermeden ÖNCE doğrula

@@ -153,7 +153,7 @@ async def get_dependencies(domain: str, command: str) -> str:
 
 
 async def _safe_cdp(domain: str, command: str, params: dict[str, Any] | None = None) -> str:
-    """Execute CDP with error handling. Returns JSON string or error message."""
+    """Execute CDP with error handling + auto-education. Returns JSON string."""
     err = await _require_engine()
     if err:
         return err
@@ -163,10 +163,17 @@ async def _safe_cdp(domain: str, command: str, params: dict[str, Any] | None = N
         return orjson.dumps(result, option=orjson.OPT_INDENT_2).decode()
     except RuntimeError as e:
         msg = str(e)
-        return orjson.dumps({"error": f"CDP error: {msg}"}).decode()
+        correction = _get_schema().error_decode(error_code=-32601, error_message=f"'{domain}.{command}' not found")
+        return orjson.dumps({
+            "error": f"CDP error: {msg}",
+            "hint": correction.get("common_causes", []) + correction.get("solutions", []),
+        }, option=orjson.OPT_INDENT_2).decode()
     except Exception as e:
         msg = str(e)
-        return orjson.dumps({"error": f"Connection lost: {msg}"}).decode()
+        return orjson.dumps({
+            "error": f"Connection lost: {msg}",
+            "hint": "Browser engine may have crashed. Use kahin_browser_stop then kahin_browser_start to restart.",
+        }).decode()
 
 async def _require_engine() -> str | None:
     """Ensure engine is running. Returns error message or None."""
@@ -319,8 +326,18 @@ async def evaluate(expression: str) -> str:
 
 @mcp.tool()
 async def execute_cdp(domain: str, command: str, parameters: dict[str, Any] | None = None) -> str:
-    """Execute a raw CDP command directly (advanced)."""
+    """Execute a raw CDP command directly (advanced). Auto-validates before sending."""
     async with _healer_ref.safe("kahin_execute_cdp", domain=domain, command=command):
+        validation = _get_schema().validate_command(domain, command, parameters or {})
+        if not validation.get("valid"):
+            errors = validation.get("errors", [])
+            correction = _get_schema().error_decode(error_code=-32601, error_message=f"'{domain}.{command}' not found")
+            result = {
+                "error": "Command validation failed",
+                "validation_errors": errors,
+                "correction": correction.get("common_causes", []) + correction.get("solutions", []),
+            }
+            return orjson.dumps(result, option=orjson.OPT_INDENT_2).decode()
         return await _safe_cdp(domain, command, parameters or {})
 
 
