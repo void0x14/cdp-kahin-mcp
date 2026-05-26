@@ -8,6 +8,7 @@ import json
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from collections.abc import Awaitable
 from typing import Any, Callable
 
 import httpx
@@ -38,7 +39,7 @@ class BrowserEngine(ABC):
         self._process: asyncio.subprocess.Process | None = None
         self._ws: websockets.WebSocketClientProtocol | None = None
         self._msg_id = 0
-        self._event_callbacks: list[Callable[[EventData], None]] = []
+        self._event_callbacks: list[Callable[[EventData], Awaitable[None] | None]] = []
         self._http: httpx.AsyncClient | None = None
 
     @abstractmethod
@@ -113,5 +114,5 @@ class BrowserEngine(ABC):
         result = await self.send_cdp("Page", "captureScreenshot", params)
         return base64.b64decode(result["data"])
 
-    async def on_event(self, callback: Callable[[EventData], None]) -> None:
+    async def on_event(self, callback: Callable[[EventData], Awaitable[None] | None]) -> None:
         self._event_callbacks.append(callback)

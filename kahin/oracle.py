@@ -148,8 +148,9 @@ async def _safe_cdp(domain: str, command: str, params: dict[str, Any] | None = N
     err = await _require_engine()
     if err:
         return err
+    engine = _current_engine
     try:
-        result = await _current_engine.send_cdp(domain, command, params or {})
+        result = await engine.send_cdp(domain, command, params or {})  # type: ignore[union-attr]
         return orjson.dumps(result, option=orjson.OPT_INDENT_2).decode()
     except RuntimeError as e:
         return orjson.dumps({"error": f"CDP error: {e}"}).decode()
@@ -284,8 +285,9 @@ async def kahin_screenshot(full_page: bool = False) -> str:
     err = await _require_engine()
     if err:
         return err
+    engine = _current_engine
     try:
-        data = await _current_engine.screenshot(full_page=full_page)
+        data = await engine.screenshot(full_page=full_page)  # type: ignore[union-attr]
         b64 = base64.b64encode(data).decode()
         return orjson.dumps({"screenshot": b64, "format": "png"}, option=orjson.OPT_INDENT_2).decode()
     except Exception as e:
