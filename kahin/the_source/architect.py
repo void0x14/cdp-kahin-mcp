@@ -344,15 +344,22 @@ class SchemaEngine:
             result["explanation"] = "See common causes below."
 
         if error_message and "." in error_message:
+            method = None
             parts = error_message.split("'")
             if len(parts) >= 3:
                 method = parts[1]
-                if "." in method:
-                    d, c = method.split(".", 1)
-                    alt = self._fuzzy_find_command(d, c)
-                    if alt:
-                        result["common_causes"].append(f"Typo in method name: '{method}' should be '{alt}'")
-                        result["solutions"].append(f"Use {alt} instead of {method}")
+            else:
+                m = re.search(r"\.\w+", error_message)
+                if m:
+                    raw = m.group()
+                    start = max(error_message.rfind(" ", 0, m.start()), error_message.rfind(":", 0, m.start()))
+                    method = error_message[start + 1 : m.end()].strip() if start >= 0 else raw.lstrip(".")
+            if method and "." in method:
+                d, c = method.split(".", 1)
+                alt = self._fuzzy_find_command(d, c)
+                if alt:
+                    result["common_causes"].append(f"Typo in method name: '{method}' should be '{alt}'")
+                    result["solutions"].append(f"Use {alt} instead of {method}")
 
         if "not found" in result["name"].lower():
             result["common_causes"].append("Method was removed in a newer protocol version")
