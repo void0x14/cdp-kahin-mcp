@@ -86,8 +86,6 @@ class SchemaEngine:
         self.commands: dict[str, CommandInfo] = {}
         self.events: dict[str, EventInfo] = {}
         self.types: dict[str, TypeInfo] = {}
-        self._command_list: list[str] = []
-        self._event_list: list[str] = []
         self._keyword_index: dict[str, list[dict[str, str]]] = {}
         self.protocol_version = ""
         self.load_time = 0.0
@@ -104,8 +102,6 @@ class SchemaEngine:
             self._index_domain(domain)
 
         self._build_keyword_index()
-        self._command_list = sorted(self.commands.keys())
-        self._event_list = sorted(self.events.keys())
         self.load_time = time.time() - t0
 
     def _index_domain(self, domain: dict) -> None:
