@@ -176,20 +176,22 @@ async def _require_engine() -> str | None:
 async def kahin_browser_start(engine: str = "shadow", headless: bool = True, port: int = 0) -> str:
     """Start a browser engine. Choose shadow (fast Chrome) or mirage (stealth). Ports 9222/9240 are RESERVED."""
     global _current_engine
-    if _current_engine is not None:
-        return "Engine already running. Stop it first with kahin_browser_stop."
 
     if port in (9222, 9240):
         return orjson.dumps({"error": f"Port {port} is RESERVED. Use a different port."}).decode()
 
+    if engine not in ("shadow", "mirage"):
+        return f"Unknown engine: {engine}. Use 'shadow' or 'mirage'."
+
+    if _current_engine is not None:
+        return "Engine already running. Stop it first with kahin_browser_stop."
+
     if engine == "shadow":
         _current_engine = Obscura()
         actual_port = port or 9241
-    elif engine == "mirage":
+    else:
         _current_engine = Mirage()
         actual_port = port or 9242
-    else:
-        return f"Unknown engine: {engine}. Use 'shadow' or 'mirage'."
 
     try:
         ctx = await asyncio.wait_for(
@@ -267,9 +269,9 @@ async def kahin_click(selector: str) -> str:
         if (!el) return {{"error": "not found"}};
         el.scrollIntoView({{block: "center"}});
         el.click();
-        return {{"clicked": true}};
+        return "clicked";
     }})()"""
-    return await _safe_cdp("Runtime", "evaluate", {"expression": expr})
+    return await _safe_cdp("Runtime", "evaluate", {"expression": expr, "returnByValue": True})
 
 
 @mcp.tool()
@@ -283,7 +285,7 @@ async def kahin_extract(selector: str | None = None, attribute: str | None = Non
         expr = f"document.documentElement.getAttribute({attribute!r}) || ''"
     else:
         expr = "document.body.innerText"
-    return await _safe_cdp("Runtime", "evaluate", {"expression": expr})
+    return await _safe_cdp("Runtime", "evaluate", {"expression": expr, "returnByValue": True})
 
 
 @mcp.tool()
@@ -303,9 +305,9 @@ async def kahin_screenshot(full_page: bool = False) -> str:
 
 @mcp.tool()
 async def kahin_evaluate(expression: str) -> str:
-    """Execute JavaScript in the browser context."""
+    """Execute JavaScript in the browser context. Returns JSON-serializable result."""
     await _auto_learn("Runtime", "evaluate", {"expression": expression[:50]})
-    return await _safe_cdp("Runtime", "evaluate", {"expression": expression})
+    return await _safe_cdp("Runtime", "evaluate", {"expression": expression, "returnByValue": True})
 
 
 @mcp.tool()
@@ -378,7 +380,7 @@ async def kahin_get_console() -> str:
     """Get accumulated console messages from the current session."""
     if _current_engine is None:
         return "No browser engine running."
-    return orjson.dumps(_console_messages, option=orjson.OPT_INDENT_2).decode()
+    return orjson.dumps(list(_console_messages), option=orjson.OPT_INDENT_2).decode()
 
 
 @mcp.tool()
