@@ -10,6 +10,8 @@ from typing import Any, Callable
 import websockets
 import websockets.asyncio.client
 
+from kahin._chrome import find_chrome
+from kahin._chrome import find_chrome
 from kahin.the_twins.chassis import BrowserEngine, EngineContext, EventData
 
 
@@ -24,7 +26,7 @@ class Mirage(BrowserEngine):
 
     async def start(self, headless: bool = True, port: int = 9242, **kwargs: Any) -> EngineContext:
         stealth_args = [
-            "chromium-browser",
+            find_chrome(),
             f"--remote-debugging-port={port}",
             "--disable-gpu",
             "--no-first-run",
@@ -52,33 +54,34 @@ class Mirage(BrowserEngine):
             env=launch_env,
         )
 
-        ws_url = await self._wait_for_debug_url(port)
-        self._ws = await websockets.asyncio.client.connect(ws_url, max_size=2**24)
+        # Connect to a PAGE target WS, not browser-level WS
+        page_ws = await self._wait_for_page_ws(port)
+        self._ws = await websockets.asyncio.client.connect(page_ws, max_size=2**24)
 
-        await self.send_cdp("Target", "setAutoAttach", {
-            "autoAttach": True, "waitForDebuggerOnStart": False, "flatten": True
-        })
-        await self.send_cdp("Runtime", "runIfWaitingForDebugger")
+        await self.send_cdp("Page", "enable")
+        await self.send_cdp("Runtime", "enable")
 
         return EngineContext(
             engine_name="mirage",
-            ws_url=ws_url,
+            ws_url=page_ws,
         )
 
-    async def _wait_for_debug_url(self, port: int, timeout: float = 15.0) -> str:
+    async def _wait_for_page_ws(self, port: int, timeout: float = 15.0) -> str:
+        """Wait for Chrome and return the first page target's WebSocket URL."""
         import httpx
         deadline = time.time() + timeout
         while time.time() < deadline:
             try:
                 async with httpx.AsyncClient() as client:
-                    resp = await client.get(f"http://127.0.0.1:{port}/json/version", timeout=3)
-                    data = resp.json()
-                    if "webSocketDebuggerUrl" in data:
-                        return data["webSocketDebuggerUrl"]
+                    resp = await client.get(f"http://127.0.0.1:{port}/json", timeout=2)
+                    targets = resp.json()
+                    for t in targets:
+                        if t.get("type") == "page" and t.get("webSocketDebuggerUrl"):
+                            return t["webSocketDebuggerUrl"]
             except (httpx.RequestError, ValueError, KeyError):
                 pass
             await asyncio.sleep(0.5)
-        raise RuntimeError(f"Mirage: browser not reachable on port {port} after {timeout}s")
+        raise RuntimeError(f"Mirage: no page target found on port {port} after {timeout}s")
 
     async def stop(self) -> None:
         if self._ws:

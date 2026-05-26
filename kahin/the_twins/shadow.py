@@ -10,6 +10,7 @@ from typing import Any, Callable
 import websockets
 import websockets.asyncio.client
 
+from kahin._chrome import find_chrome
 from kahin.the_twins.chassis import BrowserEngine, EngineContext, EventData
 
 
@@ -23,7 +24,7 @@ class Obscura(BrowserEngine):
         self._event_callbacks: list[Callable[[EventData], None]] = []
 
     async def start(self, headless: bool = True, port: int = 9241, **kwargs: Any) -> EngineContext:
-        chrome_path = kwargs.get("chrome_path", "chromium-browser")
+        chrome_path = kwargs.get("chrome_path") or find_chrome()
         args = [
             chrome_path,
             f"--remote-debugging-port={port}",
@@ -39,34 +40,34 @@ class Obscura(BrowserEngine):
             *args, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
         )
 
-        ws_url = await self._wait_for_debug_url(port)
-        self._ws = await websockets.asyncio.client.connect(ws_url, max_size=2**24)
+        # Wait for browser WS, then get a page-target WS (not the browser WS)
+        page_ws = await self._wait_for_page_ws(port)
+        self._ws = await websockets.asyncio.client.connect(page_ws, max_size=2**24)
 
-        # Enable events
-        await self.send_cdp("Target", "setAutoAttach", {
-            "autoAttach": True, "waitForDebuggerOnStart": False, "flatten": True
-        })
-        await self.send_cdp("Runtime", "runIfWaitingForDebugger")
+        await self.send_cdp("Page", "enable")
+        await self.send_cdp("Runtime", "enable")
 
         return EngineContext(
             engine_name="shadow",
-            ws_url=ws_url,
+            ws_url=page_ws,
         )
 
-    async def _wait_for_debug_url(self, port: int, timeout: float = 10.0) -> str:
+    async def _wait_for_page_ws(self, port: int, timeout: float = 15.0) -> str:
+        """Wait for a page target and return its WebSocket URL."""
         import httpx
         deadline = time.time() + timeout
         while time.time() < deadline:
             try:
                 async with httpx.AsyncClient() as client:
-                    resp = await client.get(f"http://127.0.0.1:{port}/json/version", timeout=2)
-                    data = resp.json()
-                    if "webSocketDebuggerUrl" in data:
-                        return data["webSocketDebuggerUrl"]
+                    resp = await client.get(f"http://127.0.0.1:{port}/json", timeout=2)
+                    targets = resp.json()
+                    for t in targets:
+                        if t.get("type") == "page" and t.get("webSocketDebuggerUrl"):
+                            return t["webSocketDebuggerUrl"]
             except (httpx.RequestError, ValueError, KeyError):
                 pass
             await asyncio.sleep(0.3)
-        raise RuntimeError(f"Obscura: Chrome not reachable on port {port} after {timeout}s")
+        raise RuntimeError(f"Obscura: no page target found on port {port} after {timeout}s")
 
     async def stop(self) -> None:
         if self._ws:
