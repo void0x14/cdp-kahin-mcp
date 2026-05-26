@@ -6,3 +6,7 @@ __pycache__/
 .fate_db.json
 
 .opencode/opencode-loop/
+
+# Error logs
+kahin/logs/
+logs/
