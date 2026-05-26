@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from kahin._chrome import find_chrome
@@ -28,11 +29,7 @@ class Mirage(BrowserEngine):
             args.append("--headless=new")
 
         env = kwargs.get("env", {})
-        launch_env = {
-            "PATH": env.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
-            "HOME": env.get("HOME", "/root"),
-        }
-        if "DISPLAY" in env:
-            launch_env["DISPLAY"] = env["DISPLAY"]
+        launch_env = dict(os.environ)
+        launch_env.update(env)
 
         return await self._init_engine(args, env=launch_env, engine_name="mirage", port=port)
