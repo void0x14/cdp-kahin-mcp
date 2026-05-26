@@ -94,7 +94,7 @@ class SchemaEngine:
         t0 = time.time()
         p = Path(path) if path else PROTOCOL_PATH
         raw = gzip.decompress(p.read_bytes())
-        data: dict = orjson.loads(raw)
+        data: dict[str, Any] = orjson.loads(raw)
         version = data.get("version", {})
         self.protocol_version = version.get("major", "unknown")
 
@@ -104,7 +104,7 @@ class SchemaEngine:
         self._build_keyword_index()
         self.load_time = time.time() - t0
 
-    def _index_domain(self, domain: dict) -> None:
+    def _index_domain(self, domain: dict[str, Any]) -> None:
         name = domain["domain"]
         desc = domain.get("description", "")
         cmds_list: list[CommandInfo] = []

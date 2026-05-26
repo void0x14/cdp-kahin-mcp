@@ -106,7 +106,7 @@ async def kahin_get_type(domain: str, type_name: str) -> str:
 # === PHASE 1: SERAPH — Validation ===
 
 @mcp.tool()
-async def kahin_validate_command(domain: str, command: str, parameters: dict) -> str:
+async def kahin_validate_command(domain: str, command: str, parameters: dict[str, Any]) -> str:
     """Validate a CDP command and parameters against the schema. Detects typos, missing required params."""
     return orjson.dumps(schema.validate_command(domain, command, parameters), option=orjson.OPT_INDENT_2).decode()
 
