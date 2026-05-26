@@ -7,8 +7,8 @@ import base64
 import json
 import time
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
 from collections.abc import Awaitable
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 import httpx

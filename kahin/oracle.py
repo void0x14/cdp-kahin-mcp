@@ -12,7 +12,13 @@ from urllib.parse import urlparse
 import orjson
 from mcp.server.fastmcp import FastMCP
 
-from kahin._state import _current_engine, _current_event_log, _network_requests, _console_messages, clear_state
+from kahin._state import (
+    _console_messages,
+    _current_engine,
+    _current_event_log,
+    _network_requests,
+    clear_state,
+)
 from kahin.residual_self.fate import FateDB
 from kahin.the_source.architect import SchemaEngine
 from kahin.the_twins.mirage import Mirage
