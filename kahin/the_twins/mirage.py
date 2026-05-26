@@ -11,7 +11,6 @@ import websockets
 import websockets.asyncio.client
 
 from kahin._chrome import find_chrome
-from kahin._chrome import find_chrome
 from kahin.the_twins.chassis import BrowserEngine, EngineContext, EventData
 
 
