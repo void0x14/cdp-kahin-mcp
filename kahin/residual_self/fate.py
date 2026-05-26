@@ -59,10 +59,31 @@ class FateDB:
         results.sort(key=lambda p: (-p["frequency"], -p["last_used"]))
         return results[:limit]
 
-    def suggest(self, partial: str) -> list[str]:
+    def suggest(self, partial: str, limit: int = 5) -> list[dict[str, Any]]:
         matches = []
         for p in self._patterns:
             full = f"{p['domain']}.{p['command']}"
             if partial.lower() in full.lower():
-                matches.append(full)
-        return sorted(set(matches))[:5]
+                matches.append({"full_name": full, "frequency": p["frequency"], "domain": p["domain"], "command": p["command"]})
+        matches.sort(key=lambda x: -x["frequency"])
+        return matches[:limit]
+
+    def forget(self, domain: str, command: str) -> bool:
+        for i, p in enumerate(self._patterns):
+            if p["domain"] == domain and p["command"] == command:
+                self._patterns.pop(i)
+                self._save()
+                return True
+        return False
+
+    def stats(self) -> dict[str, Any]:
+        if not self._patterns:
+            return {"total": 0, "domains": 0, "top": []}
+        from collections import Counter
+        domain_counts = Counter(p["domain"] for p in self._patterns)
+        top = sorted(self._patterns, key=lambda p: -p["frequency"])[:5]
+        return {
+            "total": len(self._patterns),
+            "domains": len(domain_counts),
+            "top": [f"{p['domain']}.{p['command']} (x{p['frequency']})" for p in top],
+        }

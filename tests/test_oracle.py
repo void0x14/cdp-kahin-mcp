@@ -38,7 +38,12 @@ def test_server_initialize_and_list_tools():
     assert "kahin_execute_cdp" in tool_names
     assert "kahin_list_sessions" in tool_names
     assert "kahin_event_history" in tool_names
-    assert len(tools) == 26
+    assert "kahin_pattern_learn" in tool_names
+    assert "kahin_pattern_query" in tool_names
+    assert "kahin_pattern_suggest" in tool_names
+    assert "kahin_pattern_forget" in tool_names
+    assert "kahin_pattern_stats" in tool_names
+    assert len(tools) == 31
     proc.terminate()
 
 

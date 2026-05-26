@@ -10,13 +10,29 @@ from kahin._state import _current_engine, _current_event_log
 from kahin.the_source.architect import SchemaEngine
 from kahin.the_twins.shadow import Obscura
 from kahin.the_twins.mirage import Mirage
+from kahin.residual_self.fate import FateDB
 
 schema = SchemaEngine()
+fate = FateDB()
 schema.load()
 mcp = FastMCP(
     name="kahin",
     instructions="I am the Oracle. Always validate CDP commands before sending. Ports 9222 and 9240 are RESERVED.",
 )
+
+
+async def _auto_learn(domain: str, command: str, params: dict = {}) -> None:
+    """Auto-record a CDP pattern to FateDB."""
+    try:
+        from urllib.parse import urlparse
+        url = (params or {}).get("url", "")
+        ctx = ""
+        if url:
+            parsed = urlparse(url)
+            ctx = parsed.hostname or "unknown"
+        fate.learn(domain, command, params or {}, context=ctx)
+    except Exception:
+        pass
 
 
 # === PHASE 1: GRIMOIRE — CDP Knowledge ===
@@ -150,6 +166,7 @@ async def kahin_navigate(url: str) -> str:
     if err:
         return err
     result = await _current_engine.send_cdp("Page", "navigate", {"url": url})
+    await _auto_learn("Page", "navigate", {"url": url})
     return orjson.dumps(result, option=orjson.OPT_INDENT_2).decode()
 
 
@@ -164,6 +181,7 @@ async def kahin_click(selector: str) -> str:
     if not node.get("nodeId"):
         return f'{{"error": "Element not found: {selector}"}}'
     result = await _current_engine.send_cdp("DOM", "click", {"nodeId": node["nodeId"]})
+    await _auto_learn("DOM", "click", {"selector": selector})
     return orjson.dumps({"status": "clicked", "selector": selector}, option=orjson.OPT_INDENT_2).decode()
 
 
@@ -203,6 +221,7 @@ async def kahin_evaluate(expression: str) -> str:
     if err:
         return err
     result = await _current_engine.send_cdp("Runtime", "evaluate", {"expression": expression})
+    await _auto_learn("Runtime", "evaluate", {"expression": expression[:50]})
     return orjson.dumps(result.get("result", {}), option=orjson.OPT_INDENT_2).decode()
 
 
@@ -304,6 +323,40 @@ async def kahin_iframe_tree() -> str:
         return err
     result = await _current_engine.send_cdp("Page", "getFrameTree")
     return orjson.dumps(result, option=orjson.OPT_INDENT_2).decode()
+
+
+# === PHASE 3: PROPHECY — Pattern Tools ===
+
+@mcp.tool()
+async def kahin_pattern_learn(domain: str, command: str, context: str = "") -> str:
+    """Teach the Oracle a CDP pattern for future suggestions."""
+    fate.learn(domain, command, {}, context=context)
+    return '{"status": "learned"}'
+
+
+@mcp.tool()
+async def kahin_pattern_query(domain: str | None = None, context: str = "", limit: int = 10) -> str:
+    """Query learned CDP patterns. Filter by domain or context."""
+    return orjson.dumps(fate.query(domain=domain, context=context, limit=limit), option=orjson.OPT_INDENT_2).decode()
+
+
+@mcp.tool()
+async def kahin_pattern_suggest(partial: str, limit: int = 5) -> str:
+    """Suggest CDP commands matching a partial name (autocomplete)."""
+    return orjson.dumps(fate.suggest(partial, limit=limit), option=orjson.OPT_INDENT_2).decode()
+
+
+@mcp.tool()
+async def kahin_pattern_forget(domain: str, command: str) -> str:
+    """Forget a specific CDP pattern."""
+    ok = fate.forget(domain, command)
+    return orjson.dumps({"status": "forgotten" if ok else "not found"}, option=orjson.OPT_INDENT_2).decode()
+
+
+@mcp.tool()
+async def kahin_pattern_stats() -> str:
+    """Get statistics about learned CDP patterns."""
+    return orjson.dumps(fate.stats(), option=orjson.OPT_INDENT_2).decode()
 
 
 def main() -> None:

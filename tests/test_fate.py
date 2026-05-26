@@ -33,8 +33,9 @@ def test_suggest():
     f.learn("Page", "navigate", {"url": "https://x.com"})
     f.learn("Page", "reload", {})
     suggestions = f.suggest("navig")
-    assert "Page.navigate" in suggestions
-    assert "Page.reload" not in suggestions
+    names = [s["full_name"] for s in suggestions]
+    assert "Page.navigate" in names
+    assert "Page.reload" not in names
 
 
 def test_frequency():
