@@ -6,6 +6,7 @@ import asyncio
 import base64
 import time
 from typing import Any
+from urllib.parse import urlparse
 
 import orjson
 from mcp.server.fastmcp import FastMCP
@@ -28,7 +29,6 @@ mcp = FastMCP(
 async def _auto_learn(domain: str, command: str, params: dict[str, Any] | None = None) -> None:
     """Auto-record a CDP pattern to FateDB."""
     try:
-        from urllib.parse import urlparse
         url = (params or {}).get("url", "")
         ctx = ""
         if url:

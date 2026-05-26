@@ -6,6 +6,8 @@ import asyncio
 import json
 import time
 from typing import Any, Callable
+import base64
+import httpx
 
 import websockets
 import websockets.asyncio.client
@@ -54,7 +56,6 @@ class Obscura(BrowserEngine):
 
     async def _wait_for_page_ws(self, port: int, timeout: float = 15.0) -> str:
         """Wait for a page target and return its WebSocket URL."""
-        import httpx
         deadline = time.time() + timeout
         while time.time() < deadline:
             try:
@@ -114,7 +115,6 @@ class Obscura(BrowserEngine):
                 "width": w, "height": h, "deviceScaleFactor": 1, "mobile": False
             })
         result = await self.send_cdp("Page", "captureScreenshot", params)
-        import base64
         return base64.b64decode(result["data"])
 
     async def on_event(self, callback: Callable[[EventData], None]) -> None:
