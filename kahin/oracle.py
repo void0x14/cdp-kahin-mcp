@@ -2,20 +2,24 @@
 
 from __future__ import annotations
 
+import base64
 import orjson
 from mcp.server.fastmcp import FastMCP
 
+from kahin._state import _current_engine, _current_event_log
 from kahin.the_source.architect import SchemaEngine
+from kahin.the_twins.shadow import Obscura
+from kahin.the_twins.mirage import Mirage
 
 schema = SchemaEngine()
 schema.load()
 mcp = FastMCP(
     name="kahin",
-    instructions="I am the Oracle. I see the Source (CDP schema) and judge your commands. Always validate commands before sending. Decode errors when they occur.",
+    instructions="I am the Oracle. Always validate CDP commands before sending. Ports 9222 and 9240 are RESERVED.",
 )
 
 
-# === GRIMOIRE — CDP Knowledge ===
+# === PHASE 1: GRIMOIRE — CDP Knowledge ===
 
 @mcp.tool()
 async def kahin_list_domains() -> str:
@@ -53,8 +57,7 @@ async def kahin_get_event(domain: str, event: str) -> str:
 @mcp.tool()
 async def kahin_find_concept(query: str, max_results: int = 10) -> str:
     """Semantic search across all CDP domains, commands, and events"""
-    result = schema.find_concept(query, max_results)
-    return orjson.dumps(result, option=orjson.OPT_INDENT_2).decode()
+    return orjson.dumps(schema.find_concept(query, max_results), option=orjson.OPT_INDENT_2).decode()
 
 
 @mcp.tool()
@@ -80,26 +83,226 @@ async def kahin_get_type(domain: str, type_name: str) -> str:
     return orjson.dumps(result, option=orjson.OPT_INDENT_2).decode()
 
 
-# === SERAPH — Validation ===
+# === PHASE 1: SERAPH — Validation ===
 
 @mcp.tool()
 async def kahin_validate_command(domain: str, command: str, parameters: dict) -> str:
     """Validate a CDP command and parameters against the schema. Detects typos, missing required params."""
-    result = schema.validate_command(domain, command, parameters)
-    return orjson.dumps(result, option=orjson.OPT_INDENT_2).decode()
+    return orjson.dumps(schema.validate_command(domain, command, parameters), option=orjson.OPT_INDENT_2).decode()
 
 
 @mcp.tool()
 async def kahin_error_decode(error_code: int | None = None, error_message: str = "") -> str:
     """Decode a CDP error code and message to get explanation, common causes, and solutions"""
-    result = schema.error_decode(error_code=error_code, error_message=error_message)
-    return orjson.dumps(result, option=orjson.OPT_INDENT_2).decode()
+    return orjson.dumps(schema.error_decode(error_code=error_code, error_message=error_message), option=orjson.OPT_INDENT_2).decode()
 
 
 @mcp.tool()
 async def kahin_get_dependencies(domain: str, command: str) -> str:
     """Get prerequisites and required events for a CDP command"""
-    result = schema.get_dependencies(domain, command)
+    return orjson.dumps(schema.get_dependencies(domain, command), option=orjson.OPT_INDENT_2).decode()
+
+
+# === PHASE 2: PILOT — Browser Control ===
+
+async def _require_engine() -> str | None:
+    """Ensure engine is running. Returns error message or None."""
+    global _current_engine
+    if _current_engine is None:
+        return "No browser engine running. Use kahin_browser_start first."
+    return None
+
+
+@mcp.tool()
+async def kahin_browser_start(engine: str = "shadow", headless: bool = True, port: int = 0) -> str:
+    """Start a browser engine. Choose shadow (fast Chrome) or mirage (stealth). Ports 9222/9240 are RESERVED."""
+    global _current_engine
+    if _current_engine is not None:
+        return "Engine already running. Stop it first with kahin_browser_stop."
+
+    if engine == "shadow":
+        _current_engine = Obscura()
+        ctx = await _current_engine.start(headless=headless, port=port or 9241)
+    elif engine == "mirage":
+        _current_engine = Mirage()
+        ctx = await _current_engine.start(headless=headless, port=port or 9242)
+    else:
+        return f"Unknown engine: {engine}. Use 'shadow' or 'mirage'."
+    return orjson.dumps({"status": "started", "engine": engine, "ws_url": ctx.ws_url}, option=orjson.OPT_INDENT_2).decode()
+
+
+@mcp.tool()
+async def kahin_browser_stop() -> str:
+    """Stop the active browser engine."""
+    global _current_engine, _current_event_log
+    if _current_engine is None:
+        return "No engine running."
+    await _current_engine.stop()
+    _current_engine = None
+    _current_event_log = []
+    return '{"status": "stopped"}'
+
+
+@mcp.tool()
+async def kahin_navigate(url: str) -> str:
+    """Navigate the current page to a URL."""
+    err = await _require_engine()
+    if err:
+        return err
+    result = await _current_engine.send_cdp("Page", "navigate", {"url": url})
+    return orjson.dumps(result, option=orjson.OPT_INDENT_2).decode()
+
+
+@mcp.tool()
+async def kahin_click(selector: str) -> str:
+    """Click an element by CSS selector."""
+    err = await _require_engine()
+    if err:
+        return err
+    doc = await _current_engine.send_cdp("DOM", "getDocument")
+    node = await _current_engine.send_cdp("DOM", "querySelector", {"nodeId": doc["root"]["nodeId"], "selector": selector})
+    if not node.get("nodeId"):
+        return f'{{"error": "Element not found: {selector}"}}'
+    result = await _current_engine.send_cdp("DOM", "click", {"nodeId": node["nodeId"]})
+    return orjson.dumps({"status": "clicked", "selector": selector}, option=orjson.OPT_INDENT_2).decode()
+
+
+@mcp.tool()
+async def kahin_extract(selector: str | None = None, attribute: str | None = None) -> str:
+    """Extract text content or attribute from page/element."""
+    err = await _require_engine()
+    if err:
+        return err
+    if selector and attribute:
+        expr = f"document.querySelector({selector!r})?.getAttribute({attribute!r}) || ''"
+    elif selector:
+        expr = f"document.querySelector({selector!r})?.textContent?.trim() || ''"
+    elif attribute:
+        expr = f"document.documentElement.getAttribute({attribute!r}) || ''"
+    else:
+        expr = "document.body.innerText"
+    result = await _current_engine.send_cdp("Runtime", "evaluate", {"expression": expr})
+    return orjson.dumps(result.get("result", {}), option=orjson.OPT_INDENT_2).decode()
+
+
+@mcp.tool()
+async def kahin_screenshot(full_page: bool = False) -> str:
+    """Capture a screenshot. Returns base64 PNG."""
+    err = await _require_engine()
+    if err:
+        return err
+    data = await _current_engine.screenshot(full_page=full_page)
+    b64 = base64.b64encode(data).decode()
+    return orjson.dumps({"screenshot": b64, "format": "png"}, option=orjson.OPT_INDENT_2).decode()
+
+
+@mcp.tool()
+async def kahin_evaluate(expression: str) -> str:
+    """Execute JavaScript in the browser context."""
+    err = await _require_engine()
+    if err:
+        return err
+    result = await _current_engine.send_cdp("Runtime", "evaluate", {"expression": expression})
+    return orjson.dumps(result.get("result", {}), option=orjson.OPT_INDENT_2).decode()
+
+
+@mcp.tool()
+async def kahin_execute_cdp(domain: str, command: str, parameters: dict = {}) -> str:
+    """Execute a raw CDP command directly (advanced)."""
+    err = await _require_engine()
+    if err:
+        return err
+    result = await _current_engine.send_cdp(domain, command, parameters)
+    return orjson.dumps(result, option=orjson.OPT_INDENT_2).decode()
+
+
+# === PHASE 2: TRAINMAN — Session Tools ===
+
+@mcp.tool()
+async def kahin_list_sessions() -> str:
+    """List all CDP targets/sessions."""
+    err = await _require_engine()
+    if err:
+        return err
+    result = await _current_engine.send_cdp("Target", "getTargets")
+    return orjson.dumps(result.get("targetInfos", []), option=orjson.OPT_INDENT_2).decode()
+
+
+@mcp.tool()
+async def kahin_get_session(session_id: str | None = None) -> str:
+    """Get session/target info. Omitting session_id returns the default page target."""
+    err = await _require_engine()
+    if err:
+        return err
+    targets = await _current_engine.send_cdp("Target", "getTargets")
+    infos = targets.get("targetInfos", [])
+    if session_id:
+        info = next((t for t in infos if t["targetId"] == session_id), None)
+    else:
+        info = next((t for t in infos if t["type"] == "page"), infos[0] if infos else None)
+    return orjson.dumps(info or {"error": "No session found"}, option=orjson.OPT_INDENT_2).decode()
+
+
+@mcp.tool()
+async def kahin_create_session(url: str = "about:blank") -> str:
+    """Create a new page/target."""
+    err = await _require_engine()
+    if err:
+        return err
+    result = await _current_engine.send_cdp("Target", "createTarget", {"url": url})
+    return orjson.dumps(result, option=orjson.OPT_INDENT_2).decode()
+
+
+@mcp.tool()
+async def kahin_kill_session(session_id: str) -> str:
+    """Close a target by targetId."""
+    err = await _require_engine()
+    if err:
+        return err
+    await _current_engine.send_cdp("Target", "closeTarget", {"targetId": session_id})
+    return '{"status": "closed"}'
+
+
+# === PHASE 2: DEJA_VU — Debug/Network ===
+
+@mcp.tool()
+async def kahin_event_history(event_type: str | None = None) -> str:
+    """View accumulated CDP event history. Optionally filter by event type."""
+    global _current_event_log
+    if event_type:
+        filtered = [e for e in _current_event_log if e["event"] == event_type]
+    else:
+        filtered = _current_event_log[-50:]
+    return orjson.dumps(filtered, option=orjson.OPT_INDENT_2).decode()
+
+
+@mcp.tool()
+async def kahin_list_network_requests(limit: int = 20) -> str:
+    """List network requests captured from the current session."""
+    err = await _require_engine()
+    if err:
+        return err
+    result = await _current_engine.send_cdp("Network", "getResponseBodyForInterception")
+    return orjson.dumps(result, option=orjson.OPT_INDENT_2).decode()
+
+
+@mcp.tool()
+async def kahin_get_console() -> str:
+    """Get accumulated console messages from the current session."""
+    err = await _require_engine()
+    if err:
+        return err
+    result = await _current_engine.send_cdp("Runtime", "getConsoleMessages")
+    return orjson.dumps(result, option=orjson.OPT_INDENT_2).decode()
+
+
+@mcp.tool()
+async def kahin_iframe_tree() -> str:
+    """Get the iframe/frame tree of the current page."""
+    err = await _require_engine()
+    if err:
+        return err
+    result = await _current_engine.send_cdp("Page", "getFrameTree")
     return orjson.dumps(result, option=orjson.OPT_INDENT_2).decode()
 
 
