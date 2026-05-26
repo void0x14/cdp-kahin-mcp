@@ -86,7 +86,7 @@ class SchemaEngine:
         self.commands: dict[str, CommandInfo] = {}
         self.events: dict[str, EventInfo] = {}
         self.types: dict[str, TypeInfo] = {}
-        self._keyword_index: dict[str, list[dict[str, str]]] = {}
+        self._keyword_index: dict[str, set[str]] = {}
         self.protocol_version = ""
         self.load_time = 0.0
 
@@ -157,24 +157,16 @@ class SchemaEngine:
         self.domains[name] = di
 
     def _build_keyword_index(self) -> None:
+        index: dict[str, set[str]] = {}
         for full_name, cmd in self.commands.items():
-            text = f"{cmd.domain} {cmd.name} {cmd.description}".lower()
-            words = set(re.findall(r"[a-z]+", text))
-            for w in words:
-                if len(w) <= 2:
-                    continue
-                self._keyword_index.setdefault(w, []).append(
-                    {"type": "command", "name": full_name, "description": cmd.description}
-                )
+            for w in set(re.findall(r"[a-z]+", f"{cmd.domain} {cmd.name} {cmd.description}".lower())):
+                if len(w) > 2:
+                    index.setdefault(w, set()).add(full_name)
         for full_name, evt in self.events.items():
-            text = f"{evt.domain} {evt.name} {evt.description}".lower()
-            words = set(re.findall(r"[a-z]+", text))
-            for w in words:
-                if len(w) <= 2:
-                    continue
-                self._keyword_index.setdefault(w, []).append(
-                    {"type": "event", "name": full_name, "description": evt.description}
-                )
+            for w in set(re.findall(r"[a-z]+", f"{evt.domain} {evt.name} {evt.description}".lower())):
+                if len(w) > 2:
+                    index.setdefault(w, set()).add(full_name)
+        self._keyword_index = index
 
     # === Public Query API ===
 
@@ -251,30 +243,37 @@ class SchemaEngine:
         if not words:
             return []
 
-        direct_matches = self._keyword_index.get(q, [])
-        scored: dict[str, tuple[int, dict]] = {}
+        direct = self._keyword_index.get(q, set())
+        scored: dict[str, tuple[int, str, str]] = {}
 
-        for ref in direct_matches:
-            scored[ref["name"]] = (100, ref)
+        for name in direct:
+            entry = self.commands.get(name) or self.events.get(name)
+            if entry:
+                typ = "command" if name in self.commands else "event"
+                scored[name] = (100, typ, entry.description)
 
         for w in words:
-            for key, refs in self._keyword_index.items():
-                if Levenshtein.ratio(w, key) >= 0.8:
-                    for ref in refs:
-                        curr_score = scored.get(ref["name"], (0, ref))[0]
-                        new_score = int(Levenshtein.ratio(w, key) * 50)
-                        if new_score > curr_score:
-                            scored[ref["name"]] = (new_score, ref)
+            for key, names in self._keyword_index.items():
+                ratio = Levenshtein.ratio(w, key)
+                if ratio >= 0.8:
+                    for name in names:
+                        entry = self.commands.get(name) or self.events.get(name)
+                        if entry:
+                            typ = "command" if name in self.commands else "event"
+                            new_score = int(ratio * 50)
+                            curr = scored.get(name)
+                            if not curr or new_score > curr[0]:
+                                scored[name] = (new_score, typ, entry.description)
 
-        sorted_refs = sorted(scored.values(), key=lambda x: -x[0])[:max_results]
+        sorted_items = sorted(scored.items(), key=lambda x: -x[1][0])[:max_results]
         return [
             {
-                "domain": r[1]["name"].split(".")[0],
-                "type": r[1]["type"],
-                "name": r[1]["name"],
-                "description": r[1]["description"],
+                "domain": name.split(".")[0],
+                "type": typ,
+                "name": name,
+                "description": desc,
             }
-            for r in sorted_refs
+            for name, (_, typ, desc) in sorted_items
         ]
 
     def validate_command(
