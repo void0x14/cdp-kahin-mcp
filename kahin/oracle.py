@@ -296,14 +296,14 @@ async def kahin_list_sessions() -> str:
 @mcp.tool()
 async def kahin_get_session(session_id: str | None = None) -> str:
     """Get session/target info. Omitting session_id returns the default page target."""
-    err = await _require_engine()
-    if err:
-        return err
+    raw = await _safe_cdp("Target", "getTargets")
     try:
-        targets = await _current_engine.send_cdp("Target", "getTargets")
-    except Exception as e:
-        return f'{{"error": "Failed to get sessions: {e}"}}'
-    infos = targets.get("targetInfos", [])
+        result = orjson.loads(raw)
+    except Exception:
+        return raw
+    if "error" in result:
+        return raw
+    infos = result.get("targetInfos", [])
     if session_id:
         info = next((t for t in infos if t["targetId"] == session_id), None)
     else:
