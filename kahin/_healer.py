@@ -212,6 +212,7 @@ class Healer:
     def _determine_recovery(self, error_code: str) -> str:
         return RECOVERY_MAP.get(error_code, RecoveryAction.NONE)
 
+    @asynccontextmanager
     async def safe(
         self, tool: str, **context: Any
     ) -> AsyncGenerator[dict[str, Any], None]:
