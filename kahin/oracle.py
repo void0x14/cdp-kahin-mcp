@@ -20,13 +20,30 @@ from kahin.the_twins.shadow import Obscura
 from kahin.the_twins.mirage import Mirage
 from kahin.residual_self.fate import FateDB
 
-schema = SchemaEngine()
-fate = FateDB()
-schema.load()
 mcp = FastMCP(
     name="kahin",
     instructions="I am the Oracle. Always validate CDP commands before sending. Ports 9222 and 9240 are RESERVED.",
 )
+
+
+_schema: SchemaEngine | None = None
+_fate: FateDB | None = None
+
+
+def _get_schema() -> SchemaEngine:
+    global _schema
+    if _schema is None:
+        s = SchemaEngine()
+        s.load()
+        _schema = s
+    return _schema
+
+
+def _get_fate() -> FateDB:
+    global _fate
+    if _fate is None:
+        _fate = FateDB()
+    return _fate
 
 
 async def _auto_learn(domain: str, command: str, params: dict[str, Any] | None = None) -> None:
@@ -37,7 +54,7 @@ async def _auto_learn(domain: str, command: str, params: dict[str, Any] | None =
         if url:
             parsed = urlparse(url)
             ctx = parsed.hostname or "unknown"
-        fate.learn(domain, command, params or {}, context=ctx)
+        _get_fate().learn(domain, command, params or {}, context=ctx)
     except Exception as e:
         logger.warning("auto_learn failed for %s.%s: %s", domain, command, e)
 
@@ -47,13 +64,13 @@ async def _auto_learn(domain: str, command: str, params: dict[str, Any] | None =
 @mcp.tool()
 async def kahin_list_domains() -> str:
     """List all CDP domains (Page, Network, Runtime, etc.)"""
-    return orjson.dumps(schema.list_domains(), option=orjson.OPT_INDENT_2).decode()
+    return orjson.dumps(_get_schema().list_domains(), option=orjson.OPT_INDENT_2).decode()
 
 
 @mcp.tool()
 async def kahin_get_domain(domain: str) -> str:
     """Get detailed info about a CDP domain: commands, events, types"""
-    result = schema.get_domain(domain)
+    result = _get_schema().get_domain(domain)
     if result is None:
         return f"Domain '{domain}' not found"
     return orjson.dumps(result, option=orjson.OPT_INDENT_2).decode()
@@ -62,7 +79,7 @@ async def kahin_get_domain(domain: str) -> str:
 @mcp.tool()
 async def kahin_get_command(domain: str, command: str) -> str:
     """Get full details of a CDP command: parameters, returns, deprecation status"""
-    result = schema.get_command(domain, command)
+    result = _get_schema().get_command(domain, command)
     if result is None:
         return f"Command '{domain}.{command}' not found"
     return orjson.dumps(result, option=orjson.OPT_INDENT_2).decode()
@@ -71,7 +88,7 @@ async def kahin_get_command(domain: str, command: str) -> str:
 @mcp.tool()
 async def kahin_get_event(domain: str, event: str) -> str:
     """Get details of a CDP event: parameters and deprecation status"""
-    result = schema.get_event(domain, event)
+    result = _get_schema().get_event(domain, event)
     if result is None:
         return f"Event '{domain}.{event}' not found"
     return orjson.dumps(result, option=orjson.OPT_INDENT_2).decode()
@@ -80,13 +97,13 @@ async def kahin_get_event(domain: str, event: str) -> str:
 @mcp.tool()
 async def kahin_find_concept(query: str, max_results: int = 10) -> str:
     """Semantic search across all CDP domains, commands, and events"""
-    return orjson.dumps(schema.find_concept(query, max_results), option=orjson.OPT_INDENT_2).decode()
+    return orjson.dumps(_get_schema().find_concept(query, max_results), option=orjson.OPT_INDENT_2).decode()
 
 
 @mcp.tool()
 async def kahin_list_types(domain: str) -> str:
     """List all CDP types in a domain"""
-    domain_types = [t for t in schema.types.values() if t.domain == domain]
+    domain_types = [t for t in _get_schema().types.values() if t.domain == domain]
     result = [{"name": t.name, "description": t.description, "type": t.type} for t in domain_types]
     return orjson.dumps(result, option=orjson.OPT_INDENT_2).decode()
 
@@ -95,7 +112,7 @@ async def kahin_list_types(domain: str) -> str:
 async def kahin_get_type(domain: str, type_name: str) -> str:
     """Get detailed info about a CDP type: properties, enum values"""
     full = f"{domain}.{type_name}"
-    t = schema.types.get(full)
+    t = _get_schema().types.get(full)
     if t is None:
         return f"Type '{full}' not found"
     result = {
@@ -110,20 +127,20 @@ async def kahin_get_type(domain: str, type_name: str) -> str:
 
 @mcp.tool()
 async def kahin_validate_command(domain: str, command: str, parameters: dict[str, Any]) -> str:
-    """Validate a CDP command and parameters against the schema. Detects typos, missing required params."""
-    return orjson.dumps(schema.validate_command(domain, command, parameters), option=orjson.OPT_INDENT_2).decode()
+    """Validate a CDP command and parameters against the _get_schema(). Detects typos, missing required params."""
+    return orjson.dumps(_get_schema().validate_command(domain, command, parameters), option=orjson.OPT_INDENT_2).decode()
 
 
 @mcp.tool()
 async def kahin_error_decode(error_code: int | None = None, error_message: str | None = None) -> str:
     """Decode a CDP error code and message to get explanation, common causes, and solutions"""
-    return orjson.dumps(schema.error_decode(error_code=error_code, error_message=error_message), option=orjson.OPT_INDENT_2).decode()
+    return orjson.dumps(_get_schema().error_decode(error_code=error_code, error_message=error_message), option=orjson.OPT_INDENT_2).decode()
 
 
 @mcp.tool()
 async def kahin_get_dependencies(domain: str, command: str) -> str:
     """Get prerequisites and required events for a CDP command"""
-    return orjson.dumps(schema.get_dependencies(domain, command), option=orjson.OPT_INDENT_2).decode()
+    return orjson.dumps(_get_schema().get_dependencies(domain, command), option=orjson.OPT_INDENT_2).decode()
 
 
 async def _safe_cdp(domain: str, command: str, params: dict[str, Any] | None = None) -> str:
@@ -366,33 +383,33 @@ async def kahin_iframe_tree() -> str:
 @mcp.tool()
 async def kahin_pattern_learn(domain: str, command: str, context: str = "") -> str:
     """Teach the Oracle a CDP pattern for future suggestions."""
-    fate.learn(domain, command, {}, context=context)
+    _get_fate().learn(domain, command, {}, context=context)
     return '{"status": "learned"}'
 
 
 @mcp.tool()
 async def kahin_pattern_query(domain: str | None = None, context: str = "", limit: int = 10) -> str:
     """Query learned CDP patterns. Filter by domain or context."""
-    return orjson.dumps(fate.query(domain=domain, context=context, limit=limit), option=orjson.OPT_INDENT_2).decode()
+    return orjson.dumps(_get_fate().query(domain=domain, context=context, limit=limit), option=orjson.OPT_INDENT_2).decode()
 
 
 @mcp.tool()
 async def kahin_pattern_suggest(partial: str, limit: int = 5) -> str:
     """Suggest CDP commands matching a partial name (autocomplete)."""
-    return orjson.dumps(fate.suggest(partial, limit=limit), option=orjson.OPT_INDENT_2).decode()
+    return orjson.dumps(_get_fate().suggest(partial, limit=limit), option=orjson.OPT_INDENT_2).decode()
 
 
 @mcp.tool()
 async def kahin_pattern_forget(domain: str, command: str) -> str:
     """Forget a specific CDP pattern."""
-    ok = fate.forget(domain, command)
+    ok = _get_fate().forget(domain, command)
     return orjson.dumps({"status": "forgotten" if ok else "not found"}, option=orjson.OPT_INDENT_2).decode()
 
 
 @mcp.tool()
 async def kahin_pattern_stats() -> str:
     """Get statistics about learned CDP patterns."""
-    return orjson.dumps(fate.stats(), option=orjson.OPT_INDENT_2).decode()
+    return orjson.dumps(_get_fate().stats(), option=orjson.OPT_INDENT_2).decode()
 
 
 def main() -> None:
