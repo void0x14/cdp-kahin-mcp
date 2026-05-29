@@ -129,14 +129,12 @@ oracle.py               → MCP server (32 tool, giriş kapısı)
 
 ## 🗺️ Yol Haritası
 
-### ⚡ Acil (1-2 hafta)
-
+- [ ] **Juggler protokolü** için de uçtan uca dökümantasyon,kullanım ve pratik örnekleri desteği eklenmesi
+- [ ] **SKILLS** destekleri ve konfigre edilebilir kişsiel hazır skills oluşturma özelliği
 - [ ] **Tek tık kurulum** — `uvx kahin` ile direkt çalıştır
 - [ ] **Zero-dependency** hedefi (Go/Rust portu)
 - [ ] **LSP modu** — kod içinde hata yakalama, AI'a yanlışını yüzüne vurma
 - [ ] **Tool sayısı 50+** — eksik CDP domain tool'ları
-
-### 🎯 Kısa vade (1 ay)
 
 - [ ] **Gerçek zamanlı izleme** — AI'ın Kahin'i nasıl kullandığını canlı gör
 - [ ] **Web dashboard** — tool çağrıları, hata oranları, trendler
@@ -144,8 +142,6 @@ oracle.py               → MCP server (32 tool, giriş kapısı)
 - [ ] **CLI aracı** — `kahin` komutu ile hızlı sorgulama
 - [ ] **Pasif tarama** — arka planda CDP event'lerini izle, değişiklik olunca bildir
 - [ ] **Dokümantasyon sitesi** — kapsamlı kullanım kılavuzu
-
-### 🚀 Uzun vade (3+ ay)
 
 - [ ] **CDP derleyici** — yeni Chrome sürümlerini otomatik tanıyıp şemayı güncelle
 - [ ] **Plugin sistemi** — herkes kendi CDP tool'unu yazıp ekleyebilir
