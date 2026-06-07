@@ -1,8 +1,7 @@
 {
   "mcpServers": {
     "kahin": {
-      "type": "stdio",
-      "command": "/home/void0x14/Documents/mcp-projelerim/cdp-kahin-mcp/.venv/bin/python",
+      "command": ".venv/bin/python",
       "args": ["-m", "kahin.oracle"]
     }
   }

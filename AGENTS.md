@@ -157,6 +157,23 @@ kahin_pattern_suggest(partial="navig")
 → kahin_pattern_query(context="doggystyle")      -> öğrenilenler
 ```
 
+## Tool Listesi (Inspector Dogrulamali)
+
+32 tool MCP Inspector ile dogrulanmistir:
+```
+kahin_list_domains          kahin_get_domain            kahin_get_command
+kahin_get_event             kahin_find_concept          kahin_list_types
+kahin_get_type              kahin_validate_command      kahin_error_decode
+kahin_get_dependencies      kahin_browser_start         kahin_browser_stop
+kahin_navigate              kahin_click                 kahin_extract
+kahin_screenshot            kahin_evaluate              kahin_execute_cdp
+kahin_list_sessions         kahin_get_session           kahin_create_session
+kahin_kill_session          kahin_event_history         kahin_list_network_requests
+kahin_get_console           kahin_iframe_tree           kahin_pattern_learn
+kahin_pattern_query         kahin_pattern_suggest       kahin_pattern_forget
+kahin_pattern_stats         kahin_healer_stats
+```
+
 ## Önemli Notlar
 1. CDP **case-sensitive**: `Page.navigate` ✓, `page.navigate` ✗
 2. Port 9222 (Chrome DevTools) ve 9240 REZERVE — kullanma

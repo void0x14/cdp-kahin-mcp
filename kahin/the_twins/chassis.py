@@ -93,11 +93,17 @@ class BrowserEngine(ABC):
             await self._http.aclose()
             self._http = None
         if self._process:
-            self._process.terminate()
+            try:
+                self._process.terminate()
+            except ProcessLookupError:
+                pass
             try:
                 await asyncio.wait_for(self._process.wait(), timeout=5)
             except asyncio.TimeoutError:
-                self._process.kill()
+                try:
+                    self._process.kill()
+                except ProcessLookupError:
+                    pass
             self._process = None
 
     async def send_cdp(self, domain: str, command: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -135,7 +141,10 @@ class BrowserEngine(ABC):
                 "width": w, "height": h, "deviceScaleFactor": 1, "mobile": False
             })
         result = await self.send_cdp("Page", "captureScreenshot", params)
-        return base64.b64decode(result["data"])
+        data = result.get("data")
+        if data is None:
+            raise RuntimeError(f"captureScreenshot returned no data: {result}")
+        return base64.b64decode(data)
 
     async def on_event(self, callback: Callable[[EventData], Awaitable[None] | None]) -> None:
         self._event_callbacks.append(callback)
