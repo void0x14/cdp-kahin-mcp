@@ -12,6 +12,7 @@
 const std = @import("std");
 const linux = std.os.linux;
 const Allocator = std.mem.Allocator;
+const frame = @import("frame.zig");
 
 /// Child-side fd numbers the browser uses.
 pub const child_read_fd: i32 = 3; // parent -> browser (commands)
@@ -81,8 +82,10 @@ pub fn spawn(allocator: Allocator, argv: []const []const u8) !Spawned {
     if (pid == 0) {
         // ---- child ----
         const err_w = err_pipe[1];
-        dup2OrExit(cmd[0], child_read_fd, err_w);
+        // resp first: in a daemon context fd 3 may already be resp[1], and
+        // dup2(cmd[0] -> 3) would clobber it before we reach fd 4.
         dup2OrExit(resp[1], child_write_fd, err_w);
+        dup2OrExit(cmd[0], child_read_fd, err_w);
         dup2OrExit(devnull, 0, err_w);
         dup2OrExit(devnull, 1, err_w);
         dup2OrExit(devnull, 2, err_w);
@@ -266,10 +269,11 @@ pub const Reader = struct {
     }
 };
 
-/// Write `msg` followed by the terminator.
-pub fn writeMessage(fd: i32, msg: []const u8) !void {
-    try writeAll(fd, msg);
-    try writeAll(fd, &.{0});
+/// Write `msg` framed with the `\x00` terminator (one copy, one write).
+pub fn writeMessage(allocator: Allocator, fd: i32, msg: []const u8) !void {
+    const framed = try frame.encode(allocator, msg);
+    defer allocator.free(framed);
+    try writeAll(fd, framed);
 }
 
 fn writeAll(fd: i32, bytes: []const u8) !void {
@@ -331,7 +335,7 @@ test "writeMessage/readMessage roundtrip" {
         _ = linux.close(fds[0]);
         _ = linux.close(fds[1]);
     }
-    try writeMessage(fds[1], "{\"id\":1}");
+    try writeMessage(testing.allocator, fds[1], "{\"id\":1}");
 
     var reader = Reader.init(fds[0]);
     defer reader.deinit(testing.allocator);

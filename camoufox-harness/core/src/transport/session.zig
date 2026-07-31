@@ -10,6 +10,7 @@ const Allocator = std.mem.Allocator;
 
 pub const Session = struct {
     /// "" is the root session; sub-sessions carry their own id.
+    /// `id` aliases the map key; `target_type`/`name` are owned copies.
     id: []const u8,
     target_type: []const u8,
     name: []const u8,
@@ -17,8 +18,9 @@ pub const Session = struct {
 
 pub const Router = struct {
     allocator: Allocator,
-    /// Arena for dispatch results: `method`/`sessionId` strings stay valid
-    /// until `deinit` (they do NOT borrow the dispatched input).
+    /// Scratch arena for one dispatch call: the parsed Value tree plus the
+    /// `method`/`sessionId` copies. Reset on every `dispatch`, so returned
+    /// slices stay valid only until the *next* `dispatch` call.
     arena: std.heap.ArenaAllocator,
     /// In-flight requests: id -> caller context (resolved on the matching response).
     pending: std.AutoHashMap(u32, *anyopaque),
@@ -40,13 +42,18 @@ pub const Router = struct {
 
     pub fn deinit(self: *Router) void {
         var it = self.sessions.iterator();
-        while (it.next()) |kv| self.allocator.free(kv.key_ptr.*);
+        while (it.next()) |kv| {
+            self.allocator.free(kv.key_ptr.*);
+            self.allocator.free(kv.value_ptr.target_type);
+            self.allocator.free(kv.value_ptr.name);
+        }
         self.pending.deinit();
         self.sessions.deinit();
         self.arena.deinit();
     }
 
-    /// Next request id (0-based, monotonic; wraps only after 2^32 requests).
+    /// Next request id (monotonic; first call returns 1, Juggler treats 0 as
+    /// falsy; wraps only after 2^32 requests).
     pub fn nextId(self: *Router) u32 {
         return self.next_id.fetchAdd(1, .monotonic);
     }
@@ -56,27 +63,45 @@ pub const Router = struct {
         try self.pending.put(id, context);
     }
 
-    /// Register a session; root session uses id "".
+    /// Register (or replace) a session; root session uses id "".
+    /// id/target_type/name are copied; a re-registered id replaces the old entry.
     pub fn registerSession(self: *Router, session: Session) Allocator.Error!void {
         const key = try self.allocator.dupe(u8, session.id);
         errdefer self.allocator.free(key);
-        try self.sessions.put(key, session);
+        const target_type = try self.allocator.dupe(u8, session.target_type);
+        errdefer self.allocator.free(target_type);
+        const name = try self.allocator.dupe(u8, session.name);
+        errdefer self.allocator.free(name);
+
+        const gop = try self.sessions.getOrPut(key);
+        if (gop.found_existing) {
+            self.allocator.free(gop.key_ptr.*);
+            self.allocator.free(gop.value_ptr.target_type);
+            self.allocator.free(gop.value_ptr.name);
+        }
+        gop.key_ptr.* = key;
+        gop.value_ptr.* = .{ .id = key, .target_type = target_type, .name = name };
     }
 
     pub fn removeSession(self: *Router, id: []const u8) void {
-        if (self.sessions.fetchRemove(id)) |kv| self.allocator.free(kv.key);
+        if (self.sessions.fetchRemove(id)) |kv| {
+            self.allocator.free(kv.key);
+            self.allocator.free(kv.value.target_type);
+            self.allocator.free(kv.value.name);
+        }
     }
 
     pub const Dispatch = union(enum) {
         /// A response matching a pending request (the pending entry is consumed).
-        /// All slices borrow from the dispatched `json` input.
+        /// `raw` borrows from the dispatched `json` input.
         response: struct {
             id: u32,
             context: *anyopaque,
             is_error: bool,
             raw: []const u8,
         },
-        /// A server-initiated event. All slices borrow from the dispatched `json` input.
+        /// A server-initiated event. `method`/`session_id` are arena-owned
+        /// copies valid until the next `dispatch`; `raw` borrows from `json`.
         event: struct {
             method: []const u8,
             /// null = root session.
@@ -90,8 +115,10 @@ pub const Router = struct {
 
     /// Route one framed message. `json` must stay alive while the returned
     /// `raw` slice is used (it borrows from it). `method`/`sessionId` are
-    /// arena-owned and stay valid until `deinit`.
+    /// arena-owned copies valid until the next `dispatch` call (the scratch
+    /// arena is reset on every call).
     pub fn dispatch(self: *Router, json: []const u8) Allocator.Error!Dispatch {
+        _ = self.arena.reset(.retain_capacity);
         const parsed = std.json.parseFromSliceLeaky(std.json.Value, self.arena.allocator(), json, .{}) catch {
             return .invalid;
         };
@@ -116,9 +143,13 @@ pub const Router = struct {
                 if (sv != .string) return .invalid;
                 break :blk sv.string;
             } else "";
+            // parseFromSliceLeaky aliases strings into `json`; copy them into
+            // the arena so they survive the caller's buffer reuse.
+            const method = try self.arena.allocator().dupe(u8, mv.string);
+            const session_id = if (sid.len == 0) null else try self.arena.allocator().dupe(u8, sid);
             return .{ .event = .{
-                .method = mv.string,
-                .session_id = if (sid.len == 0) null else sid,
+                .method = method,
+                .session_id = session_id,
                 .known_session = self.sessions.contains(sid),
                 .raw = json,
             } };

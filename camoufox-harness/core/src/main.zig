@@ -7,7 +7,6 @@
 const std = @import("std");
 const linux = std.os.linux;
 
-const frame = @import("transport/frame.zig");
 const pipe = @import("transport/pipe.zig");
 const session = @import("transport/session.zig");
 
@@ -82,7 +81,7 @@ fn run(args: std.process.Init.Minimal) !void {
         .{id},
     );
     std.debug.print("SENT: {s}\n", .{req});
-    pipe.writeMessage(child.write_fd, req) catch |err| {
+    pipe.writeMessage(a, child.write_fd, req) catch |err| {
         std.debug.print("write failed: {s} (browser died?)\n", .{@errorName(err)});
         return err;
     };
@@ -117,9 +116,11 @@ fn run(args: std.process.Init.Minimal) !void {
 
     // Stop: closing our pipe ends terminates the browser (Juggler pattern).
     pipe.closeFds(&child);
-    const code = pipe.wait(&child) catch |err| blk: {
-        std.debug.print("browser exited via signal ({s})\n", .{@errorName(err)});
-        break :blk @as(u8, 0); // closing the pipe mid-run may kill it on a signal; not a failure
+    // Only a clean exit-0 is success; anything else (signal, wait failure)
+    // is reported as a failure.
+    const code = pipe.wait(&child) catch |err| {
+        std.debug.print("browser exit check failed: {s}\n", .{@errorName(err)});
+        return err;
     };
     std.debug.print("browser exited with code {d}\n", .{code});
 }
@@ -132,9 +133,4 @@ fn ignoreSigpipe() void {
         .flags = 0,
     };
     _ = linux.sigaction(linux.SIG.PIPE, &act, null);
-}
-
-// Keep a reference so the framing module is exercised by the same binary.
-fn unused() void {
-    _ = frame;
 }
