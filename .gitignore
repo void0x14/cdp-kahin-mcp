@@ -10,3 +10,5 @@ __pycache__/
 # Error logs
 kahin/logs/
 logs/
+.zig-cache/
+zig-out/
