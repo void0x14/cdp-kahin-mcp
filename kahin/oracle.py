@@ -189,14 +189,14 @@ async def _require_engine() -> str | None:
 
 @mcp.tool(name="kahin_browser_start", annotations=_RW)
 async def browser_start(engine: str = "shadow", headless: bool = True, port: int = 0) -> str:
-    """Start a browser engine. Choose shadow (fast Chrome) or mirage (stealth). Ports 9222/9240 are RESERVED."""
+    """Start a browser engine. Choose shadow (fast Chrome) or mirage/camoufox (stealth Camoufox, Juggler pipe). Ports 9222/9240 are RESERVED."""
     global _current_engine
 
     if port in (9222, 9240):
         return orjson.dumps({"error": f"Port {port} is RESERVED. Use a different port."}).decode()
 
-    if engine not in ("shadow", "mirage"):
-        return f"Unknown engine: {engine}. Use 'shadow' or 'mirage'."
+    if engine not in ("shadow", "mirage", "camoufox"):
+        return f"Unknown engine: {engine}. Use 'shadow', 'mirage' or 'camoufox'."
 
     if _current_engine is not None:
         return "Engine already running. Stop it first with kahin_browser_stop."
@@ -207,7 +207,7 @@ async def browser_start(engine: str = "shadow", headless: bool = True, port: int
             actual_port = port or 9241
         else:
             _current_engine = Mirage()
-            actual_port = port or 9242
+            actual_port = 0  # Juggler pipe: no remote-debugging port (9222/9240 irrelevant)
 
         try:
             _ctx = await asyncio.wait_for(
