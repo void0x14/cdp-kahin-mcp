@@ -22,9 +22,18 @@ const session = @import("src/transport/session.zig");
 const browser = @import("adapters/browser.zig");
 const page = @import("adapters/page.zig");
 const runtime = @import("adapters/runtime.zig");
+const console = @import("adapters/console.zig");
+const emulation = @import("adapters/emulation.zig");
+const network = @import("adapters/network.zig");
+const target = @import("adapters/target.zig");
 
 pub const default_timeout_ms: i32 = 30_000;
 pub const enable_timeout_ms: i32 = 30_000;
+
+/// Cap on retained console messages / network events (ring drop of the
+/// oldest). Kahin's own collectors keep bounded lists too.
+const max_console_messages: usize = 2_000;
+const max_network_events: usize = 5_000;
 
 /// One response message returned by `send`; `raw` is an owned copy.
 pub const SendResult = struct {
@@ -53,13 +62,33 @@ const ContextInfo = struct {
     }
 };
 
+/// One frame of the frame registry (Faz 3): id is the map key, parent/url
+/// are owned copies. `parent_id == null` marks the main frame.
+const FrameEntry = struct {
+    parent_id: ?[]u8,
+    url: ?[]u8,
+
+    fn deinit(self: *FrameEntry, allocator: Allocator) void {
+        if (self.parent_id) |p| allocator.free(p);
+        if (self.url) |u| allocator.free(u);
+    }
+};
+
 /// Per-page state, keyed by target id.
 pub const Page = struct {
     /// Aliases the `pages` map key buffer.
     target_id: []u8,
     /// Session id from Browser.attachedToTarget; "" until attached.
     session_id: []u8,
+    /// Owning context from Browser.attachedToTarget targetInfo (optional).
+    browser_context_id: ?[]u8,
+    /// Owned copy of the main frame id (the registry's parentless frame).
     main_frame_id: ?[]u8,
+    /// Page-level URL: url of the last main-frame navigationCommitted /
+    /// sameDocumentNavigation (owned). "" until first commit.
+    current_url: ?[]u8,
+    /// frameId -> FrameEntry (owning keys and values).
+    frames: std.StringHashMap(FrameEntry),
     lifecycle: page.Lifecycle,
     contexts: std.array_list.Aligned(ContextInfo, null) = .empty,
 };
@@ -84,6 +113,10 @@ pub const Driver = struct {
     by_session: std.StringHashMap(*Page),
     /// errorText of the last aborted navigation (owned; freed on next use).
     last_abort_text: ?[]u8 = null,
+    /// Normalized console messages (Runtime.console -> Console.messageAdded).
+    console_messages: std.array_list.Aligned(console.Message, null) = .empty,
+    /// Raw Network.* event JSON strings (passive passthrough, Faz 3).
+    network_events: std.array_list.Aligned([]u8, null) = .empty,
 
     /// Wire a Driver onto existing fds (no spawn). Used by tests with a
     /// self-pipe; `start` spawns the browser and calls this.
@@ -120,7 +153,11 @@ pub const Driver = struct {
 
         var d = Driver.init(allocator, -1, -1, verbose);
         errdefer {
+            // (Faz 2 Minor b) Error path must not leak the child: closing the
+            // fds makes the browser exit, then reap it. `wait` after `closeFds`
+            // is safe — the browser dies on pipe EOF.
             pipe.closeFds(&d.child);
+            if (d.child.pid > 0) _ = pipe.wait(&d.child) catch {};
             d.deinit();
         }
 
@@ -152,6 +189,11 @@ pub const Driver = struct {
         while (sit.next()) |kv| self.allocator.free(kv.key_ptr.*);
         self.by_session.deinit();
 
+        for (self.console_messages.items) |*m| m.deinit(allocator);
+        self.console_messages.deinit(allocator);
+        for (self.network_events.items) |raw| allocator.free(raw);
+        self.network_events.deinit(allocator);
+
         if (self.last_abort_text) |t| self.allocator.free(t);
         self.router.deinit();
         self.reader.deinit(self.allocator);
@@ -162,6 +204,15 @@ pub const Driver = struct {
         for (p.contexts.items) |*c| c.deinit(self.allocator);
         p.contexts.deinit(self.allocator);
         if (p.main_frame_id) |f| self.allocator.free(f);
+        if (p.browser_context_id) |b| self.allocator.free(b);
+        if (p.current_url) |u| self.allocator.free(u);
+        var fit = p.frames.iterator();
+        while (fit.next()) |kv| {
+            self.allocator.free(kv.key_ptr.*);
+            kv.value_ptr.deinit(self.allocator);
+        }
+        p.frames.deinit();
+        p.lifecycle.deinit();
         // p.session_id aliases the by_session key; that map owns it.
         self.allocator.free(p.target_id); // aliases the map key
         self.allocator.destroy(p);
@@ -294,6 +345,15 @@ pub const Driver = struct {
 
     /// Page.navigate on the page's main frame, waiting for the load
     /// lifecycle event. Returns an owned navigationId.
+    ///
+    /// (Faz 2 Minor a fix) The lifecycle is keyed on the frame id only, so a
+    /// stale eventFired from the previous document (e.g. the initial
+    /// about:blank load racing our navigate) can complete it early. The
+    /// return is therefore gated on the navigation being genuinely done
+    /// (navigationSatisfied): the started event for our navigation id, or
+    /// the committed URL matching the target — a screenshot right after
+    /// navigate() captures the NEW document. Redirects pass via the started
+    /// event (final URL may differ).
     pub fn navigate(self: *Driver, target_id: []const u8, url: []const u8, timeout_ms: i32) ![]u8 {
         const p = self.pages.get(target_id) orelse return error.UnknownTarget;
         if (p.session_id.len == 0) return error.TargetNotAttached;
@@ -312,12 +372,51 @@ pub const Driver = struct {
 
         const deadline = nowMs() + timeout_ms;
         try self.waitForLoad(p, deadline);
+        // Return gate: keep pumping until the navigation is genuinely done
+        // (see navigationSatisfied).
+        while (p.lifecycle.state != .aborted and !self.navigationSatisfied(p, nav_id, url)) {
+            if (p.lifecycle.state == .waiting) {
+                try self.waitForLoad(p, deadline);
+            } else {
+                const rem = remainingMs(deadline) orelse return error.WaitTimeout;
+                try self.pump(rem);
+            }
+        }
         if (p.lifecycle.state == .aborted) {
             if (self.last_abort_text) |t| self.allocator.free(t);
             self.last_abort_text = try self.allocator.dupe(u8, p.lifecycle.abort_text);
             return error.NavigationAborted;
         }
         return nav_id;
+    }
+
+    /// The navigate return gate (Faz 2 Minor a): the lifecycle alone
+    /// completes early on a stale load event from the previous document.
+    /// Satisfaction requires the done state plus:
+    ///   - our navigation started event was observed (the browser accepted
+    ///     OUR navigation), AND
+    ///   - our navigation committed (the new document exists — its contexts
+    ///     are live, so a follow-up evaluate/screenshot cannot hit the
+    ///     previous document), or the committed URL matches the requested
+    ///     one (same-document navigations).
+    /// A newer navigation superseding ours passes on URL match only.
+    fn navigationSatisfied(self: *Driver, p: *Page, nav_id: []const u8, url: []const u8) bool {
+        if (p.lifecycle.state != .done) return false;
+        if (p.lifecycle.navigation_id.len == 0 or std.mem.eql(u8, p.lifecycle.navigation_id, nav_id)) {
+            if (p.lifecycle.nav_started) {
+                return p.lifecycle.committed_current or self.urlCommitted(p, url);
+            }
+            return self.urlCommitted(p, url);
+        }
+        return self.urlCommitted(p, url);
+    }
+
+    /// True when the page's committed URL equals `url` ("" while unknown —
+    /// the gate keeps pumping).
+    fn urlCommitted(self: *Driver, p: *Page, url: []const u8) bool {
+        _ = self;
+        if (p.current_url) |u| return std.mem.eql(u8, u, url);
+        return false;
     }
 
     /// Runtime.evaluate on the page's (main-frame preferred) execution
@@ -334,6 +433,202 @@ pub const Driver = struct {
         defer resp.deinit(self.allocator);
         if (resp.is_error) return error.JugglerError;
         return runtime.parseEvaluateResult(self.allocator, resp.raw);
+    }
+
+    /// Target.getTargets equivalent (no wire call — Juggler has no Target
+    /// domain): CDP-shaped target list from the driver's page map.
+    /// Returns owned JSON: {"targetInfos":[{targetId,type:"page",
+    /// browserContextId?,url}]}.
+    pub fn getTargets(self: *Driver) ![]u8 {
+        var infos: std.array_list.Aligned(target.TargetInfo, null) = .empty;
+        defer infos.deinit(self.allocator);
+        var it = self.pages.iterator();
+        while (it.next()) |kv| {
+            const p = kv.value_ptr.*;
+            try infos.append(self.allocator, .{
+                .targetId = p.target_id,
+                .url = p.current_url orelse "",
+                .browserContextId = p.browser_context_id,
+            });
+        }
+        return target.buildTargetInfos(self.allocator, infos.items);
+    }
+
+    /// Target.createTarget equivalent: Browser.newPage on the default
+    /// context (Juggler's newPage has no url param — the url is a separate
+    /// Page.navigate inside newPage's wrapper) then navigate. Returns the
+    /// CDP result {"targetId": "..."}.
+    pub fn createTarget(self: *Driver, url: []const u8, timeout_ms: i32) ![]u8 {
+        const target_id = try self.newPage(null, url, timeout_ms);
+        defer self.allocator.free(target_id);
+        return target.buildCreateTargetResult(self.allocator, target_id);
+    }
+
+    /// Target.closeTarget equivalent: Page.close (schema) on the target's
+    /// session, then wait for Browser.detachedFromTarget to clean the state.
+    /// Result: "{}" (CDP shape).
+    pub fn closeTarget(self: *Driver, target_id: []const u8, timeout_ms: i32) ![]u8 {
+        const p = self.pages.get(target_id) orelse return error.UnknownTarget;
+        if (p.session_id.len == 0) return error.TargetNotAttached;
+        var resp = try self.send(p.session_id, page.method_close, page.closeParams(), timeout_ms);
+        defer resp.deinit(self.allocator);
+        if (resp.is_error) return error.JugglerError;
+        const deadline = nowMs() + timeout_ms;
+        while (self.pages.get(target_id) != null) {
+            const rem = remainingMs(deadline) orelse return error.WaitTimeout;
+            try self.pump(rem);
+        }
+        return self.allocator.dupe(u8, target.closeTargetResult());
+    }
+
+    /// Emulation.setDeviceMetricsOverride equivalent:
+    /// Browser.setDefaultViewport (schema). Context-wide; per-page size
+    /// changes go through setViewportSize.
+    pub fn setDefaultViewport(
+        self: *Driver,
+        browser_context_id: ?[]const u8,
+        width: f64,
+        height: f64,
+        device_scale_factor: ?f64,
+        timeout_ms: i32,
+    ) !void {
+        const params = try emulation.setDefaultViewportParams(self.allocator, browser_context_id, .{
+            .viewportSize = .{ .width = width, .height = height },
+            .deviceScaleFactor = device_scale_factor,
+        });
+        defer self.allocator.free(params);
+        var resp = try self.send(null, emulation.method_set_default_viewport, params, timeout_ms);
+        defer resp.deinit(self.allocator);
+        if (resp.is_error) return error.JugglerError;
+    }
+
+    /// Page.setViewportSize on the target's session.
+    pub fn setViewportSize(self: *Driver, target_id: []const u8, width: f64, height: f64, timeout_ms: i32) !void {
+        const p = self.pages.get(target_id) orelse return error.UnknownTarget;
+        if (p.session_id.len == 0) return error.TargetNotAttached;
+        const params = try emulation.setViewportSizeParams(self.allocator, .{ .width = width, .height = height });
+        defer self.allocator.free(params);
+        var resp = try self.send(p.session_id, emulation.method_set_viewport_size, params, timeout_ms);
+        defer resp.deinit(self.allocator);
+        if (resp.is_error) return error.JugglerError;
+    }
+
+    /// Page.captureScreenshot equivalent: Page.screenshot (schema).
+    /// Returns RAW image bytes (the Juggler `data` string is base64 and is
+    /// decoded here).
+    ///
+    /// The `clip` parameter is MANDATORY in this Juggler build — the
+    /// dispatcher rejects an undefined clip even though the schema marks it
+    /// optional (observed: "Object \"<root>.clip\" is undefined, but has
+    /// some scheme"). The clip is computed from the page itself: viewport
+    /// size via window.innerWidth/Height, full-page size via
+    /// documentElement.scrollWidth/Height (Juggler has no getLayoutMetrics;
+    /// this evaluate is the schema-faithful substitute).
+    pub fn screenshot(self: *Driver, target_id: []const u8, full_page: bool, timeout_ms: i32) ![]u8 {
+        const p = self.pages.get(target_id) orelse return error.UnknownTarget;
+        if (p.session_id.len == 0) return error.TargetNotAttached;
+        try self.waitForMainFrame(p, nowMs() + timeout_ms);
+
+        const expr = if (full_page)
+            "[document.documentElement.scrollWidth, document.documentElement.scrollHeight]"
+        else
+            "[window.innerWidth, window.innerHeight]";
+        const size = try self.evalSize(p, expr, timeout_ms);
+        if (size.w <= 0 or size.h <= 0) return error.SizeUnavailable;
+
+        const params = try page.screenshotParams(self.allocator, "image/png", .{ .width = size.w, .height = size.h }, null, null);
+        defer self.allocator.free(params);
+        var resp = try self.send(p.session_id, page.method_screenshot, params, timeout_ms);
+        defer resp.deinit(self.allocator);
+        if (resp.is_error) return error.JugglerError;
+        const b64 = try page.parseScreenshotData(self.allocator, resp.raw);
+        defer self.allocator.free(b64);
+        return page.decodeScreenshot(self.allocator, b64);
+    }
+
+    /// Evaluate a [width, height] pair in the page (viewport or full
+    /// content size).
+    fn evalSize(self: *Driver, p: *Page, expr: []const u8, timeout_ms: i32) !struct { w: f64, h: f64 } {
+        var res = try self.evaluate(p.target_id, expr, timeout_ms);
+        defer res.deinit(self.allocator);
+        if (res.exception_text != null or res.value_json.len == 0) return error.SizeUnavailable;
+        const parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, res.value_json, .{});
+        defer parsed.deinit();
+        const v = parsed.value;
+        if (v != .array or v.array.items.len < 2) return error.SizeUnavailable;
+        const w = numF64(v.array.items[0]) orelse return error.SizeUnavailable;
+        const h = numF64(v.array.items[1]) orelse return error.SizeUnavailable;
+        return .{ .w = w, .h = h };
+    }
+
+    /// Page.getFrameTree equivalent (no wire call — Juggler has no
+    /// getFrameTree): nested tree from the frame registry, CDP shape:
+    /// {"frameTree":{"frame":{"id","parentId"?,"url"},"childFrames":[...]}}.
+    pub fn getFrameTree(self: *Driver, target_id: []const u8) ![]u8 {
+        const p = self.pages.get(target_id) orelse return error.UnknownTarget;
+        return buildFrameTreeJson(self.allocator, p);
+    }
+
+    /// Console messages normalized to the Console.messageAdded
+    /// params.message shape, as a JSON array.
+    pub fn getConsoleMessages(self: *Driver) ![]u8 {
+        var out: std.Io.Writer.Allocating = .init(self.allocator);
+        defer out.deinit();
+        const w = &out.writer;
+        try w.writeAll("[");
+        for (self.console_messages.items, 0..) |*m, i| {
+            if (i > 0) try w.writeAll(",");
+            const j = try console.toJson(self.allocator, m);
+            defer self.allocator.free(j);
+            try w.writeAll(j);
+        }
+        try w.writeAll("]");
+        return self.allocator.dupe(u8, out.written());
+    }
+
+    /// Raw Network.* events (passive passthrough, no interception) as a JSON
+    /// array of the original wire events, newest last. `limit` 0 = all.
+    pub fn getNetworkEvents(self: *Driver, limit: usize) ![]u8 {
+        const n = @min(limit, self.network_events.items.len);
+        const first = self.network_events.items.len - n;
+        var out: std.Io.Writer.Allocating = .init(self.allocator);
+        defer out.deinit();
+        const w = &out.writer;
+        try w.writeAll("[");
+        for (self.network_events.items[first..], 0..) |raw, i| {
+            if (i > 0) try w.writeAll(",");
+            try w.writeAll(raw);
+        }
+        try w.writeAll("]");
+        return self.allocator.dupe(u8, out.written());
+    }
+
+    /// Pump until at least one console message arrived (smoke helper).
+    pub fn waitForConsole(self: *Driver, timeout_ms: i32) !void {
+        const deadline = nowMs() + timeout_ms;
+        while (self.console_messages.items.len == 0) {
+            const rem = remainingMs(deadline) orelse return error.WaitTimeout;
+            try self.pump(rem);
+        }
+    }
+
+    /// Console.enable equivalent — no-op by design: Juggler has no Console
+    /// domain; Runtime.console events flow unconditionally (schema fact).
+    pub fn enableConsole(self: *Driver) void {
+        _ = self;
+    }
+
+    /// Network.enable equivalent — no-op by design: Juggler emits Network.*
+    /// events unconditionally; there is no Network.enable in the schema.
+    pub fn enableNetwork(self: *Driver) void {
+        _ = self;
+    }
+
+    /// Runtime.enable equivalent — no-op by design: no Runtime.enable in the
+    /// schema; executionContextCreated/Destroyed events flow unconditionally
+    /// (observed in Faz 2 smoke).
+    pub fn enableRuntime(self: *Driver) void {
+        _ = self;
     }
 
     /// Close the pipes (browser exits cleanly) and reap it. Returns the
@@ -385,8 +680,16 @@ pub const Driver = struct {
             try self.onFrameAttached(ev);
         } else if (std.mem.eql(u8, ev.method, "Page.frameDetached")) {
             try self.onFrameDetached(ev);
+        } else if (std.mem.eql(u8, ev.method, "Page.navigationCommitted")) {
+            try self.onNavigationCommitted(ev);
+        } else if (std.mem.eql(u8, ev.method, "Page.sameDocumentNavigation")) {
+            try self.onSameDocument(ev);
+        } else if (std.mem.eql(u8, ev.method, "Runtime.console")) {
+            try self.onConsoleEvent(ev);
+        } else if (std.mem.startsWith(u8, ev.method, "Network.")) {
+            try self.onNetworkEvent(ev);
         }
-        // Other events (Page.ready, navigationCommitted, ...) are ignored.
+        // Other events (Page.ready, screencastFrame, Browser.*, ...) are ignored.
     }
 
     /// Browser.attachedToTarget {sessionId, targetInfo{type, targetId, ...}}
@@ -404,6 +707,10 @@ pub const Driver = struct {
         const tid = ti.object.get("targetId") orelse return;
         const ttype = ti.object.get("type") orelse return;
         if (tid != .string or ttype != .string) return;
+        var bc_owned: ?[]u8 = null;
+        if (ti.object.get("browserContextId")) |bc| {
+            if (bc == .string) bc_owned = try self.allocator.dupe(u8, bc.string);
+        }
         if (self.verbose) {
             std.debug.print("  -> attachedToTarget sessionId={s} targetId={s} type={s}\n", .{ sid.string, tid.string, ttype.string });
         }
@@ -420,13 +727,19 @@ pub const Driver = struct {
             const old_sid = gop.value_ptr.*.session_id;
             if (self.by_session.fetchRemove(old_sid)) |bkv| self.allocator.free(bkv.key);
             gop.value_ptr.*.session_id = sid_owned;
+            // Re-key the context id if it changed (rare).
+            if (gop.value_ptr.*.browser_context_id) |old_bc| self.allocator.free(old_bc);
+            gop.value_ptr.*.browser_context_id = bc_owned;
         } else {
             const p = try self.allocator.create(Page);
             p.* = .{
                 .target_id = tid_owned,
                 .session_id = sid_owned,
+                .browser_context_id = bc_owned,
                 .main_frame_id = null,
-                .lifecycle = .{},
+                .current_url = null,
+                .frames = std.StringHashMap(FrameEntry).init(self.allocator),
+                .lifecycle = .{ .allocator = self.allocator },
                 .contexts = .empty,
             };
             gop.value_ptr.* = p;
@@ -568,31 +881,54 @@ pub const Driver = struct {
         p.lifecycle.onNavigationStarted(frame_id.string, nav_id.string);
     }
 
-    /// Page.frameAttached {frameId, parentFrameId?}: the frame without a
-    /// parent is the page's main frame.
+    /// Page.frameAttached {frameId, parentFrameId?}: registers the frame in
+    /// the registry (the parentless frame is the page's main frame).
     fn onFrameAttached(self: *Driver, ev: session.Router.Event) !void {
         const sid = ev.session_id orelse return;
         const p = self.by_session.get(sid) orelse return;
-        if (p.main_frame_id != null) return;
         const parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, ev.raw, .{});
         defer parsed.deinit();
         const root = parsed.value;
         if (root != .object) return;
         const params = root.object.get("params") orelse return;
         if (params != .object) return;
-        if (params.object.get("parentFrameId") != null) return; // sub-frame
         const frame_id = params.object.get("frameId") orelse return;
         if (frame_id != .string) return;
-        p.main_frame_id = try self.allocator.dupe(u8, frame_id.string);
+
+        var parent_owned: ?[]u8 = null;
+        if (params.object.get("parentFrameId")) |pf| {
+            if (pf == .string) parent_owned = try self.allocator.dupe(u8, pf.string);
+        }
+        if (parent_owned == null) {
+            // Main frame: a new main frame id means a new document — reset.
+            if (p.main_frame_id) |mf| {
+                if (!std.mem.eql(u8, mf, frame_id.string)) {
+                    self.allocator.free(mf);
+                    p.main_frame_id = null;
+                }
+            }
+            if (p.main_frame_id == null) {
+                p.main_frame_id = try self.allocator.dupe(u8, frame_id.string);
+            }
+        }
+
+        const key = try self.allocator.dupe(u8, frame_id.string);
+        const gop = try p.frames.getOrPut(key);
+        if (gop.found_existing) {
+            self.allocator.free(key); // same content already stored
+            if (gop.value_ptr.parent_id) |op| self.allocator.free(op);
+        } else {
+            gop.value_ptr.* = .{ .parent_id = null, .url = null };
+        }
+        gop.value_ptr.parent_id = parent_owned;
     }
 
-    /// Page.frameDetached {frameId}: when the main frame detaches (new
-    /// document), clear it so a later frameAttached re-registers the new
-    /// main frame id instead of navigating with a stale one.
+    /// Page.frameDetached {frameId}: drop the registry entry; a detached
+    /// main frame clears the main frame id so the next frameAttached
+    /// re-registers the new one.
     fn onFrameDetached(self: *Driver, ev: session.Router.Event) !void {
         const sid = ev.session_id orelse return;
         const p = self.by_session.get(sid) orelse return;
-        const mf = p.main_frame_id orelse return;
         const parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, ev.raw, .{});
         defer parsed.deinit();
         const root = parsed.value;
@@ -601,9 +937,94 @@ pub const Driver = struct {
         if (params != .object) return;
         const frame_id = params.object.get("frameId") orelse return;
         if (frame_id != .string) return;
-        if (!std.mem.eql(u8, frame_id.string, mf)) return; // sub-frame
-        self.allocator.free(mf);
-        p.main_frame_id = null;
+
+        if (p.frames.fetchRemove(frame_id.string)) |kv| {
+            self.allocator.free(kv.key);
+            var entry = kv.value; // const capture; copy to mutate
+            entry.deinit(self.allocator);
+        }
+        if (p.main_frame_id) |mf| {
+            if (std.mem.eql(u8, mf, frame_id.string)) {
+                self.allocator.free(mf);
+                p.main_frame_id = null;
+            }
+        }
+    }
+
+    /// Page.navigationCommitted {frameId, navigationId, url}: record the
+    /// committed URL in the registry and, for main frames, on the page
+    /// (TargetInfo.url + the navigate URL gate).
+    fn onNavigationCommitted(self: *Driver, ev: session.Router.Event) !void {
+        const sid = ev.session_id orelse return;
+        const p = self.by_session.get(sid) orelse return;
+        const parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, ev.raw, .{});
+        defer parsed.deinit();
+        const root = parsed.value;
+        if (root != .object) return;
+        const params = root.object.get("params") orelse return;
+        if (params != .object) return;
+        const frame_id = params.object.get("frameId") orelse return;
+        const url = params.object.get("url") orelse return;
+        if (frame_id != .string or url != .string) return;
+
+        if (p.frames.getPtr(frame_id.string)) |f| {
+            if (f.url) |u| self.allocator.free(u);
+            f.url = try self.allocator.dupe(u8, url.string);
+        }
+        const is_main = if (p.main_frame_id) |mf| std.mem.eql(u8, mf, frame_id.string) else false;
+        if (!is_main) return;
+        if (p.current_url) |u| self.allocator.free(u);
+        p.current_url = try self.allocator.dupe(u8, url.string);
+        // Feed the navigate gate (the event also carries the navigationId).
+        if (params.object.get("navigationId")) |nav_id| {
+            if (nav_id == .string) p.lifecycle.onCommitted(frame_id.string, nav_id.string);
+        }
+    }
+
+    /// Page.sameDocumentNavigation {frameId, navigationId, url}: hashchange
+    /// / pushState. Main-frame ones update the page url and complete a
+    /// waiting navigation (no load event follows).
+    fn onSameDocument(self: *Driver, ev: session.Router.Event) !void {
+        const sid = ev.session_id orelse return;
+        const p = self.by_session.get(sid) orelse return;
+        const parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, ev.raw, .{});
+        defer parsed.deinit();
+        const root = parsed.value;
+        if (root != .object) return;
+        const params = root.object.get("params") orelse return;
+        if (params != .object) return;
+        const frame_id = params.object.get("frameId") orelse return;
+        const url = params.object.get("url") orelse return;
+        if (frame_id != .string or url != .string) return;
+        const is_main = if (p.main_frame_id) |mf| std.mem.eql(u8, mf, frame_id.string) else false;
+        if (!is_main) return;
+        if (p.current_url) |u| self.allocator.free(u);
+        p.current_url = try self.allocator.dupe(u8, url.string);
+        p.lifecycle.onSameDocument(frame_id.string);
+    }
+
+    /// Runtime.console {executionContextId, args, type, location} →
+    /// normalized Console.messageAdded message (ring-dropped at the cap).
+    fn onConsoleEvent(self: *Driver, ev: session.Router.Event) !void {
+        var msg = console.normalize(self.allocator, ev.raw) catch return; // malformed console events are non-fatal
+        if (self.console_messages.items.len >= max_console_messages) {
+            var old = self.console_messages.orderedRemove(0);
+            old.deinit(self.allocator);
+        }
+        self.console_messages.append(self.allocator, msg) catch |err| {
+            msg.deinit(self.allocator);
+            return err;
+        };
+    }
+
+    /// Network.* events: passive passthrough — the raw wire event JSON is
+    /// retained (Juggler's Network event names are already CDP-shaped).
+    /// Ring-dropped at the cap.
+    fn onNetworkEvent(self: *Driver, ev: session.Router.Event) !void {
+        if (self.network_events.items.len >= max_network_events) {
+            self.allocator.free(self.network_events.orderedRemove(0));
+        }
+        self.network_events.append(self.allocator, try self.allocator.dupe(u8, ev.raw)) catch |err| return err;
     }
 };
 
@@ -652,6 +1073,53 @@ fn remainingMs(deadline_ms: i64) ?i32 {
     if (rem <= 0) return null;
     if (rem > 2147483647) return 2147483647;
     return @intCast(rem);
+}
+
+/// Number value of a JSON node, or null for non-numbers.
+fn numF64(v: std.json.Value) ?f64 {
+    return switch (v) {
+        .integer => |i| @floatFromInt(i),
+        .float => |f| f,
+        else => null,
+    };
+}
+
+/// CDP Page.getFrameTree result from the frame registry: the parentless
+/// frame is the root; children are found by parentId (Faz 3). Owned JSON:
+/// {"frameTree":{"frame":{"id","parentId"?,"url"},"childFrames":[...]}}.
+fn buildFrameTreeJson(allocator: Allocator, p: *Page) ![]u8 {
+    // Write the nested tree by hand; Stringify of a recursive structure
+    // would need a custom type for the recursion.
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    const w = &out.writer;
+    try w.writeAll("{\"frameTree\":");
+    try writeFrameNode(allocator, w, p, p.main_frame_id orelse return error.NoMainFrame);
+    try w.writeAll("}");
+    return allocator.dupe(u8, out.written());
+}
+
+fn writeFrameNode(allocator: Allocator, w: anytype, p: *Page, frame_id: []const u8) !void {
+    const e = p.frames.get(frame_id) orelse return error.UnknownFrame;
+    try w.writeAll("{\"frame\":{\"id\":");
+    try std.json.Stringify.value(frame_id, .{}, w);
+    if (e.parent_id) |pid| {
+        try w.writeAll(",\"parentId\":");
+        try std.json.Stringify.value(pid, .{}, w);
+    }
+    try w.writeAll(",\"url\":");
+    try std.json.Stringify.value(e.url orelse "", .{}, w);
+    try w.writeAll("},\"childFrames\":[");
+    var first = true;
+    var it = p.frames.iterator();
+    while (it.next()) |kv| {
+        if (kv.value_ptr.parent_id == null) continue;
+        if (!std.mem.eql(u8, kv.value_ptr.parent_id.?, frame_id)) continue;
+        if (!first) try w.writeAll(",");
+        first = false;
+        try writeFrameNode(allocator, w, p, kv.key_ptr.*);
+    }
+    try w.writeAll("]}");
 }
 
 fn ensureProfile(allocator: Allocator, profile: ?[]const u8) ![]const u8 {
