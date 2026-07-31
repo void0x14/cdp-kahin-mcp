@@ -1,0 +1,5 @@
+repo: daijro/camoufox
+ref: v152.0.4-beta.28
+date: 2026-07-19
+source: additions/juggler/protocol/Protocol.js
+sha256: 7e6f0dcd4c26ce8a0040c4c75aa58de494eef63622d13af6f904dc6e218d7e04

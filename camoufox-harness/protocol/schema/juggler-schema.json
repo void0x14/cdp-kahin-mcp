@@ -1,0 +1,2795 @@
+{
+  "schema_version": 1,
+  "source": "daijro/camoufox@v152.0.4-beta.28",
+  "domains": {
+    "Browser": {
+      "methods": {
+        "enable": {
+          "params": [
+            {
+              "name": "attachToDefaultContext",
+              "type": "boolean"
+            },
+            {
+              "name": "userPrefs",
+              "type": "array",
+              "items": {
+                "type": "object",
+                "ref": "Browser.UserPreference"
+              },
+              "optional": true
+            }
+          ],
+          "returns": []
+        },
+        "createBrowserContext": {
+          "params": [
+            {
+              "name": "removeOnDetach",
+              "type": "boolean",
+              "optional": true
+            }
+          ],
+          "returns": [
+            {
+              "name": "browserContextId",
+              "type": "string"
+            }
+          ]
+        },
+        "removeBrowserContext": {
+          "params": [
+            {
+              "name": "browserContextId",
+              "type": "string"
+            }
+          ],
+          "returns": []
+        },
+        "newPage": {
+          "params": [
+            {
+              "name": "browserContextId",
+              "type": "string",
+              "optional": true
+            }
+          ],
+          "returns": [
+            {
+              "name": "targetId",
+              "type": "string"
+            }
+          ]
+        },
+        "close": {
+          "params": [],
+          "returns": []
+        },
+        "getInfo": {
+          "params": [],
+          "returns": [
+            {
+              "name": "userAgent",
+              "type": "string"
+            },
+            {
+              "name": "version",
+              "type": "string"
+            }
+          ]
+        },
+        "setExtraHTTPHeaders": {
+          "params": [
+            {
+              "name": "browserContextId",
+              "type": "string",
+              "optional": true
+            },
+            {
+              "name": "headers",
+              "type": "array",
+              "items": {
+                "type": "object",
+                "ref": "Network.HTTPHeader"
+              }
+            }
+          ],
+          "returns": []
+        },
+        "clearCache": {
+          "params": [],
+          "returns": []
+        },
+        "setBrowserProxy": {
+          "params": [
+            {
+              "name": "type",
+              "type": "enum",
+              "enum": [
+                "http",
+                "https",
+                "socks",
+                "socks4"
+              ]
+            },
+            {
+              "name": "bypass",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "host",
+              "type": "string"
+            },
+            {
+              "name": "port",
+              "type": "number"
+            },
+            {
+              "name": "username",
+              "type": "string",
+              "optional": true
+            },
+            {
+              "name": "password",
+              "type": "string",
+              "optional": true
+            }
+          ],
+          "returns": []
+        },
+        "setContextProxy": {
+          "params": [
+            {
+              "name": "browserContextId",
+              "type": "string",
+              "optional": true
+            },
+            {
+              "name": "type",
+              "type": "enum",
+              "enum": [
+                "http",
+                "https",
+                "socks",
+                "socks4"
+              ]
+            },
+            {
+              "name": "bypass",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "host",
+              "type": "string"
+            },
+            {
+              "name": "port",
+              "type": "number"
+            },
+            {
+              "name": "username",
+              "type": "string",
+              "optional": true
+            },
+            {
+              "name": "password",
+              "type": "string",
+              "optional": true
+            }
+          ],
+          "returns": []
+        },
+        "setHTTPCredentials": {
+          "params": [
+            {
+              "name": "browserContextId",
+              "type": "string",
+              "optional": true
+            },
+            {
+              "name": "credentials",
+              "type": "object",
+              "ref": "Network.HTTPCredentials",
+              "nullable": true
+            }
+          ],
+          "returns": []
+        },
+        "setRequestInterception": {
+          "params": [
+            {
+              "name": "browserContextId",
+              "type": "string",
+              "optional": true
+            },
+            {
+              "name": "enabled",
+              "type": "boolean"
+            }
+          ],
+          "returns": []
+        },
+        "setCacheDisabled": {
+          "params": [
+            {
+              "name": "browserContextId",
+              "type": "string",
+              "optional": true
+            },
+            {
+              "name": "cacheDisabled",
+              "type": "boolean"
+            }
+          ],
+          "returns": []
+        },
+        "setGeolocationOverride": {
+          "params": [
+            {
+              "name": "browserContextId",
+              "type": "string",
+              "optional": true
+            },
+            {
+              "name": "geolocation",
+              "type": "object",
+              "ref": "Browser.Geolocation",
+              "nullable": true
+            }
+          ],
+          "returns": []
+        },
+        "setUserAgentOverride": {
+          "params": [
+            {
+              "name": "browserContextId",
+              "type": "string",
+              "optional": true
+            },
+            {
+              "name": "userAgent",
+              "type": "string",
+              "nullable": true
+            }
+          ],
+          "returns": []
+        },
+        "setPlatformOverride": {
+          "params": [
+            {
+              "name": "browserContextId",
+              "type": "string",
+              "optional": true
+            },
+            {
+              "name": "platform",
+              "type": "string",
+              "nullable": true
+            }
+          ],
+          "returns": []
+        },
+        "setBypassCSP": {
+          "params": [
+            {
+              "name": "browserContextId",
+              "type": "string",
+              "optional": true
+            },
+            {
+              "name": "bypassCSP",
+              "type": "boolean",
+              "nullable": true
+            }
+          ],
+          "returns": []
+        },
+        "setIgnoreHTTPSErrors": {
+          "params": [
+            {
+              "name": "browserContextId",
+              "type": "string",
+              "optional": true
+            },
+            {
+              "name": "ignoreHTTPSErrors",
+              "type": "boolean",
+              "nullable": true
+            }
+          ],
+          "returns": []
+        },
+        "setJavaScriptDisabled": {
+          "params": [
+            {
+              "name": "browserContextId",
+              "type": "string",
+              "optional": true
+            },
+            {
+              "name": "javaScriptDisabled",
+              "type": "boolean"
+            }
+          ],
+          "returns": []
+        },
+        "setLocaleOverride": {
+          "params": [
+            {
+              "name": "browserContextId",
+              "type": "string",
+              "optional": true
+            },
+            {
+              "name": "locale",
+              "type": "string",
+              "nullable": true
+            }
+          ],
+          "returns": []
+        },
+        "setTimezoneOverride": {
+          "params": [
+            {
+              "name": "browserContextId",
+              "type": "string",
+              "optional": true
+            },
+            {
+              "name": "timezoneId",
+              "type": "string",
+              "nullable": true
+            }
+          ],
+          "returns": []
+        },
+        "setDownloadOptions": {
+          "params": [
+            {
+              "name": "browserContextId",
+              "type": "string",
+              "optional": true
+            },
+            {
+              "name": "downloadOptions",
+              "type": "object",
+              "ref": "Browser.DownloadOptions",
+              "nullable": true
+            }
+          ],
+          "returns": []
+        },
+        "setTouchOverride": {
+          "params": [
+            {
+              "name": "browserContextId",
+              "type": "string",
+              "optional": true
+            },
+            {
+              "name": "hasTouch",
+              "type": "boolean",
+              "nullable": true
+            }
+          ],
+          "returns": []
+        },
+        "setDefaultViewport": {
+          "params": [
+            {
+              "name": "browserContextId",
+              "type": "string",
+              "optional": true
+            },
+            {
+              "name": "viewport",
+              "type": "object",
+              "ref": "Page.Viewport",
+              "nullable": true
+            }
+          ],
+          "returns": []
+        },
+        "setInitScripts": {
+          "params": [
+            {
+              "name": "browserContextId",
+              "type": "string",
+              "optional": true
+            },
+            {
+              "name": "scripts",
+              "type": "array",
+              "items": {
+                "type": "object",
+                "ref": "Page.InitScript"
+              }
+            }
+          ],
+          "returns": []
+        },
+        "addBinding": {
+          "params": [
+            {
+              "name": "browserContextId",
+              "type": "string",
+              "optional": true
+            },
+            {
+              "name": "worldName",
+              "type": "string",
+              "optional": true
+            },
+            {
+              "name": "name",
+              "type": "string"
+            },
+            {
+              "name": "script",
+              "type": "string"
+            }
+          ],
+          "returns": []
+        },
+        "grantPermissions": {
+          "params": [
+            {
+              "name": "origin",
+              "type": "string"
+            },
+            {
+              "name": "browserContextId",
+              "type": "string",
+              "optional": true
+            },
+            {
+              "name": "permissions",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ],
+          "returns": []
+        },
+        "resetPermissions": {
+          "params": [
+            {
+              "name": "browserContextId",
+              "type": "string",
+              "optional": true
+            }
+          ],
+          "returns": []
+        },
+        "setCookies": {
+          "params": [
+            {
+              "name": "browserContextId",
+              "type": "string",
+              "optional": true
+            },
+            {
+              "name": "cookies",
+              "type": "array",
+              "items": {
+                "type": "object",
+                "ref": "Browser.CookieOptions"
+              }
+            }
+          ],
+          "returns": []
+        },
+        "clearCookies": {
+          "params": [
+            {
+              "name": "browserContextId",
+              "type": "string",
+              "optional": true
+            }
+          ],
+          "returns": []
+        },
+        "getCookies": {
+          "params": [
+            {
+              "name": "browserContextId",
+              "type": "string",
+              "optional": true
+            }
+          ],
+          "returns": [
+            {
+              "name": "cookies",
+              "type": "array",
+              "items": {
+                "type": "object",
+                "ref": "Browser.Cookie"
+              }
+            }
+          ]
+        },
+        "setOnlineOverride": {
+          "params": [
+            {
+              "name": "browserContextId",
+              "type": "string",
+              "optional": true
+            },
+            {
+              "name": "override",
+              "type": "enum",
+              "enum": [
+                "online",
+                "offline"
+              ],
+              "nullable": true
+            }
+          ],
+          "returns": []
+        },
+        "setColorScheme": {
+          "params": [
+            {
+              "name": "browserContextId",
+              "type": "string",
+              "optional": true
+            },
+            {
+              "name": "colorScheme",
+              "type": "enum",
+              "enum": [
+                "dark",
+                "light",
+                "no-preference"
+              ],
+              "nullable": true
+            }
+          ],
+          "returns": []
+        },
+        "setReducedMotion": {
+          "params": [
+            {
+              "name": "browserContextId",
+              "type": "string",
+              "optional": true
+            },
+            {
+              "name": "reducedMotion",
+              "type": "enum",
+              "enum": [
+                "reduce",
+                "no-preference"
+              ],
+              "nullable": true
+            }
+          ],
+          "returns": []
+        },
+        "setForcedColors": {
+          "params": [
+            {
+              "name": "browserContextId",
+              "type": "string",
+              "optional": true
+            },
+            {
+              "name": "forcedColors",
+              "type": "enum",
+              "enum": [
+                "active",
+                "none"
+              ],
+              "nullable": true
+            }
+          ],
+          "returns": []
+        },
+        "setContrast": {
+          "params": [
+            {
+              "name": "browserContextId",
+              "type": "string",
+              "optional": true
+            },
+            {
+              "name": "contrast",
+              "type": "enum",
+              "enum": [
+                "less",
+                "more",
+                "custom",
+                "no-preference"
+              ],
+              "nullable": true
+            }
+          ],
+          "returns": []
+        },
+        "setVideoRecordingOptions": {
+          "params": [
+            {
+              "name": "browserContextId",
+              "type": "string",
+              "optional": true
+            },
+            {
+              "name": "options",
+              "type": "object",
+              "properties": [
+                {
+                  "name": "dir",
+                  "type": "string"
+                },
+                {
+                  "name": "width",
+                  "type": "number"
+                },
+                {
+                  "name": "height",
+                  "type": "number"
+                }
+              ],
+              "optional": true
+            }
+          ],
+          "returns": []
+        },
+        "cancelDownload": {
+          "params": [
+            {
+              "name": "uuid",
+              "type": "string",
+              "optional": true
+            }
+          ],
+          "returns": []
+        }
+      },
+      "events": {
+        "attachedToTarget": [
+          {
+            "name": "sessionId",
+            "type": "string"
+          },
+          {
+            "name": "targetInfo",
+            "type": "object",
+            "ref": "Browser.TargetInfo"
+          }
+        ],
+        "detachedFromTarget": [
+          {
+            "name": "sessionId",
+            "type": "string"
+          },
+          {
+            "name": "targetId",
+            "type": "string"
+          }
+        ],
+        "downloadCreated": [
+          {
+            "name": "uuid",
+            "type": "string"
+          },
+          {
+            "name": "browserContextId",
+            "type": "string",
+            "optional": true
+          },
+          {
+            "name": "pageTargetId",
+            "type": "string"
+          },
+          {
+            "name": "frameId",
+            "type": "string"
+          },
+          {
+            "name": "url",
+            "type": "string"
+          },
+          {
+            "name": "suggestedFileName",
+            "type": "string"
+          }
+        ],
+        "downloadFinished": [
+          {
+            "name": "uuid",
+            "type": "string"
+          },
+          {
+            "name": "canceled",
+            "type": "boolean",
+            "optional": true
+          },
+          {
+            "name": "error",
+            "type": "string",
+            "optional": true
+          }
+        ],
+        "videoRecordingFinished": [
+          {
+            "name": "screencastId",
+            "type": "string"
+          }
+        ]
+      },
+      "types": {
+        "TargetInfo": {
+          "properties": [
+            {
+              "name": "type",
+              "type": "enum",
+              "enum": [
+                "page"
+              ]
+            },
+            {
+              "name": "targetId",
+              "type": "string"
+            },
+            {
+              "name": "browserContextId",
+              "type": "string",
+              "optional": true
+            },
+            {
+              "name": "openerId",
+              "type": "string",
+              "optional": true
+            }
+          ]
+        },
+        "UserPreference": {
+          "properties": [
+            {
+              "name": "name",
+              "type": "string"
+            },
+            {
+              "name": "value",
+              "type": "any"
+            }
+          ]
+        },
+        "CookieOptions": {
+          "properties": [
+            {
+              "name": "name",
+              "type": "string"
+            },
+            {
+              "name": "value",
+              "type": "string"
+            },
+            {
+              "name": "url",
+              "type": "string",
+              "optional": true
+            },
+            {
+              "name": "domain",
+              "type": "string",
+              "optional": true
+            },
+            {
+              "name": "path",
+              "type": "string",
+              "optional": true
+            },
+            {
+              "name": "secure",
+              "type": "boolean",
+              "optional": true
+            },
+            {
+              "name": "httpOnly",
+              "type": "boolean",
+              "optional": true
+            },
+            {
+              "name": "sameSite",
+              "type": "enum",
+              "enum": [
+                "Strict",
+                "Lax",
+                "None"
+              ],
+              "optional": true
+            },
+            {
+              "name": "expires",
+              "type": "number",
+              "optional": true
+            }
+          ]
+        },
+        "Cookie": {
+          "properties": [
+            {
+              "name": "name",
+              "type": "string"
+            },
+            {
+              "name": "domain",
+              "type": "string"
+            },
+            {
+              "name": "path",
+              "type": "string"
+            },
+            {
+              "name": "value",
+              "type": "string"
+            },
+            {
+              "name": "expires",
+              "type": "number"
+            },
+            {
+              "name": "size",
+              "type": "number"
+            },
+            {
+              "name": "httpOnly",
+              "type": "boolean"
+            },
+            {
+              "name": "secure",
+              "type": "boolean"
+            },
+            {
+              "name": "session",
+              "type": "boolean"
+            },
+            {
+              "name": "sameSite",
+              "type": "enum",
+              "enum": [
+                "Strict",
+                "Lax",
+                "None"
+              ]
+            }
+          ]
+        },
+        "Geolocation": {
+          "properties": [
+            {
+              "name": "latitude",
+              "type": "number"
+            },
+            {
+              "name": "longitude",
+              "type": "number"
+            },
+            {
+              "name": "accuracy",
+              "type": "number",
+              "optional": true
+            }
+          ]
+        },
+        "DownloadOptions": {
+          "properties": [
+            {
+              "name": "behavior",
+              "type": "enum",
+              "enum": [
+                "saveToDisk",
+                "cancel"
+              ],
+              "optional": true
+            },
+            {
+              "name": "downloadsDir",
+              "type": "string",
+              "optional": true
+            }
+          ]
+        }
+      },
+      "targets": [
+        "browser"
+      ]
+    },
+    "Heap": {
+      "methods": {
+        "collectGarbage": {
+          "params": [],
+          "returns": []
+        }
+      },
+      "events": {},
+      "types": {},
+      "targets": [
+        "page"
+      ]
+    },
+    "Network": {
+      "methods": {
+        "setRequestInterception": {
+          "params": [
+            {
+              "name": "enabled",
+              "type": "boolean"
+            }
+          ],
+          "returns": []
+        },
+        "setExtraHTTPHeaders": {
+          "params": [
+            {
+              "name": "headers",
+              "type": "array",
+              "items": {
+                "type": "object",
+                "ref": "Network.HTTPHeader"
+              }
+            }
+          ],
+          "returns": []
+        },
+        "abortInterceptedRequest": {
+          "params": [
+            {
+              "name": "requestId",
+              "type": "string"
+            },
+            {
+              "name": "errorCode",
+              "type": "string"
+            }
+          ],
+          "returns": []
+        },
+        "resumeInterceptedRequest": {
+          "params": [
+            {
+              "name": "requestId",
+              "type": "string"
+            },
+            {
+              "name": "url",
+              "type": "string",
+              "optional": true
+            },
+            {
+              "name": "method",
+              "type": "string",
+              "optional": true
+            },
+            {
+              "name": "headers",
+              "type": "array",
+              "items": {
+                "type": "object",
+                "ref": "Network.HTTPHeader"
+              },
+              "optional": true
+            },
+            {
+              "name": "postData",
+              "type": "string",
+              "optional": true
+            }
+          ],
+          "returns": []
+        },
+        "fulfillInterceptedRequest": {
+          "params": [
+            {
+              "name": "requestId",
+              "type": "string"
+            },
+            {
+              "name": "status",
+              "type": "number"
+            },
+            {
+              "name": "statusText",
+              "type": "string"
+            },
+            {
+              "name": "headers",
+              "type": "array",
+              "items": {
+                "type": "object",
+                "ref": "Network.HTTPHeader"
+              }
+            },
+            {
+              "name": "base64body",
+              "type": "string",
+              "optional": true
+            }
+          ],
+          "returns": []
+        },
+        "getResponseBody": {
+          "params": [
+            {
+              "name": "requestId",
+              "type": "string"
+            }
+          ],
+          "returns": [
+            {
+              "name": "base64body",
+              "type": "string"
+            },
+            {
+              "name": "evicted",
+              "type": "boolean",
+              "optional": true
+            }
+          ]
+        }
+      },
+      "events": {
+        "requestWillBeSent": [
+          {
+            "name": "frameId",
+            "type": "string",
+            "optional": true
+          },
+          {
+            "name": "requestId",
+            "type": "string"
+          },
+          {
+            "name": "redirectedFrom",
+            "type": "string",
+            "optional": true
+          },
+          {
+            "name": "postData",
+            "type": "string",
+            "optional": true
+          },
+          {
+            "name": "headers",
+            "type": "array",
+            "items": {
+              "type": "object",
+              "ref": "Network.HTTPHeader"
+            }
+          },
+          {
+            "name": "isIntercepted",
+            "type": "boolean"
+          },
+          {
+            "name": "url",
+            "type": "string"
+          },
+          {
+            "name": "method",
+            "type": "string"
+          },
+          {
+            "name": "navigationId",
+            "type": "string",
+            "optional": true
+          },
+          {
+            "name": "cause",
+            "type": "string"
+          },
+          {
+            "name": "internalCause",
+            "type": "string"
+          }
+        ],
+        "responseReceived": [
+          {
+            "name": "securityDetails",
+            "type": "object",
+            "ref": "Network.SecurityDetails",
+            "nullable": true
+          },
+          {
+            "name": "requestId",
+            "type": "string"
+          },
+          {
+            "name": "fromCache",
+            "type": "boolean"
+          },
+          {
+            "name": "remoteIPAddress",
+            "type": "string",
+            "optional": true
+          },
+          {
+            "name": "remotePort",
+            "type": "number",
+            "optional": true
+          },
+          {
+            "name": "status",
+            "type": "number"
+          },
+          {
+            "name": "statusText",
+            "type": "string"
+          },
+          {
+            "name": "headers",
+            "type": "array",
+            "items": {
+              "type": "object",
+              "ref": "Network.HTTPHeader"
+            }
+          },
+          {
+            "name": "timing",
+            "type": "object",
+            "ref": "Network.ResourceTiming"
+          },
+          {
+            "name": "fromServiceWorker",
+            "type": "boolean"
+          }
+        ],
+        "requestFinished": [
+          {
+            "name": "requestId",
+            "type": "string"
+          },
+          {
+            "name": "responseEndTime",
+            "type": "number"
+          },
+          {
+            "name": "transferSize",
+            "type": "number"
+          },
+          {
+            "name": "encodedBodySize",
+            "type": "number"
+          },
+          {
+            "name": "protocolVersion",
+            "type": "string",
+            "optional": true
+          }
+        ],
+        "requestFailed": [
+          {
+            "name": "requestId",
+            "type": "string"
+          },
+          {
+            "name": "errorCode",
+            "type": "string"
+          }
+        ]
+      },
+      "types": {
+        "HTTPHeader": {
+          "properties": [
+            {
+              "name": "name",
+              "type": "string"
+            },
+            {
+              "name": "value",
+              "type": "string"
+            }
+          ]
+        },
+        "HTTPCredentials": {
+          "properties": [
+            {
+              "name": "username",
+              "type": "string"
+            },
+            {
+              "name": "password",
+              "type": "string"
+            },
+            {
+              "name": "origin",
+              "type": "string",
+              "optional": true
+            }
+          ]
+        },
+        "SecurityDetails": {
+          "properties": [
+            {
+              "name": "protocol",
+              "type": "string"
+            },
+            {
+              "name": "subjectName",
+              "type": "string"
+            },
+            {
+              "name": "issuer",
+              "type": "string"
+            },
+            {
+              "name": "validFrom",
+              "type": "number"
+            },
+            {
+              "name": "validTo",
+              "type": "number"
+            }
+          ]
+        },
+        "ResourceTiming": {
+          "properties": [
+            {
+              "name": "startTime",
+              "type": "number"
+            },
+            {
+              "name": "domainLookupStart",
+              "type": "number"
+            },
+            {
+              "name": "domainLookupEnd",
+              "type": "number"
+            },
+            {
+              "name": "connectStart",
+              "type": "number"
+            },
+            {
+              "name": "secureConnectionStart",
+              "type": "number"
+            },
+            {
+              "name": "connectEnd",
+              "type": "number"
+            },
+            {
+              "name": "requestStart",
+              "type": "number"
+            },
+            {
+              "name": "responseStart",
+              "type": "number"
+            }
+          ]
+        }
+      },
+      "targets": [
+        "page"
+      ]
+    },
+    "Runtime": {
+      "methods": {
+        "evaluate": {
+          "params": [
+            {
+              "name": "executionContextId",
+              "type": "string"
+            },
+            {
+              "name": "expression",
+              "type": "string"
+            },
+            {
+              "name": "returnByValue",
+              "type": "boolean",
+              "optional": true
+            }
+          ],
+          "returns": [
+            {
+              "name": "result",
+              "type": "object",
+              "ref": "Runtime.RemoteObject",
+              "optional": true
+            },
+            {
+              "name": "exceptionDetails",
+              "type": "object",
+              "ref": "Runtime.ExceptionDetails",
+              "optional": true
+            }
+          ]
+        },
+        "callFunction": {
+          "params": [
+            {
+              "name": "executionContextId",
+              "type": "string"
+            },
+            {
+              "name": "functionDeclaration",
+              "type": "string"
+            },
+            {
+              "name": "returnByValue",
+              "type": "boolean",
+              "optional": true
+            },
+            {
+              "name": "args",
+              "type": "array",
+              "items": {
+                "type": "object",
+                "ref": "Runtime.CallFunctionArgument"
+              }
+            }
+          ],
+          "returns": [
+            {
+              "name": "result",
+              "type": "object",
+              "ref": "Runtime.RemoteObject",
+              "optional": true
+            },
+            {
+              "name": "exceptionDetails",
+              "type": "object",
+              "ref": "Runtime.ExceptionDetails",
+              "optional": true
+            }
+          ]
+        },
+        "disposeObject": {
+          "params": [
+            {
+              "name": "executionContextId",
+              "type": "string"
+            },
+            {
+              "name": "objectId",
+              "type": "string"
+            }
+          ],
+          "returns": []
+        },
+        "getObjectProperties": {
+          "params": [
+            {
+              "name": "executionContextId",
+              "type": "string"
+            },
+            {
+              "name": "objectId",
+              "type": "string"
+            }
+          ],
+          "returns": [
+            {
+              "name": "properties",
+              "type": "array",
+              "items": {
+                "type": "object",
+                "ref": "Runtime.ObjectProperty"
+              }
+            }
+          ]
+        }
+      },
+      "events": {
+        "executionContextCreated": [
+          {
+            "name": "executionContextId",
+            "type": "string"
+          },
+          {
+            "name": "auxData",
+            "type": "object",
+            "ref": "Runtime.AuxData"
+          }
+        ],
+        "executionContextDestroyed": [
+          {
+            "name": "executionContextId",
+            "type": "string"
+          }
+        ],
+        "executionContextsCleared": [],
+        "console": [
+          {
+            "name": "executionContextId",
+            "type": "string"
+          },
+          {
+            "name": "args",
+            "type": "array",
+            "items": {
+              "type": "object",
+              "ref": "Runtime.RemoteObject"
+            }
+          },
+          {
+            "name": "type",
+            "type": "string"
+          },
+          {
+            "name": "location",
+            "type": "object",
+            "ref": "Runtime.ScriptLocation"
+          }
+        ]
+      },
+      "types": {
+        "RemoteObject": {
+          "properties": [
+            {
+              "name": "type",
+              "type": "enum",
+              "enum": [
+                "object",
+                "function",
+                "undefined",
+                "string",
+                "number",
+                "boolean",
+                "symbol",
+                "bigint"
+              ],
+              "optional": true
+            },
+            {
+              "name": "subtype",
+              "type": "enum",
+              "enum": [
+                "array",
+                "null",
+                "node",
+                "regexp",
+                "date",
+                "map",
+                "set",
+                "weakmap",
+                "weakset",
+                "error",
+                "proxy",
+                "promise",
+                "typedarray"
+              ],
+              "optional": true
+            },
+            {
+              "name": "objectId",
+              "type": "string",
+              "optional": true
+            },
+            {
+              "name": "unserializableValue",
+              "type": "enum",
+              "enum": [
+                "Infinity",
+                "-Infinity",
+                "-0",
+                "NaN"
+              ],
+              "optional": true
+            },
+            {
+              "name": "value",
+              "type": "any"
+            }
+          ]
+        },
+        "ObjectProperty": {
+          "properties": [
+            {
+              "name": "name",
+              "type": "string"
+            },
+            {
+              "name": "value",
+              "type": "object",
+              "ref": "Runtime.RemoteObject"
+            }
+          ]
+        },
+        "ScriptLocation": {
+          "properties": [
+            {
+              "name": "columnNumber",
+              "type": "number"
+            },
+            {
+              "name": "lineNumber",
+              "type": "number"
+            },
+            {
+              "name": "url",
+              "type": "string"
+            }
+          ]
+        },
+        "ExceptionDetails": {
+          "properties": [
+            {
+              "name": "text",
+              "type": "string",
+              "optional": true
+            },
+            {
+              "name": "stack",
+              "type": "string",
+              "optional": true
+            },
+            {
+              "name": "value",
+              "type": "any",
+              "optional": true
+            }
+          ]
+        },
+        "CallFunctionArgument": {
+          "properties": [
+            {
+              "name": "objectId",
+              "type": "string",
+              "optional": true
+            },
+            {
+              "name": "unserializableValue",
+              "type": "enum",
+              "enum": [
+                "Infinity",
+                "-Infinity",
+                "-0",
+                "NaN"
+              ],
+              "optional": true
+            },
+            {
+              "name": "value",
+              "type": "any"
+            }
+          ]
+        },
+        "AuxData": {
+          "properties": [
+            {
+              "name": "frameId",
+              "type": "string",
+              "optional": true
+            },
+            {
+              "name": "name",
+              "type": "string",
+              "optional": true
+            }
+          ]
+        }
+      },
+      "targets": [
+        "page"
+      ]
+    },
+    "Page": {
+      "methods": {
+        "close": {
+          "params": [
+            {
+              "name": "runBeforeUnload",
+              "type": "boolean",
+              "optional": true
+            }
+          ],
+          "returns": []
+        },
+        "setFileInputFiles": {
+          "params": [
+            {
+              "name": "frameId",
+              "type": "string"
+            },
+            {
+              "name": "objectId",
+              "type": "string"
+            },
+            {
+              "name": "files",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ],
+          "returns": []
+        },
+        "addBinding": {
+          "params": [
+            {
+              "name": "worldName",
+              "type": "string",
+              "optional": true
+            },
+            {
+              "name": "name",
+              "type": "string"
+            },
+            {
+              "name": "script",
+              "type": "string"
+            }
+          ],
+          "returns": []
+        },
+        "setViewportSize": {
+          "params": [
+            {
+              "name": "viewportSize",
+              "type": "object",
+              "ref": "Page.Size",
+              "nullable": true
+            }
+          ],
+          "returns": []
+        },
+        "setZoom": {
+          "params": [
+            {
+              "name": "zoom",
+              "type": "number"
+            }
+          ],
+          "returns": []
+        },
+        "bringToFront": {
+          "params": [],
+          "returns": []
+        },
+        "setEmulatedMedia": {
+          "params": [
+            {
+              "name": "type",
+              "type": "enum",
+              "enum": [
+                "screen",
+                "print",
+                ""
+              ],
+              "optional": true
+            },
+            {
+              "name": "colorScheme",
+              "type": "enum",
+              "enum": [
+                "dark",
+                "light",
+                "no-preference"
+              ],
+              "optional": true
+            },
+            {
+              "name": "reducedMotion",
+              "type": "enum",
+              "enum": [
+                "reduce",
+                "no-preference"
+              ],
+              "optional": true
+            },
+            {
+              "name": "forcedColors",
+              "type": "enum",
+              "enum": [
+                "active",
+                "none"
+              ],
+              "optional": true
+            },
+            {
+              "name": "contrast",
+              "type": "enum",
+              "enum": [
+                "less",
+                "more",
+                "custom",
+                "no-preference"
+              ],
+              "optional": true
+            }
+          ],
+          "returns": []
+        },
+        "setCacheDisabled": {
+          "params": [
+            {
+              "name": "cacheDisabled",
+              "type": "boolean"
+            }
+          ],
+          "returns": []
+        },
+        "describeNode": {
+          "params": [
+            {
+              "name": "frameId",
+              "type": "string"
+            },
+            {
+              "name": "objectId",
+              "type": "string"
+            }
+          ],
+          "returns": [
+            {
+              "name": "contentFrameId",
+              "type": "string",
+              "optional": true
+            },
+            {
+              "name": "ownerFrameId",
+              "type": "string",
+              "optional": true
+            }
+          ]
+        },
+        "scrollIntoViewIfNeeded": {
+          "params": [
+            {
+              "name": "frameId",
+              "type": "string"
+            },
+            {
+              "name": "objectId",
+              "type": "string"
+            },
+            {
+              "name": "rect",
+              "type": "object",
+              "ref": "Page.Rect",
+              "optional": true
+            }
+          ],
+          "returns": []
+        },
+        "setInitScripts": {
+          "params": [
+            {
+              "name": "scripts",
+              "type": "array",
+              "items": {
+                "type": "object",
+                "ref": "Page.InitScript"
+              }
+            }
+          ],
+          "returns": []
+        },
+        "navigate": {
+          "params": [
+            {
+              "name": "frameId",
+              "type": "string"
+            },
+            {
+              "name": "url",
+              "type": "string"
+            },
+            {
+              "name": "referer",
+              "type": "string",
+              "optional": true
+            }
+          ],
+          "returns": [
+            {
+              "name": "navigationId",
+              "type": "string",
+              "nullable": true
+            }
+          ]
+        },
+        "goBack": {
+          "params": [
+            {
+              "name": "frameId",
+              "type": "string"
+            }
+          ],
+          "returns": [
+            {
+              "name": "success",
+              "type": "boolean"
+            }
+          ]
+        },
+        "goForward": {
+          "params": [
+            {
+              "name": "frameId",
+              "type": "string"
+            }
+          ],
+          "returns": [
+            {
+              "name": "success",
+              "type": "boolean"
+            }
+          ]
+        },
+        "reload": {
+          "params": [],
+          "returns": []
+        },
+        "adoptNode": {
+          "params": [
+            {
+              "name": "frameId",
+              "type": "string"
+            },
+            {
+              "name": "objectId",
+              "type": "string",
+              "optional": true
+            },
+            {
+              "name": "executionContextId",
+              "type": "string"
+            }
+          ],
+          "returns": [
+            {
+              "name": "remoteObject",
+              "type": "object",
+              "ref": "Runtime.RemoteObject",
+              "nullable": true
+            }
+          ]
+        },
+        "screenshot": {
+          "params": [
+            {
+              "name": "mimeType",
+              "type": "enum",
+              "enum": [
+                "image/png",
+                "image/jpeg"
+              ]
+            },
+            {
+              "name": "clip",
+              "type": "object",
+              "ref": "Page.Clip"
+            },
+            {
+              "name": "quality",
+              "type": "number",
+              "optional": true
+            },
+            {
+              "name": "omitDeviceScaleFactor",
+              "type": "boolean",
+              "optional": true
+            }
+          ],
+          "returns": [
+            {
+              "name": "data",
+              "type": "string"
+            }
+          ]
+        },
+        "getContentQuads": {
+          "params": [
+            {
+              "name": "frameId",
+              "type": "string"
+            },
+            {
+              "name": "objectId",
+              "type": "string"
+            }
+          ],
+          "returns": [
+            {
+              "name": "quads",
+              "type": "array",
+              "items": {
+                "type": "object",
+                "ref": "Page.DOMQuad"
+              }
+            }
+          ]
+        },
+        "dispatchKeyEvent": {
+          "params": [
+            {
+              "name": "type",
+              "type": "string"
+            },
+            {
+              "name": "key",
+              "type": "string"
+            },
+            {
+              "name": "keyCode",
+              "type": "number"
+            },
+            {
+              "name": "location",
+              "type": "number"
+            },
+            {
+              "name": "code",
+              "type": "string"
+            },
+            {
+              "name": "repeat",
+              "type": "boolean"
+            },
+            {
+              "name": "text",
+              "type": "string",
+              "optional": true
+            }
+          ],
+          "returns": []
+        },
+        "dispatchTouchEvent": {
+          "params": [
+            {
+              "name": "type",
+              "type": "enum",
+              "enum": [
+                "touchStart",
+                "touchEnd",
+                "touchMove",
+                "touchCancel"
+              ]
+            },
+            {
+              "name": "touchPoints",
+              "type": "array",
+              "items": {
+                "type": "object",
+                "ref": "Page.TouchPoint"
+              }
+            },
+            {
+              "name": "modifiers",
+              "type": "number"
+            }
+          ],
+          "returns": [
+            {
+              "name": "defaultPrevented",
+              "type": "boolean"
+            }
+          ]
+        },
+        "dispatchTapEvent": {
+          "params": [
+            {
+              "name": "x",
+              "type": "number"
+            },
+            {
+              "name": "y",
+              "type": "number"
+            },
+            {
+              "name": "modifiers",
+              "type": "number"
+            }
+          ],
+          "returns": []
+        },
+        "dispatchMouseEvent": {
+          "params": [
+            {
+              "name": "type",
+              "type": "enum",
+              "enum": [
+                "mousedown",
+                "mousemove",
+                "mouseup"
+              ]
+            },
+            {
+              "name": "button",
+              "type": "number"
+            },
+            {
+              "name": "x",
+              "type": "number"
+            },
+            {
+              "name": "y",
+              "type": "number"
+            },
+            {
+              "name": "modifiers",
+              "type": "number"
+            },
+            {
+              "name": "clickCount",
+              "type": "number",
+              "optional": true
+            },
+            {
+              "name": "buttons",
+              "type": "number"
+            }
+          ],
+          "returns": []
+        },
+        "dispatchWheelEvent": {
+          "params": [
+            {
+              "name": "x",
+              "type": "number"
+            },
+            {
+              "name": "y",
+              "type": "number"
+            },
+            {
+              "name": "deltaX",
+              "type": "number"
+            },
+            {
+              "name": "deltaY",
+              "type": "number"
+            },
+            {
+              "name": "deltaZ",
+              "type": "number"
+            },
+            {
+              "name": "modifiers",
+              "type": "number"
+            }
+          ],
+          "returns": []
+        },
+        "insertText": {
+          "params": [
+            {
+              "name": "text",
+              "type": "string"
+            }
+          ],
+          "returns": []
+        },
+        "crash": {
+          "params": [],
+          "returns": []
+        },
+        "handleDialog": {
+          "params": [
+            {
+              "name": "dialogId",
+              "type": "string"
+            },
+            {
+              "name": "accept",
+              "type": "boolean"
+            },
+            {
+              "name": "promptText",
+              "type": "string",
+              "optional": true
+            }
+          ],
+          "returns": []
+        },
+        "setInterceptFileChooserDialog": {
+          "params": [
+            {
+              "name": "enabled",
+              "type": "boolean"
+            }
+          ],
+          "returns": []
+        },
+        "sendMessageToWorker": {
+          "params": [
+            {
+              "name": "frameId",
+              "type": "string"
+            },
+            {
+              "name": "workerId",
+              "type": "string"
+            },
+            {
+              "name": "message",
+              "type": "string"
+            }
+          ],
+          "returns": []
+        },
+        "startScreencast": {
+          "params": [
+            {
+              "name": "width",
+              "type": "number"
+            },
+            {
+              "name": "height",
+              "type": "number"
+            },
+            {
+              "name": "quality",
+              "type": "number"
+            }
+          ],
+          "returns": [
+            {
+              "name": "screencastId",
+              "type": "string"
+            }
+          ]
+        },
+        "screencastFrameAck": {
+          "params": [
+            {
+              "name": "screencastId",
+              "type": "string"
+            }
+          ],
+          "returns": []
+        },
+        "stopScreencast": {
+          "params": [],
+          "returns": []
+        }
+      },
+      "events": {
+        "ready": [],
+        "crashed": [],
+        "eventFired": [
+          {
+            "name": "frameId",
+            "type": "string"
+          },
+          {
+            "name": "name",
+            "type": "enum",
+            "enum": [
+              "load",
+              "DOMContentLoaded"
+            ]
+          }
+        ],
+        "uncaughtError": [
+          {
+            "name": "frameId",
+            "type": "string"
+          },
+          {
+            "name": "message",
+            "type": "string"
+          },
+          {
+            "name": "stack",
+            "type": "string"
+          },
+          {
+            "name": "location",
+            "type": "object",
+            "ref": "Runtime.ScriptLocation"
+          }
+        ],
+        "frameAttached": [
+          {
+            "name": "frameId",
+            "type": "string"
+          },
+          {
+            "name": "parentFrameId",
+            "type": "string",
+            "optional": true
+          }
+        ],
+        "frameDetached": [
+          {
+            "name": "frameId",
+            "type": "string"
+          }
+        ],
+        "navigationStarted": [
+          {
+            "name": "frameId",
+            "type": "string"
+          },
+          {
+            "name": "navigationId",
+            "type": "string"
+          }
+        ],
+        "navigationCommitted": [
+          {
+            "name": "frameId",
+            "type": "string"
+          },
+          {
+            "name": "navigationId",
+            "type": "string",
+            "optional": true
+          },
+          {
+            "name": "url",
+            "type": "string"
+          },
+          {
+            "name": "name",
+            "type": "string"
+          }
+        ],
+        "navigationAborted": [
+          {
+            "name": "frameId",
+            "type": "string"
+          },
+          {
+            "name": "navigationId",
+            "type": "string"
+          },
+          {
+            "name": "errorText",
+            "type": "string"
+          }
+        ],
+        "sameDocumentNavigation": [
+          {
+            "name": "frameId",
+            "type": "string"
+          },
+          {
+            "name": "url",
+            "type": "string"
+          }
+        ],
+        "dialogOpened": [
+          {
+            "name": "dialogId",
+            "type": "string"
+          },
+          {
+            "name": "type",
+            "type": "enum",
+            "enum": [
+              "prompt",
+              "alert",
+              "confirm",
+              "beforeunload"
+            ]
+          },
+          {
+            "name": "message",
+            "type": "string"
+          },
+          {
+            "name": "defaultValue",
+            "type": "string",
+            "optional": true
+          }
+        ],
+        "dialogClosed": [
+          {
+            "name": "dialogId",
+            "type": "string"
+          }
+        ],
+        "bindingCalled": [
+          {
+            "name": "executionContextId",
+            "type": "string"
+          },
+          {
+            "name": "name",
+            "type": "string"
+          },
+          {
+            "name": "payload",
+            "type": "any"
+          }
+        ],
+        "linkClicked": [
+          {
+            "name": "phase",
+            "type": "enum",
+            "enum": [
+              "before",
+              "after"
+            ]
+          }
+        ],
+        "willOpenNewWindowAsynchronously": [],
+        "fileChooserOpened": [
+          {
+            "name": "executionContextId",
+            "type": "string"
+          },
+          {
+            "name": "element",
+            "type": "object",
+            "ref": "Runtime.RemoteObject"
+          }
+        ],
+        "workerCreated": [
+          {
+            "name": "workerId",
+            "type": "string"
+          },
+          {
+            "name": "frameId",
+            "type": "string"
+          },
+          {
+            "name": "url",
+            "type": "string"
+          }
+        ],
+        "workerDestroyed": [
+          {
+            "name": "workerId",
+            "type": "string"
+          }
+        ],
+        "dispatchMessageFromWorker": [
+          {
+            "name": "workerId",
+            "type": "string"
+          },
+          {
+            "name": "message",
+            "type": "string"
+          }
+        ],
+        "videoRecordingStarted": [
+          {
+            "name": "screencastId",
+            "type": "string"
+          },
+          {
+            "name": "file",
+            "type": "string"
+          }
+        ],
+        "webSocketCreated": [
+          {
+            "name": "frameId",
+            "type": "string"
+          },
+          {
+            "name": "wsid",
+            "type": "string"
+          },
+          {
+            "name": "requestURL",
+            "type": "string"
+          }
+        ],
+        "webSocketOpened": [
+          {
+            "name": "frameId",
+            "type": "string"
+          },
+          {
+            "name": "requestId",
+            "type": "string"
+          },
+          {
+            "name": "wsid",
+            "type": "string"
+          },
+          {
+            "name": "effectiveURL",
+            "type": "string"
+          }
+        ],
+        "webSocketClosed": [
+          {
+            "name": "frameId",
+            "type": "string"
+          },
+          {
+            "name": "wsid",
+            "type": "string"
+          },
+          {
+            "name": "error",
+            "type": "string"
+          }
+        ],
+        "webSocketFrameSent": [
+          {
+            "name": "frameId",
+            "type": "string"
+          },
+          {
+            "name": "wsid",
+            "type": "string"
+          },
+          {
+            "name": "opcode",
+            "type": "number"
+          },
+          {
+            "name": "data",
+            "type": "string"
+          }
+        ],
+        "webSocketFrameReceived": [
+          {
+            "name": "frameId",
+            "type": "string"
+          },
+          {
+            "name": "wsid",
+            "type": "string"
+          },
+          {
+            "name": "opcode",
+            "type": "number"
+          },
+          {
+            "name": "data",
+            "type": "string"
+          }
+        ],
+        "screencastFrame": [
+          {
+            "name": "data",
+            "type": "string"
+          },
+          {
+            "name": "deviceWidth",
+            "type": "number"
+          },
+          {
+            "name": "deviceHeight",
+            "type": "number"
+          }
+        ]
+      },
+      "types": {
+        "DOMPoint": {
+          "properties": [
+            {
+              "name": "x",
+              "type": "number"
+            },
+            {
+              "name": "y",
+              "type": "number"
+            }
+          ]
+        },
+        "Rect": {
+          "properties": [
+            {
+              "name": "x",
+              "type": "number"
+            },
+            {
+              "name": "y",
+              "type": "number"
+            },
+            {
+              "name": "width",
+              "type": "number"
+            },
+            {
+              "name": "height",
+              "type": "number"
+            }
+          ]
+        },
+        "Size": {
+          "properties": [
+            {
+              "name": "width",
+              "type": "number"
+            },
+            {
+              "name": "height",
+              "type": "number"
+            }
+          ]
+        },
+        "Viewport": {
+          "properties": [
+            {
+              "name": "viewportSize",
+              "type": "object",
+              "ref": "Page.Size"
+            },
+            {
+              "name": "deviceScaleFactor",
+              "type": "number",
+              "optional": true
+            }
+          ]
+        },
+        "DOMQuad": {
+          "properties": [
+            {
+              "name": "p1",
+              "type": "object",
+              "ref": "Page.DOMPoint"
+            },
+            {
+              "name": "p2",
+              "type": "object",
+              "ref": "Page.DOMPoint"
+            },
+            {
+              "name": "p3",
+              "type": "object",
+              "ref": "Page.DOMPoint"
+            },
+            {
+              "name": "p4",
+              "type": "object",
+              "ref": "Page.DOMPoint"
+            }
+          ]
+        },
+        "TouchPoint": {
+          "properties": [
+            {
+              "name": "x",
+              "type": "number"
+            },
+            {
+              "name": "y",
+              "type": "number"
+            },
+            {
+              "name": "radiusX",
+              "type": "number",
+              "optional": true
+            },
+            {
+              "name": "radiusY",
+              "type": "number",
+              "optional": true
+            },
+            {
+              "name": "rotationAngle",
+              "type": "number",
+              "optional": true
+            },
+            {
+              "name": "force",
+              "type": "number",
+              "optional": true
+            }
+          ]
+        },
+        "Clip": {
+          "properties": [
+            {
+              "name": "x",
+              "type": "number"
+            },
+            {
+              "name": "y",
+              "type": "number"
+            },
+            {
+              "name": "width",
+              "type": "number"
+            },
+            {
+              "name": "height",
+              "type": "number"
+            }
+          ]
+        },
+        "InitScript": {
+          "properties": [
+            {
+              "name": "script",
+              "type": "string"
+            },
+            {
+              "name": "worldName",
+              "type": "string",
+              "optional": true
+            }
+          ]
+        }
+      },
+      "targets": [
+        "page"
+      ]
+    },
+    "Accessibility": {
+      "methods": {
+        "getFullAXTree": {
+          "params": [
+            {
+              "name": "objectId",
+              "type": "string",
+              "optional": true
+            }
+          ],
+          "returns": [
+            {
+              "name": "tree",
+              "type": "object",
+              "ref": "Accessibility.AXTree"
+            }
+          ]
+        }
+      },
+      "events": {},
+      "types": {
+        "AXTree": {
+          "properties": [
+            {
+              "name": "role",
+              "type": "string"
+            },
+            {
+              "name": "name",
+              "type": "string"
+            },
+            {
+              "name": "children",
+              "type": "array",
+              "items": {
+                "type": "object",
+                "ref": "Accessibility.AXTree"
+              },
+              "optional": true
+            },
+            {
+              "name": "selected",
+              "type": "boolean",
+              "optional": true
+            },
+            {
+              "name": "focused",
+              "type": "boolean",
+              "optional": true
+            },
+            {
+              "name": "pressed",
+              "type": "boolean",
+              "optional": true
+            },
+            {
+              "name": "focusable",
+              "type": "boolean",
+              "optional": true
+            },
+            {
+              "name": "haspopup",
+              "type": "string",
+              "optional": true
+            },
+            {
+              "name": "required",
+              "type": "boolean",
+              "optional": true
+            },
+            {
+              "name": "invalid",
+              "type": "boolean",
+              "optional": true
+            },
+            {
+              "name": "modal",
+              "type": "boolean",
+              "optional": true
+            },
+            {
+              "name": "editable",
+              "type": "boolean",
+              "optional": true
+            },
+            {
+              "name": "busy",
+              "type": "boolean",
+              "optional": true
+            },
+            {
+              "name": "multiline",
+              "type": "boolean",
+              "optional": true
+            },
+            {
+              "name": "readonly",
+              "type": "boolean",
+              "optional": true
+            },
+            {
+              "name": "checked",
+              "type": "enum",
+              "enum": [
+                "mixed",
+                true
+              ],
+              "optional": true
+            },
+            {
+              "name": "expanded",
+              "type": "boolean",
+              "optional": true
+            },
+            {
+              "name": "disabled",
+              "type": "boolean",
+              "optional": true
+            },
+            {
+              "name": "multiselectable",
+              "type": "boolean",
+              "optional": true
+            },
+            {
+              "name": "value",
+              "type": "string",
+              "optional": true
+            },
+            {
+              "name": "description",
+              "type": "string",
+              "optional": true
+            },
+            {
+              "name": "roledescription",
+              "type": "string",
+              "optional": true
+            },
+            {
+              "name": "valuetext",
+              "type": "string",
+              "optional": true
+            },
+            {
+              "name": "orientation",
+              "type": "string",
+              "optional": true
+            },
+            {
+              "name": "autocomplete",
+              "type": "string",
+              "optional": true
+            },
+            {
+              "name": "keyshortcuts",
+              "type": "string",
+              "optional": true
+            },
+            {
+              "name": "level",
+              "type": "number",
+              "optional": true
+            },
+            {
+              "name": "tag",
+              "type": "string",
+              "optional": true
+            },
+            {
+              "name": "foundObject",
+              "type": "boolean",
+              "optional": true
+            }
+          ]
+        }
+      },
+      "targets": [
+        "page"
+      ]
+    }
+  }
+}
