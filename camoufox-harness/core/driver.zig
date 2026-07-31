@@ -267,6 +267,31 @@ pub const Driver = struct {
         return target_id;
     }
 
+    /// Browser.removeBrowserContext.
+    pub fn removeBrowserContext(self: *Driver, browser_context_id: []const u8, timeout_ms: i32) !void {
+        const params = try browser.removeBrowserContextParams(self.allocator, browser_context_id);
+        defer self.allocator.free(params);
+        var resp = try self.send(null, browser.method_remove_browser_context, params, timeout_ms);
+        defer resp.deinit(self.allocator);
+        if (resp.is_error) return error.JugglerError;
+    }
+
+    /// Browser.setExtraHTTPHeaders.
+    pub fn setExtraHTTPHeaders(self: *Driver, browser_context_id: ?[]const u8, headers: []const browser.Header, timeout_ms: i32) !void {
+        const params = try browser.setExtraHTTPHeadersParams(self.allocator, browser_context_id, headers);
+        defer self.allocator.free(params);
+        var resp = try self.send(null, browser.method_set_extra_http_headers, params, timeout_ms);
+        defer resp.deinit(self.allocator);
+        if (resp.is_error) return error.JugglerError;
+    }
+
+    /// Browser.close (root session).
+    pub fn close(self: *Driver, timeout_ms: i32) !void {
+        var resp = try self.send(null, browser.method_close, browser.closeParams(), timeout_ms);
+        defer resp.deinit(self.allocator);
+        if (resp.is_error) return error.JugglerError;
+    }
+
     /// Page.navigate on the page's main frame, waiting for the load
     /// lifecycle event. Returns an owned navigationId.
     pub fn navigate(self: *Driver, target_id: []const u8, url: []const u8, timeout_ms: i32) ![]u8 {
@@ -348,6 +373,8 @@ pub const Driver = struct {
             try self.onExecutionContextCreated(ev);
         } else if (std.mem.eql(u8, ev.method, "Runtime.executionContextsCleared")) {
             try self.onExecutionContextsCleared(ev);
+        } else if (std.mem.eql(u8, ev.method, "Runtime.executionContextDestroyed")) {
+            try self.onExecutionContextDestroyed(ev);
         } else if (std.mem.eql(u8, ev.method, "Page.eventFired")) {
             try self.onEventFired(ev);
         } else if (std.mem.eql(u8, ev.method, "Page.navigationAborted")) {
@@ -356,6 +383,8 @@ pub const Driver = struct {
             try self.onNavigationStarted(ev);
         } else if (std.mem.eql(u8, ev.method, "Page.frameAttached")) {
             try self.onFrameAttached(ev);
+        } else if (std.mem.eql(u8, ev.method, "Page.frameDetached")) {
+            try self.onFrameDetached(ev);
         }
         // Other events (Page.ready, navigationCommitted, ...) are ignored.
     }
@@ -467,6 +496,28 @@ pub const Driver = struct {
         p.contexts.clearRetainingCapacity();
     }
 
+    /// Runtime.executionContextDestroyed {executionContextId} on a page
+    /// session: drop the context so pickContext never selects a dead id.
+    fn onExecutionContextDestroyed(self: *Driver, ev: session.Router.Event) !void {
+        const sid = ev.session_id orelse return;
+        const p = self.by_session.get(sid) orelse return;
+        const parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, ev.raw, .{});
+        defer parsed.deinit();
+        const root = parsed.value;
+        if (root != .object) return;
+        const params = root.object.get("params") orelse return;
+        if (params != .object) return;
+        const ctx = params.object.get("executionContextId") orelse return;
+        if (ctx != .string) return;
+        for (p.contexts.items, 0..) |*c, i| {
+            if (std.mem.eql(u8, c.id, ctx.string)) {
+                var removed = p.contexts.swapRemove(i);
+                removed.deinit(self.allocator);
+                return;
+            }
+        }
+    }
+
     /// Page.eventFired {frameId, name: "load"|"DOMContentLoaded"}.
     fn onEventFired(self: *Driver, ev: session.Router.Event) !void {
         const sid = ev.session_id orelse return;
@@ -533,6 +584,26 @@ pub const Driver = struct {
         const frame_id = params.object.get("frameId") orelse return;
         if (frame_id != .string) return;
         p.main_frame_id = try self.allocator.dupe(u8, frame_id.string);
+    }
+
+    /// Page.frameDetached {frameId}: when the main frame detaches (new
+    /// document), clear it so a later frameAttached re-registers the new
+    /// main frame id instead of navigating with a stale one.
+    fn onFrameDetached(self: *Driver, ev: session.Router.Event) !void {
+        const sid = ev.session_id orelse return;
+        const p = self.by_session.get(sid) orelse return;
+        const mf = p.main_frame_id orelse return;
+        const parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, ev.raw, .{});
+        defer parsed.deinit();
+        const root = parsed.value;
+        if (root != .object) return;
+        const params = root.object.get("params") orelse return;
+        if (params != .object) return;
+        const frame_id = params.object.get("frameId") orelse return;
+        if (frame_id != .string) return;
+        if (!std.mem.eql(u8, frame_id.string, mf)) return; // sub-frame
+        self.allocator.free(mf);
+        p.main_frame_id = null;
     }
 };
 
@@ -727,6 +798,142 @@ test "driver: navigationAborted drives lifecycle to aborted" {
     try writeFake(&d, fds, "{\"method\":\"Page.navigationAborted\",\"params\":{\"frameId\":\"f1\",\"navigationId\":\"n1\",\"errorText\":\"NS_BINDING_ABORTED\"},\"sessionId\":\"s1\"}");
     try d.pump(1000);
     try testing.expectEqual(page.Lifecycle.State.aborted, p.lifecycle.state);
+}
+
+test "driver: executionContextDestroyed removes the context" {
+    const fds = try testPipe();
+    defer {
+        _ = std.os.linux.close(fds[0]);
+        _ = std.os.linux.close(fds[1]);
+    }
+    var d = Driver.init(testing.allocator, fds[0], fds[1], false);
+    defer d.deinit();
+
+    try writeFake(&d, fds, "{\"method\":\"Browser.attachedToTarget\",\"params\":{\"sessionId\":\"s1\",\"targetInfo\":{\"type\":\"page\",\"targetId\":\"t1\"}}}");
+    try d.pump(1000);
+    try writeFake(&d, fds, "{\"method\":\"Page.frameAttached\",\"params\":{\"frameId\":\"f1\"},\"sessionId\":\"s1\"}");
+    try d.pump(1000);
+    try writeFake(&d, fds, "{\"method\":\"Runtime.executionContextCreated\",\"params\":{\"executionContextId\":\"ctx-1\",\"auxData\":{\"frameId\":\"f1\"}},\"sessionId\":\"s1\"}");
+    try d.pump(1000);
+    try writeFake(&d, fds, "{\"method\":\"Runtime.executionContextCreated\",\"params\":{\"executionContextId\":\"ctx-2\",\"auxData\":{\"frameId\":\"f1\"}},\"sessionId\":\"s1\"}");
+    try d.pump(1000);
+    try writeFake(&d, fds, "{\"method\":\"Runtime.executionContextDestroyed\",\"params\":{\"executionContextId\":\"ctx-1\"},\"sessionId\":\"s1\"}");
+    try d.pump(1000);
+
+    const p = d.pages.get("t1") orelse return error.TestUnexpected;
+    try testing.expectEqual(@as(usize, 1), p.contexts.items.len);
+    try testing.expectEqualStrings("ctx-2", p.contexts.items[0].id);
+    try testing.expectEqualStrings("ctx-2", pickContext(p).?.id);
+}
+
+test "driver: executionContextDestroyed for unknown id is a no-op" {
+    const fds = try testPipe();
+    defer {
+        _ = std.os.linux.close(fds[0]);
+        _ = std.os.linux.close(fds[1]);
+    }
+    var d = Driver.init(testing.allocator, fds[0], fds[1], false);
+    defer d.deinit();
+
+    try writeFake(&d, fds, "{\"method\":\"Browser.attachedToTarget\",\"params\":{\"sessionId\":\"s1\",\"targetInfo\":{\"type\":\"page\",\"targetId\":\"t1\"}}}");
+    try d.pump(1000);
+    try writeFake(&d, fds, "{\"method\":\"Runtime.executionContextCreated\",\"params\":{\"executionContextId\":\"ctx-1\",\"auxData\":{\"frameId\":\"f1\"}},\"sessionId\":\"s1\"}");
+    try d.pump(1000);
+    try writeFake(&d, fds, "{\"method\":\"Runtime.executionContextDestroyed\",\"params\":{\"executionContextId\":\"ctx-9\"},\"sessionId\":\"s1\"}");
+    try d.pump(1000);
+
+    const p = d.pages.get("t1") orelse return error.TestUnexpected;
+    try testing.expectEqual(@as(usize, 1), p.contexts.items.len);
+    try testing.expectEqualStrings("ctx-1", p.contexts.items[0].id);
+}
+
+test "driver: frameDetached clears main frame, re-attach re-registers" {
+    const fds = try testPipe();
+    defer {
+        _ = std.os.linux.close(fds[0]);
+        _ = std.os.linux.close(fds[1]);
+    }
+    var d = Driver.init(testing.allocator, fds[0], fds[1], false);
+    defer d.deinit();
+
+    try writeFake(&d, fds, "{\"method\":\"Browser.attachedToTarget\",\"params\":{\"sessionId\":\"s1\",\"targetInfo\":{\"type\":\"page\",\"targetId\":\"t1\"}}}");
+    try d.pump(1000);
+    try writeFake(&d, fds, "{\"method\":\"Page.frameAttached\",\"params\":{\"frameId\":\"f-old\"},\"sessionId\":\"s1\"}");
+    try d.pump(1000);
+    try writeFake(&d, fds, "{\"method\":\"Page.frameDetached\",\"params\":{\"frameId\":\"f-old\"},\"sessionId\":\"s1\"}");
+    try d.pump(1000);
+
+    const p = d.pages.get("t1") orelse return error.TestUnexpected;
+    try testing.expect(p.main_frame_id == null);
+
+    try writeFake(&d, fds, "{\"method\":\"Page.frameAttached\",\"params\":{\"frameId\":\"f-new\"},\"sessionId\":\"s1\"}");
+    try d.pump(1000);
+    try testing.expectEqualStrings("f-new", p.main_frame_id.?);
+}
+
+test "driver: frameDetached for sub-frame keeps main frame" {
+    const fds = try testPipe();
+    defer {
+        _ = std.os.linux.close(fds[0]);
+        _ = std.os.linux.close(fds[1]);
+    }
+    var d = Driver.init(testing.allocator, fds[0], fds[1], false);
+    defer d.deinit();
+
+    try writeFake(&d, fds, "{\"method\":\"Browser.attachedToTarget\",\"params\":{\"sessionId\":\"s1\",\"targetInfo\":{\"type\":\"page\",\"targetId\":\"t1\"}}}");
+    try d.pump(1000);
+    try writeFake(&d, fds, "{\"method\":\"Page.frameAttached\",\"params\":{\"frameId\":\"f-main\"},\"sessionId\":\"s1\"}");
+    try d.pump(1000);
+    try writeFake(&d, fds, "{\"method\":\"Page.frameDetached\",\"params\":{\"frameId\":\"f-sub\"},\"sessionId\":\"s1\"}");
+    try d.pump(1000);
+
+    const p = d.pages.get("t1") orelse return error.TestUnexpected;
+    try testing.expectEqualStrings("f-main", p.main_frame_id.?);
+}
+
+test "driver: removeBrowserContext/close/setExtraHTTPHeaders send schema methods" {
+    var cmd: [2]i32 = undefined;
+    var resp: [2]i32 = undefined;
+    if (std.os.linux.errno(std.os.linux.pipe2(&cmd, .{})) != .SUCCESS) return error.PipeFailed;
+    if (std.os.linux.errno(std.os.linux.pipe2(&resp, .{})) != .SUCCESS) return error.PipeFailed;
+    defer {
+        _ = std.os.linux.close(cmd[0]);
+        _ = std.os.linux.close(cmd[1]);
+        _ = std.os.linux.close(resp[0]);
+        _ = std.os.linux.close(resp[1]);
+    }
+    var d = Driver.init(testing.allocator, resp[0], cmd[1], false);
+    defer d.deinit();
+
+    const T = struct {
+        fn run(cmd_read: i32, resp_write: i32) void {
+            var r = pipe.Reader.init(cmd_read);
+            defer r.deinit(testing.allocator);
+            const expected = [_][]const u8{
+                "{\"id\":1,\"method\":\"Browser.removeBrowserContext\",\"params\":{\"browserContextId\":\"ctx-1\"}}",
+                "{\"id\":2,\"method\":\"Browser.close\",\"params\":{}}",
+                "{\"id\":3,\"method\":\"Browser.setExtraHTTPHeaders\",\"params\":{\"headers\":[]}}",
+            };
+            const replies = [_][]const u8{
+                "{\"id\":1,\"result\":{}}",
+                "{\"id\":2,\"result\":{}}",
+                "{\"id\":3,\"result\":{}}",
+            };
+            for (expected, 0..) |want, i| {
+                const msg = (r.readMessage(testing.allocator, 5000) catch return) orelse return;
+                defer testing.allocator.free(msg);
+                if (!std.mem.eql(u8, msg, want)) return;
+                pipe.writeMessage(testing.allocator, resp_write, replies[i]) catch return;
+            }
+        }
+    };
+    const thread = try std.Thread.spawn(.{}, T.run, .{ cmd[0], resp[1] });
+    defer thread.join();
+
+    try d.removeBrowserContext("ctx-1", 2000);
+    try d.close(2000);
+    const headers = [_]browser.Header{};
+    try d.setExtraHTTPHeaders(null, &headers, 2000);
 }
 
 test "driver: send writes request and matches response by id" {

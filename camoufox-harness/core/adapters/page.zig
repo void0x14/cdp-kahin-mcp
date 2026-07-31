@@ -32,7 +32,10 @@ pub fn navigateParams(
     );
 }
 
-/// Parse the `navigationId` string out of a navigate response.
+/// Parse the `navigationId` string out of a navigate response. The schema
+/// marks it nullable (same-document/about:blank navigations can omit it):
+/// null yields an empty string, the real id is adopted from the
+/// navigationStarted event (driver.onNavigationStarted).
 pub fn parseNavigationId(allocator: Allocator, response_raw: []const u8) ![]u8 {
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, response_raw, .{});
     defer parsed.deinit();
@@ -42,6 +45,7 @@ pub fn parseNavigationId(allocator: Allocator, response_raw: []const u8) ![]u8 {
     const result = root.object.get("result") orelse return error.InvalidResponse;
     if (result != .object) return error.InvalidResponse;
     const id = result.object.get("navigationId") orelse return error.InvalidResponse;
+    if (id == .null) return allocator.dupe(u8, "");
     if (id != .string) return error.InvalidResponse;
     return allocator.dupe(u8, id.string);
 }
@@ -123,6 +127,12 @@ test "page: parseNavigationId" {
     const id = try parseNavigationId(testing.allocator, "{\"id\":4,\"result\":{\"navigationId\":\"nav-1\"}}");
     defer testing.allocator.free(id);
     try testing.expectEqualStrings("nav-1", id);
+}
+
+test "page: parseNavigationId accepts null (same-document navigation)" {
+    const id = try parseNavigationId(testing.allocator, "{\"id\":4,\"result\":{\"navigationId\":null}}");
+    defer testing.allocator.free(id);
+    try testing.expectEqualStrings("", id);
 }
 
 test "page: parseNavigationId rejects error responses" {
