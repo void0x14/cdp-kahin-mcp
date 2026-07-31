@@ -19,13 +19,14 @@ const Allocator = std.mem.Allocator;
 
 const pipe = @import("src/transport/pipe.zig");
 const session = @import("src/transport/session.zig");
-const browser = @import("adapters/browser.zig");
+pub const browser = @import("adapters/browser.zig");
 const page = @import("adapters/page.zig");
 const runtime = @import("adapters/runtime.zig");
 const console = @import("adapters/console.zig");
 const emulation = @import("adapters/emulation.zig");
 const network = @import("adapters/network.zig");
 const target = @import("adapters/target.zig");
+const input = @import("adapters/input.zig");
 
 pub const default_timeout_ms: i32 = 30_000;
 pub const enable_timeout_ms: i32 = 30_000;
@@ -74,6 +75,23 @@ const FrameEntry = struct {
     }
 };
 
+/// One pending intercepted request (Faz 4). Keyed by the Juggler requestId
+/// from Network.requestWillBeSent{isIntercepted:true}; `session_id` is an
+/// OWNED copy (by_session keys are freed on detach — never alias them).
+/// Freed when a decision (resume/fulfill/abort) is sent, when the owning
+/// page detaches, or at driver deinit.
+const InterceptedEntry = struct {
+    session_id: []u8,
+    url: []u8,
+    method: []u8,
+
+    fn deinit(self: *InterceptedEntry, allocator: Allocator) void {
+        allocator.free(self.session_id);
+        allocator.free(self.url);
+        allocator.free(self.method);
+    }
+};
+
 /// Per-page state, keyed by target id.
 pub const Page = struct {
     /// Aliases the `pages` map key buffer.
@@ -117,6 +135,8 @@ pub const Driver = struct {
     console_messages: std.array_list.Aligned(console.Message, null) = .empty,
     /// Raw Network.* event JSON strings (passive passthrough, Faz 3).
     network_events: std.array_list.Aligned([]u8, null) = .empty,
+    /// requestId -> InterceptedEntry (Faz 4 pending interception registry).
+    intercepted: std.StringHashMap(InterceptedEntry),
 
     /// Wire a Driver onto existing fds (no spawn). Used by tests with a
     /// self-pipe; `start` spawns the browser and calls this.
@@ -129,6 +149,7 @@ pub const Driver = struct {
             .router = session.Router.init(allocator),
             .pages = std.StringHashMap(*Page).init(allocator),
             .by_session = std.StringHashMap(*Page).init(allocator),
+            .intercepted = std.StringHashMap(InterceptedEntry).init(allocator),
         };
         d.router.registerSession(.{ .id = "", .target_type = "browser", .name = "root" }) catch unreachable;
         return d;
@@ -193,6 +214,15 @@ pub const Driver = struct {
         self.console_messages.deinit(allocator);
         for (self.network_events.items) |raw| allocator.free(raw);
         self.network_events.deinit(allocator);
+
+        // Pending intercepted requests outlive their pages? No — detach
+        // purges them; deinit frees whatever remains (defensive).
+        var iit = self.intercepted.iterator();
+        while (iit.next()) |kv| {
+            allocator.free(kv.key_ptr.*);
+            kv.value_ptr.deinit(allocator);
+        }
+        self.intercepted.deinit();
 
         if (self.last_abort_text) |t| self.allocator.free(t);
         self.router.deinit();
@@ -603,6 +633,219 @@ pub const Driver = struct {
         return self.allocator.dupe(u8, out.written());
     }
 
+    // ---- Faz 4: network interception -------------------------------------
+
+    /// CDP Network.setRequestInterception equivalent: page-scoped toggle.
+    /// Juggler intercepts ALL requests of the page while enabled (the CDP
+    /// `patterns` filter has no Juggler equivalent — filter client-side).
+    pub fn setInterception(self: *Driver, target_id: []const u8, enabled: bool, timeout_ms: i32) !void {
+        const p = self.pages.get(target_id) orelse return error.UnknownTarget;
+        if (p.session_id.len == 0) return error.TargetNotAttached;
+        const params = try network.setInterceptionParams(self.allocator, enabled);
+        defer self.allocator.free(params);
+        var resp = try self.send(p.session_id, network.method_set_request_interception, params, timeout_ms);
+        defer resp.deinit(self.allocator);
+        if (resp.is_error) return error.JugglerError;
+    }
+
+    /// Browser.setRequestInterception (schema): context-scoped toggle;
+    /// `browser_context_id` null = default context.
+    pub fn setContextInterception(self: *Driver, browser_context_id: ?[]const u8, enabled: bool, timeout_ms: i32) !void {
+        const params = try network.setContextInterceptionParams(self.allocator, browser_context_id, enabled);
+        defer self.allocator.free(params);
+        var resp = try self.send(null, network.method_set_request_interception_context, params, timeout_ms);
+        defer resp.deinit(self.allocator);
+        if (resp.is_error) return error.JugglerError;
+    }
+
+    /// Pump until at least one request is pending interception (smoke
+    /// helper; mirrors waitForConsole).
+    pub fn waitForIntercepted(self: *Driver, timeout_ms: i32) !void {
+        const deadline = nowMs() + timeout_ms;
+        while (self.intercepted.count() == 0) {
+            const rem = remainingMs(deadline) orelse return error.WaitTimeout;
+            try self.pump(rem);
+        }
+    }
+
+    /// Pending intercepted requests as JSON:
+    /// [{"requestId":..,"url":..,"method":..}, ...] (route ids for the
+    /// decision methods). Order is unspecified.
+    pub fn listInterceptedRequests(self: *Driver) ![]u8 {
+        var out: std.Io.Writer.Allocating = .init(self.allocator);
+        defer out.deinit();
+        const w = &out.writer;
+        try w.writeAll("[");
+        var first = true;
+        var it = self.intercepted.iterator();
+        while (it.next()) |kv| {
+            if (!first) try w.writeAll(",");
+            first = false;
+            try std.json.Stringify.value(
+                .{
+                    .requestId = kv.key_ptr.*,
+                    .url = kv.value_ptr.url,
+                    .method = kv.value_ptr.method,
+                },
+                .{ .emit_null_optional_fields = false },
+                w,
+            );
+        }
+        try w.writeAll("]");
+        return self.allocator.dupe(u8, out.written());
+    }
+
+    /// CDP Network.continueInterceptedRequest equivalent:
+    /// Network.resumeInterceptedRequest (schema name) on the session that
+    /// owns the request. Optional overrides (url/method/headers/postData)
+    /// change the request before it proceeds. The pending entry is consumed
+    /// by the first decision — a second call fails with
+    /// error.UnknownInterceptedRequest.
+    pub fn continueInterceptedRequest(
+        self: *Driver,
+        request_id: []const u8,
+        url: ?[]const u8,
+        method: ?[]const u8,
+        headers: ?[]const browser.Header,
+        post_data: ?[]const u8,
+        timeout_ms: i32,
+    ) !void {
+        var req = self.takeIntercepted(request_id) orelse return error.UnknownInterceptedRequest;
+        defer req.deinit(self.allocator);
+        const params = try network.resumeParams(self.allocator, request_id, url, method, headers, post_data);
+        defer self.allocator.free(params);
+        var resp = try self.send(req.session_id, network.method_resume_intercepted_request, params, timeout_ms);
+        defer resp.deinit(self.allocator);
+        if (resp.is_error) return error.JugglerError;
+    }
+
+    /// CDP Network.fulfillInterceptedRequest equivalent (same schema name).
+    /// `base64_body` null = empty body.
+    pub fn fulfillInterceptedRequest(
+        self: *Driver,
+        request_id: []const u8,
+        status: u32,
+        status_text: []const u8,
+        headers: []const browser.Header,
+        base64_body: ?[]const u8,
+        timeout_ms: i32,
+    ) !void {
+        var req = self.takeIntercepted(request_id) orelse return error.UnknownInterceptedRequest;
+        defer req.deinit(self.allocator);
+        const params = try network.fulfillParams(self.allocator, request_id, status, status_text, headers, base64_body);
+        defer self.allocator.free(params);
+        var resp = try self.send(req.session_id, network.method_fulfill_intercepted_request, params, timeout_ms);
+        defer resp.deinit(self.allocator);
+        if (resp.is_error) return error.JugglerError;
+    }
+
+    /// CDP Network.abortInterceptedRequest equivalent (same schema name).
+    /// `error_code` is a Firefox Components.results member, e.g.
+    /// "NS_ERROR_ABORT" (the Juggler side cancels the channel with it).
+    pub fn abortInterceptedRequest(self: *Driver, request_id: []const u8, error_code: []const u8, timeout_ms: i32) !void {
+        var req = self.takeIntercepted(request_id) orelse return error.UnknownInterceptedRequest;
+        defer req.deinit(self.allocator);
+        const params = try network.abortParams(self.allocator, request_id, error_code);
+        defer self.allocator.free(params);
+        var resp = try self.send(req.session_id, network.method_abort_intercepted_request, params, timeout_ms);
+        defer resp.deinit(self.allocator);
+        if (resp.is_error) return error.JugglerError;
+    }
+
+    // ---- Faz 4: input (Page domain — Juggler has no Input domain) --------
+
+    /// CDP Input.dispatchKeyEvent equivalent: Page.dispatchKeyEvent
+    /// (schema). CDP type strings and windowsVirtualKeyCode/autoRepeat are
+    /// mapped onto the Juggler spellings by the input adapter.
+    pub fn dispatchKeyEvent(
+        self: *Driver,
+        target_id: []const u8,
+        type_cdp: []const u8,
+        key: []const u8,
+        key_code: u32,
+        location: u32,
+        code: []const u8,
+        repeat: bool,
+        text: ?[]const u8,
+        timeout_ms: i32,
+    ) !void {
+        const p = self.pages.get(target_id) orelse return error.UnknownTarget;
+        if (p.session_id.len == 0) return error.TargetNotAttached;
+        const tj = input.keyTypeJuggler(type_cdp) orelse return error.InvalidKeyType;
+        const params = try input.dispatchKeyEventParams(self.allocator, tj, key, key_code, location, code, repeat, text);
+        defer self.allocator.free(params);
+        var resp = try self.send(p.session_id, input.method_dispatch_key_event, params, timeout_ms);
+        defer resp.deinit(self.allocator);
+        if (resp.is_error) return error.JugglerError;
+    }
+
+    /// CDP Input.dispatchMouseEvent equivalent: Page.dispatchMouseEvent
+    /// (schema). `buttons` (optional in CDP, REQUIRED in Juggler) is
+    /// derived from type+button when null. "mouseWheel" type is NOT
+    /// accepted here — use dispatchWheelEvent.
+    pub fn dispatchMouseEvent(
+        self: *Driver,
+        target_id: []const u8,
+        type_cdp: []const u8,
+        x: f64,
+        y: f64,
+        button_cdp: []const u8,
+        modifiers: u16,
+        click_count: ?u32,
+        buttons: ?u16,
+        timeout_ms: i32,
+    ) !void {
+        const p = self.pages.get(target_id) orelse return error.UnknownTarget;
+        if (p.session_id.len == 0) return error.TargetNotAttached;
+        const tj = input.mouseTypeJuggler(type_cdp) orelse return error.InvalidMouseType;
+        const bnum = input.buttonNumber(button_cdp) orelse return error.InvalidButton;
+        const bts = input.buttonsFor(button_cdp, tj, buttons) orelse return error.InvalidButton;
+        const params = try input.dispatchMouseEventParams(self.allocator, tj, bnum, x, y, modifiers, click_count, bts);
+        defer self.allocator.free(params);
+        var resp = try self.send(p.session_id, input.method_dispatch_mouse_event, params, timeout_ms);
+        defer resp.deinit(self.allocator);
+        if (resp.is_error) return error.JugglerError;
+    }
+
+    /// CDP Input.dispatchMouseEvent(mouseWheel) equivalent:
+    /// Page.dispatchWheelEvent (schema — a separate method in Juggler).
+    pub fn dispatchWheelEvent(
+        self: *Driver,
+        target_id: []const u8,
+        x: f64,
+        y: f64,
+        delta_x: f64,
+        delta_y: f64,
+        modifiers: u16,
+        timeout_ms: i32,
+    ) !void {
+        const p = self.pages.get(target_id) orelse return error.UnknownTarget;
+        if (p.session_id.len == 0) return error.TargetNotAttached;
+        const params = try input.dispatchWheelEventParams(self.allocator, x, y, delta_x, delta_y, modifiers);
+        defer self.allocator.free(params);
+        var resp = try self.send(p.session_id, input.method_dispatch_wheel_event, params, timeout_ms);
+        defer resp.deinit(self.allocator);
+        if (resp.is_error) return error.JugglerError;
+    }
+
+    /// CDP Input.insertText equivalent: Page.insertText (schema).
+    pub fn insertText(self: *Driver, target_id: []const u8, text: []const u8, timeout_ms: i32) !void {
+        const p = self.pages.get(target_id) orelse return error.UnknownTarget;
+        if (p.session_id.len == 0) return error.TargetNotAttached;
+        const params = try input.insertTextParams(self.allocator, text);
+        defer self.allocator.free(params);
+        var resp = try self.send(p.session_id, input.method_insert_text, params, timeout_ms);
+        defer resp.deinit(self.allocator);
+        if (resp.is_error) return error.JugglerError;
+    }
+
+    /// Convenience: left-click at (x, y) = mousedown + mouseup (clickCount
+    /// 1, buttons derived). CDP Input.dispatchMouseEvent pair.
+    pub fn click(self: *Driver, target_id: []const u8, x: f64, y: f64, timeout_ms: i32) !void {
+        try self.dispatchMouseEvent(target_id, "mousePressed", x, y, "left", 0, 1, null, timeout_ms);
+        try self.dispatchMouseEvent(target_id, "mouseReleased", x, y, "left", 0, 1, null, timeout_ms);
+    }
+
     /// Pump until at least one console message arrived (smoke helper).
     pub fn waitForConsole(self: *Driver, timeout_ms: i32) !void {
         const deadline = nowMs() + timeout_ms;
@@ -686,6 +929,8 @@ pub const Driver = struct {
             try self.onSameDocument(ev);
         } else if (std.mem.eql(u8, ev.method, "Runtime.console")) {
             try self.onConsoleEvent(ev);
+        } else if (std.mem.eql(u8, ev.method, network.event_request_will_be_sent)) {
+            try self.onRequestWillBeSent(ev);
         } else if (std.mem.startsWith(u8, ev.method, "Network.")) {
             try self.onNetworkEvent(ev);
         }
@@ -769,6 +1014,22 @@ pub const Driver = struct {
             // by_session key aliases p.session_id; drop + free it, then the page.
             if (self.by_session.fetchRemove(kv.value.session_id)) |bkv| self.allocator.free(bkv.key);
             self.freePage(kv.value);
+        }
+        // Faz 4: pending intercepted requests of the detached page can never
+        // be decided — purge them (their session ids are owned copies).
+        var doomed: std.array_list.Aligned([]const u8, null) = .empty;
+        defer doomed.deinit(self.allocator);
+        var it = self.intercepted.iterator();
+        while (it.next()) |kv| {
+            if (std.mem.eql(u8, kv.value_ptr.session_id, sid.string)) {
+                doomed.append(self.allocator, kv.key_ptr.*) catch {};
+            }
+        }
+        for (doomed.items) |key| {
+            const kv = self.intercepted.fetchRemove(key).?;
+            var val = kv.value; // const capture; copy to mutate
+            self.allocator.free(kv.key);
+            val.deinit(self.allocator);
         }
     }
 
@@ -1018,14 +1279,54 @@ pub const Driver = struct {
         };
     }
 
-    /// Network.* events: passive passthrough — the raw wire event JSON is
-    /// retained (Juggler's Network event names are already CDP-shaped).
-    /// Ring-dropped at the cap.
+    /// Network.requestWillBeSent: passive passthrough (Faz 3) PLUS the
+    /// interception signal (Faz 4) — when `isIntercepted` is true the
+    /// request is paused in the browser until a decision arrives, so the
+    /// requestId is registered as a pending route on its page session.
+    /// Malformed events stay non-fatal (interception registration is best
+    /// effort; the passive copy is what Kahin's collector consumes).
+    fn onRequestWillBeSent(self: *Driver, ev: session.Router.Event) !void {
+        // Passive retention (identical to the old onNetworkEvent path).
+        if (self.network_events.items.len >= max_network_events) {
+            self.allocator.free(self.network_events.orderedRemove(0));
+        }
+        self.network_events.append(self.allocator, try self.allocator.dupe(u8, ev.raw)) catch |err| return err;
+
+        const sid = ev.session_id orelse return;
+        var info = network.parseIntercepted(self.allocator, ev.raw) catch return;
+        defer info.deinit(self.allocator);
+        if (!info.is_intercepted) return;
+
+        const key = try self.allocator.dupe(u8, info.request_id);
+        errdefer self.allocator.free(key);
+        const gop = try self.intercepted.getOrPut(key);
+        if (gop.found_existing) {
+            self.allocator.free(key); // already pending; first registration wins
+            return;
+        }
+        gop.value_ptr.* = .{
+            .session_id = try self.allocator.dupe(u8, sid),
+            .url = try self.allocator.dupe(u8, info.url),
+            .method = try self.allocator.dupe(u8, info.method),
+        };
+    }
+
+    /// Network.* events (other than requestWillBeSent): passive passthrough
+    /// — the raw wire event JSON is retained (Juggler's Network event names
+    /// are already CDP-shaped). Ring-dropped at the cap.
     fn onNetworkEvent(self: *Driver, ev: session.Router.Event) !void {
         if (self.network_events.items.len >= max_network_events) {
             self.allocator.free(self.network_events.orderedRemove(0));
         }
         self.network_events.append(self.allocator, try self.allocator.dupe(u8, ev.raw)) catch |err| return err;
+    }
+
+    /// Pop the pending entry for `request_id` (the decision consumes it;
+    /// the requestId map key is freed here).
+    fn takeIntercepted(self: *Driver, request_id: []const u8) ?InterceptedEntry {
+        const kv = self.intercepted.fetchRemove(request_id) orelse return null;
+        self.allocator.free(kv.key);
+        return kv.value;
     }
 };
 
@@ -1466,4 +1767,401 @@ test "driver: send writes request and matches response by id" {
     const id = try browser.parseBrowserContextId(testing.allocator, res.raw);
     defer testing.allocator.free(id);
     try testing.expectEqualStrings("ctx-9", id);
+}
+
+// ---- Faz 4 driver tests ------------------------------------------------
+
+/// Responder thread for Faz 4 wire tests: reads `replies.len` requests from
+/// cmd_read, records each into got1/got2, replies with the given responses
+/// (ids must match the driver's request ids). Main thread asserts `got`
+/// after join — no races (join is a happens-before).
+const FakeWire = struct {
+    got1: [2048]u8 = undefined,
+    got1_len: usize = 0,
+    got2: [2048]u8 = undefined,
+    got2_len: usize = 0,
+
+    fn run(self: *FakeWire, cmd_read: i32, resp_write: i32, replies: []const []const u8) void {
+        var r = pipe.Reader.init(cmd_read);
+        defer r.deinit(testing.allocator);
+        for (replies, 0..) |reply, i| {
+            const msg = (r.readMessage(testing.allocator, 5000) catch return) orelse return;
+            defer testing.allocator.free(msg);
+            const dst: []u8 = if (i == 0) self.got1[0..] else self.got2[0..];
+            const len = @min(msg.len, dst.len);
+            @memcpy(dst[0..len], msg[0..len]);
+            if (i == 0) self.got1_len = len else self.got2_len = len;
+            pipe.writeMessage(testing.allocator, resp_write, reply) catch return;
+        }
+    }
+
+    fn got1Slice(self: *FakeWire) []const u8 {
+        return self.got1[0..self.got1_len];
+    }
+    fn got2Slice(self: *FakeWire) []const u8 {
+        return self.got2[0..self.got2_len];
+    }
+};
+
+fn twoPipes() ![4]i32 {
+    var cmd: [2]i32 = undefined;
+    var resp: [2]i32 = undefined;
+    if (std.os.linux.errno(std.os.linux.pipe2(&cmd, .{})) != .SUCCESS) return error.PipeFailed;
+    if (std.os.linux.errno(std.os.linux.pipe2(&resp, .{})) != .SUCCESS) return error.PipeFailed;
+    return .{ cmd[0], cmd[1], resp[0], resp[1] };
+}
+
+fn closePipes(fds: [4]i32) void {
+    for (fds) |fd| _ = std.os.linux.close(fd);
+}
+
+/// Seed a page session s1/t1 via attachedToTarget event (single-pipe style:
+/// writes into the driver's read pipe).
+fn seedPage(d: *Driver, read_fd: i32) !void {
+    try pipe.writeMessage(testing.allocator, read_fd, "{\"method\":\"Browser.attachedToTarget\",\"params\":{\"sessionId\":\"s1\",\"targetInfo\":{\"type\":\"page\",\"targetId\":\"t1\"}}}");
+    try d.pump(1000);
+}
+
+const rwbs_intercepted =
+    \\{"method":"Network.requestWillBeSent","sessionId":"s1","params":{"requestId":"r-1","isIntercepted":true,"url":"http://127.0.0.1:8333/ok.png","method":"GET","headers":[],"cause":"script","internalCause":"script"}}
+;
+
+test "driver: intercepted request registered with owning session" {
+    const fds = try testPipe();
+    defer {
+        _ = std.os.linux.close(fds[0]);
+        _ = std.os.linux.close(fds[1]);
+    }
+    var d = Driver.init(testing.allocator, fds[0], fds[1], false);
+    defer d.deinit();
+
+    try seedPage(&d, fds[1]);
+    try writeFake(&d, fds, rwbs_intercepted);
+    try d.pump(1000);
+
+    const e = d.intercepted.get("r-1") orelse return error.TestUnexpected;
+    try testing.expectEqualStrings("s1", e.session_id);
+    try testing.expectEqualStrings("http://127.0.0.1:8333/ok.png", e.url);
+    try testing.expectEqualStrings("GET", e.method);
+    // Passive passthrough unaffected (Faz 3 invariant).
+    try testing.expectEqual(@as(usize, 1), d.network_events.items.len);
+    try testing.expect(std.mem.indexOf(u8, d.network_events.items[0], "requestWillBeSent") != null);
+}
+
+test "driver: non-intercepted request is not registered" {
+    const fds = try testPipe();
+    defer {
+        _ = std.os.linux.close(fds[0]);
+        _ = std.os.linux.close(fds[1]);
+    }
+    var d = Driver.init(testing.allocator, fds[0], fds[1], false);
+    defer d.deinit();
+
+    try seedPage(&d, fds[1]);
+    try writeFake(&d, fds, "{\"method\":\"Network.requestWillBeSent\",\"sessionId\":\"s1\",\"params\":{\"requestId\":\"r-2\",\"isIntercepted\":false,\"url\":\"http://x/\",\"method\":\"GET\",\"headers\":[],\"cause\":\"script\",\"internalCause\":\"script\"}}");
+    try d.pump(1000);
+
+    try testing.expectEqual(@as(usize, 0), d.intercepted.count());
+    // ...but the passive copy is still retained.
+    try testing.expectEqual(@as(usize, 1), d.network_events.items.len);
+}
+
+test "driver: detachedFromTarget purges pending entries of that session" {
+    const fds = try testPipe();
+    defer {
+        _ = std.os.linux.close(fds[0]);
+        _ = std.os.linux.close(fds[1]);
+    }
+    var d = Driver.init(testing.allocator, fds[0], fds[1], false);
+    defer d.deinit();
+
+    try seedPage(&d, fds[1]);
+    try writeFake(&d, fds, rwbs_intercepted);
+    try d.pump(1000);
+    try testing.expectEqual(@as(usize, 1), d.intercepted.count());
+
+    try writeFake(&d, fds, "{\"method\":\"Browser.detachedFromTarget\",\"params\":{\"sessionId\":\"s1\",\"targetId\":\"t1\"}}");
+    try d.pump(1000);
+    try testing.expectEqual(@as(usize, 0), d.intercepted.count());
+}
+
+test "driver: continueInterceptedRequest sends resume on the owning session" {
+    const fds = try twoPipes();
+    defer closePipes(fds);
+    var d = Driver.init(testing.allocator, fds[2], fds[1], false);
+    defer d.deinit();
+
+    try seedPage(&d, fds[3]);
+    try pipe.writeMessage(testing.allocator, fds[3], rwbs_intercepted);
+    try d.pump(1000);
+
+    var fw = FakeWire{};
+    const thread = try std.Thread.spawn(.{}, FakeWire.run, .{ &fw, fds[0], fds[3], &[_][]const u8{"{\"id\":1,\"result\":{}}"} });
+    defer thread.join();
+
+    try d.continueInterceptedRequest("r-1", "http://x/2", "POST", null, null, 2000);
+    try testing.expectEqualStrings(
+        "{\"id\":1,\"sessionId\":\"s1\",\"method\":\"Network.resumeInterceptedRequest\",\"params\":{\"requestId\":\"r-1\",\"url\":\"http://x/2\",\"method\":\"POST\"}}",
+        fw.got1Slice(),
+    );
+    // The decision consumed the pending entry.
+    try testing.expectEqual(@as(usize, 0), d.intercepted.count());
+}
+
+test "driver: fulfillInterceptedRequest wire carries schema names" {
+    const fds = try twoPipes();
+    defer closePipes(fds);
+    var d = Driver.init(testing.allocator, fds[2], fds[1], false);
+    defer d.deinit();
+
+    try seedPage(&d, fds[3]);
+    try pipe.writeMessage(testing.allocator, fds[3], rwbs_intercepted);
+    try d.pump(1000);
+
+    var fw = FakeWire{};
+    const thread = try std.Thread.spawn(.{}, FakeWire.run, .{ &fw, fds[0], fds[3], &[_][]const u8{"{\"id\":1,\"result\":{}}"} });
+    defer thread.join();
+
+    const headers = [_]browser.Header{.{ .name = "Content-Type", .value = "text/javascript" }};
+    try d.fulfillInterceptedRequest("r-1", 200, "OK", &headers, "d2luZG93Lng9MQ==", 2000);
+    try testing.expectEqualStrings(
+        "{\"id\":1,\"sessionId\":\"s1\",\"method\":\"Network.fulfillInterceptedRequest\",\"params\":{\"requestId\":\"r-1\",\"status\":200,\"statusText\":\"OK\",\"headers\":[{\"name\":\"Content-Type\",\"value\":\"text/javascript\"}],\"base64body\":\"d2luZG93Lng9MQ==\"}}",
+        fw.got1Slice(),
+    );
+    try testing.expectEqual(@as(usize, 0), d.intercepted.count());
+}
+
+test "driver: abortInterceptedRequest wire carries errorCode" {
+    const fds = try twoPipes();
+    defer closePipes(fds);
+    var d = Driver.init(testing.allocator, fds[2], fds[1], false);
+    defer d.deinit();
+
+    try seedPage(&d, fds[3]);
+    try pipe.writeMessage(testing.allocator, fds[3], rwbs_intercepted);
+    try d.pump(1000);
+
+    var fw = FakeWire{};
+    const thread = try std.Thread.spawn(.{}, FakeWire.run, .{ &fw, fds[0], fds[3], &[_][]const u8{"{\"id\":1,\"result\":{}}"} });
+    defer thread.join();
+
+    try d.abortInterceptedRequest("r-1", "NS_ERROR_ABORT", 2000);
+    try testing.expectEqualStrings(
+        "{\"id\":1,\"sessionId\":\"s1\",\"method\":\"Network.abortInterceptedRequest\",\"params\":{\"requestId\":\"r-1\",\"errorCode\":\"NS_ERROR_ABORT\"}}",
+        fw.got1Slice(),
+    );
+    try testing.expectEqual(@as(usize, 0), d.intercepted.count());
+}
+
+test "driver: decision on unknown request errors, second decision consumed" {
+    const fds = try testPipe();
+    defer {
+        _ = std.os.linux.close(fds[0]);
+        _ = std.os.linux.close(fds[1]);
+    }
+    var d = Driver.init(testing.allocator, fds[0], fds[1], false);
+    defer d.deinit();
+
+    try testing.expectError(
+        error.UnknownInterceptedRequest,
+        d.abortInterceptedRequest("r-9", "NS_ERROR_ABORT", 500),
+    );
+
+    try seedPage(&d, fds[1]);
+    try writeFake(&d, fds, rwbs_intercepted);
+    try d.pump(1000);
+    // Simulate a consumed decision without a wire: pop the entry directly.
+    var taken = d.takeIntercepted("r-1") orelse return error.TestUnexpected;
+    taken.deinit(testing.allocator);
+    try testing.expectError(
+        error.UnknownInterceptedRequest,
+        d.continueInterceptedRequest("r-1", null, null, null, null, 500),
+    );
+}
+
+test "driver: setInterception wire (page-scoped, schema name)" {
+    const fds = try twoPipes();
+    defer closePipes(fds);
+    var d = Driver.init(testing.allocator, fds[2], fds[1], false);
+    defer d.deinit();
+
+    try seedPage(&d, fds[3]);
+
+    var fw = FakeWire{};
+    const thread = try std.Thread.spawn(.{}, FakeWire.run, .{ &fw, fds[0], fds[3], &[_][]const u8{"{\"id\":1,\"result\":{}}"} });
+    defer thread.join();
+
+    try d.setInterception("t1", true, 2000);
+    try testing.expectEqualStrings(
+        "{\"id\":1,\"sessionId\":\"s1\",\"method\":\"Network.setRequestInterception\",\"params\":{\"enabled\":true}}",
+        fw.got1Slice(),
+    );
+}
+
+test "driver: setContextInterception wire (root session)" {
+    const fds = try twoPipes();
+    defer closePipes(fds);
+    var d = Driver.init(testing.allocator, fds[2], fds[1], false);
+    defer d.deinit();
+
+    var fw = FakeWire{};
+    const thread = try std.Thread.spawn(.{}, FakeWire.run, .{ &fw, fds[0], fds[3], &[_][]const u8{"{\"id\":1,\"result\":{}}"} });
+    defer thread.join();
+
+    try d.setContextInterception("ctx-1", true, 2000);
+    try testing.expectEqualStrings(
+        "{\"id\":1,\"method\":\"Browser.setRequestInterception\",\"params\":{\"browserContextId\":\"ctx-1\",\"enabled\":true}}",
+        fw.got1Slice(),
+    );
+}
+
+test "driver: listInterceptedRequests renders route ids" {
+    const fds = try testPipe();
+    defer {
+        _ = std.os.linux.close(fds[0]);
+        _ = std.os.linux.close(fds[1]);
+    }
+    var d = Driver.init(testing.allocator, fds[0], fds[1], false);
+    defer d.deinit();
+
+    try seedPage(&d, fds[1]);
+    try writeFake(&d, fds, rwbs_intercepted);
+    try d.pump(1000);
+
+    const list = try d.listInterceptedRequests();
+    defer testing.allocator.free(list);
+    try testing.expectEqualStrings(
+        "[{\"requestId\":\"r-1\",\"url\":\"http://127.0.0.1:8333/ok.png\",\"method\":\"GET\"}]",
+        list,
+    );
+}
+
+test "driver: dispatchKeyEvent wire maps CDP type and carries schema params" {
+    const fds = try twoPipes();
+    defer closePipes(fds);
+    var d = Driver.init(testing.allocator, fds[2], fds[1], false);
+    defer d.deinit();
+
+    try seedPage(&d, fds[3]);
+
+    var fw = FakeWire{};
+    const thread = try std.Thread.spawn(.{}, FakeWire.run, .{ &fw, fds[0], fds[3], &[_][]const u8{"{\"id\":1,\"result\":{}}"} });
+    defer thread.join();
+
+    try d.dispatchKeyEvent("t1", "keyDown", "a", 65, 0, "KeyA", false, "a", 2000);
+    try testing.expectEqualStrings(
+        "{\"id\":1,\"sessionId\":\"s1\",\"method\":\"Page.dispatchKeyEvent\",\"params\":{\"type\":\"keydown\",\"key\":\"a\",\"keyCode\":65,\"location\":0,\"code\":\"KeyA\",\"repeat\":false,\"text\":\"a\"}}",
+        fw.got1Slice(),
+    );
+}
+
+test "driver: dispatchKeyEvent rejects unknown CDP type" {
+    const fds = try testPipe();
+    defer {
+        _ = std.os.linux.close(fds[0]);
+        _ = std.os.linux.close(fds[1]);
+    }
+    var d = Driver.init(testing.allocator, fds[0], fds[1], false);
+    defer d.deinit();
+    try seedPage(&d, fds[1]);
+    try testing.expectError(
+        error.InvalidKeyType,
+        d.dispatchKeyEvent("t1", "keyPress", "a", 65, 0, "KeyA", false, null, 500),
+    );
+}
+
+test "driver: dispatchMouseEvent derives buttons when absent" {
+    const fds = try twoPipes();
+    defer closePipes(fds);
+    var d = Driver.init(testing.allocator, fds[2], fds[1], false);
+    defer d.deinit();
+
+    try seedPage(&d, fds[3]);
+
+    var fw = FakeWire{};
+    const thread = try std.Thread.spawn(.{}, FakeWire.run, .{ &fw, fds[0], fds[3], &[_][]const u8{"{\"id\":1,\"result\":{}}"} });
+    defer thread.join();
+
+    try d.dispatchMouseEvent("t1", "mousePressed", 100, 20, "left", 8, 1, null, 2000);
+    try testing.expectEqualStrings(
+        "{\"id\":1,\"sessionId\":\"s1\",\"method\":\"Page.dispatchMouseEvent\",\"params\":{\"type\":\"mousedown\",\"button\":0,\"x\":100,\"y\":20,\"modifiers\":8,\"clickCount\":1,\"buttons\":1}}",
+        fw.got1Slice(),
+    );
+}
+
+test "driver: dispatchMouseEvent rejects mouseWheel (separate method)" {
+    const fds = try testPipe();
+    defer {
+        _ = std.os.linux.close(fds[0]);
+        _ = std.os.linux.close(fds[1]);
+    }
+    var d = Driver.init(testing.allocator, fds[0], fds[1], false);
+    defer d.deinit();
+    try seedPage(&d, fds[1]);
+    try testing.expectError(
+        error.InvalidMouseType,
+        d.dispatchMouseEvent("t1", "mouseWheel", 1, 1, "none", 0, null, null, 500),
+    );
+}
+
+test "driver: click sends mousedown then mouseup" {
+    const fds = try twoPipes();
+    defer closePipes(fds);
+    var d = Driver.init(testing.allocator, fds[2], fds[1], false);
+    defer d.deinit();
+
+    try seedPage(&d, fds[3]);
+
+    var fw = FakeWire{};
+    const replies = [_][]const u8{ "{\"id\":1,\"result\":{}}", "{\"id\":2,\"result\":{}}" };
+    const thread = try std.Thread.spawn(.{}, FakeWire.run, .{ &fw, fds[0], fds[3], &replies });
+    defer thread.join();
+
+    try d.click("t1", 50, 60, 2000);
+    try testing.expectEqualStrings(
+        "{\"id\":1,\"sessionId\":\"s1\",\"method\":\"Page.dispatchMouseEvent\",\"params\":{\"type\":\"mousedown\",\"button\":0,\"x\":50,\"y\":60,\"modifiers\":0,\"clickCount\":1,\"buttons\":1}}",
+        fw.got1Slice(),
+    );
+    try testing.expectEqualStrings(
+        "{\"id\":2,\"sessionId\":\"s1\",\"method\":\"Page.dispatchMouseEvent\",\"params\":{\"type\":\"mouseup\",\"button\":0,\"x\":50,\"y\":60,\"modifiers\":0,\"clickCount\":1,\"buttons\":0}}",
+        fw.got2Slice(),
+    );
+}
+
+test "driver: dispatchWheelEvent wire" {
+    const fds = try twoPipes();
+    defer closePipes(fds);
+    var d = Driver.init(testing.allocator, fds[2], fds[1], false);
+    defer d.deinit();
+
+    try seedPage(&d, fds[3]);
+
+    var fw = FakeWire{};
+    const thread = try std.Thread.spawn(.{}, FakeWire.run, .{ &fw, fds[0], fds[3], &[_][]const u8{"{\"id\":1,\"result\":{}}"} });
+    defer thread.join();
+
+    try d.dispatchWheelEvent("t1", 10, 20, 0, 120, 0, 2000);
+    try testing.expectEqualStrings(
+        "{\"id\":1,\"sessionId\":\"s1\",\"method\":\"Page.dispatchWheelEvent\",\"params\":{\"x\":10,\"y\":20,\"deltaX\":0,\"deltaY\":120,\"deltaZ\":0,\"modifiers\":0}}",
+        fw.got1Slice(),
+    );
+}
+
+test "driver: insertText wire" {
+    const fds = try twoPipes();
+    defer closePipes(fds);
+    var d = Driver.init(testing.allocator, fds[2], fds[1], false);
+    defer d.deinit();
+
+    try seedPage(&d, fds[3]);
+
+    var fw = FakeWire{};
+    const thread = try std.Thread.spawn(.{}, FakeWire.run, .{ &fw, fds[0], fds[3], &[_][]const u8{"{\"id\":1,\"result\":{}}"} });
+    defer thread.join();
+
+    try d.insertText("t1", "hello", 2000);
+    try testing.expectEqualStrings(
+        "{\"id\":1,\"sessionId\":\"s1\",\"method\":\"Page.insertText\",\"params\":{\"text\":\"hello\"}}",
+        fw.got1Slice(),
+    );
 }

@@ -10,6 +10,7 @@ test {
     _ = @import("adapters/emulation.zig");
     _ = @import("adapters/console.zig");
     _ = @import("adapters/network.zig");
+    _ = @import("adapters/input.zig");
     _ = @import("adapters/target.zig");
     _ = @import("driver.zig");
 }
