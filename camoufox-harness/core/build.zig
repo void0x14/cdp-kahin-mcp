@@ -4,6 +4,12 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const driver_mod = b.createModule(.{
+        .root_source_file = b.path("driver.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     const exe = b.addExecutable(.{
         .name = "core",
         .root_module = b.createModule(.{
@@ -12,6 +18,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    exe.root_module.addImport("driver", driver_mod);
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
@@ -22,11 +29,12 @@ pub fn build(b: *std.Build) void {
 
     const tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/tests.zig"),
+            .root_source_file = b.path("tests.zig"),
             .target = target,
             .optimize = optimize,
         }),
     });
+    tests.root_module.addImport("driver", driver_mod);
     const run_tests = b.addRunArtifact(tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_tests.step);

@@ -1,21 +1,19 @@
-//! Faz 1 smoke driver: spawn Camoufox with `--juggler-pipe`, send
-//! `Browser.enable`, wait for the matching response, then close the pipe
-//! (which terminates the browser).
+//! Faz 2 smoke driver: full end-to-end flow against the real Camoufox binary.
+//!
+//!   spawn -> Browser.enable -> createBrowserContext -> newPage ->
+//!   navigate(data URL) -> evaluate("1+1") == 2 -> clean exit
 //!
 //! Usage: core <firefox-binary> [profile-dir]
 
 const std = @import("std");
 const linux = std.os.linux;
 
-const pipe = @import("transport/pipe.zig");
-const session = @import("transport/session.zig");
+const driver = @import("driver");
 
 const usage =
     \\usage: core <firefox-binary> [profile-dir]
     \\
 ;
-
-const handshake_timeout_ms: i32 = 30_000;
 
 pub fn main(args: std.process.Init.Minimal) u8 {
     run(args) catch |err| {
@@ -32,6 +30,7 @@ fn run(args: std.process.Init.Minimal) !void {
         return error.MissingArgs;
     }
     const exe = std.mem.sliceTo(argv[1], 0);
+    const profile = if (argv.len >= 3) std.mem.sliceTo(argv[2], 0) else null;
 
     ignoreSigpipe();
 
@@ -43,86 +42,44 @@ fn run(args: std.process.Init.Minimal) !void {
     defer arena_state.deinit();
     const a = arena_state.allocator();
 
-    const profile = if (argv.len >= 3) std.mem.sliceTo(argv[2], 0) else blk: {
-        const p = try std.fmt.allocPrint(a, "/tmp/kahin-core-{d}-smoke", .{linux.getpid()});
-        // Reuse the dir if it already exists; Firefox only needs it present.
-        _ = linux.mkdirat(linux.AT.FDCWD, try a.dupeZ(u8, p), 0o700);
-        break :blk p;
-    };
+    // Start + Browser.enable handshake.
+    var d = try driver.Driver.start(a, exe, profile, true);
+    defer d.deinit();
+    std.debug.print("Browser.enable OK\n", .{});
 
-    const browser_argv = [_][]const u8{
-        exe,
-        "-juggler-pipe",
-        "-profile",
-        profile,
-        "-no-remote",
-        "-headless",
-    };
+    // Browser.createBrowserContext.
+    const ctx = try d.newContext(driver.default_timeout_ms);
+    defer a.free(ctx);
+    std.debug.print("createBrowserContext -> browserContextId={s}\n", .{ctx});
 
-    var child = pipe.spawn(a, &browser_argv) catch |err| {
-        std.debug.print("spawn failed: {s}\n", .{@errorName(err)});
-        return err;
-    };
-    defer pipe.closeFds(&child);
+    // Browser.newPage (no url — Juggler's newPage takes browserContextId only).
+    const target = try d.newPage(ctx, null, driver.default_timeout_ms);
+    defer a.free(target);
+    std.debug.print("newPage -> targetId={s}\n", .{target});
 
-    var reader = pipe.Reader.init(child.read_fd);
-    defer reader.deinit(a);
+    // Page.navigate to a data URL (no network dependency), wait for load.
+    const nav = try d.navigate(target, "data:text/html,<h1>hi</h1>", driver.default_timeout_ms);
+    defer a.free(nav);
+    std.debug.print("navigate -> navigationId={s}\n", .{nav});
 
-    var router = session.Router.init(a);
-    defer router.deinit();
-    try router.registerSession(.{ .id = "", .target_type = "browser", .name = "root" });
-
-    const id = router.nextId();
-    var ctx: u8 = 1;
-    try router.registerPending(id, @ptrCast(&ctx));
-    const req = try std.fmt.allocPrint(
-        a,
-        "{{\"id\":{d},\"method\":\"Browser.enable\",\"params\":{{\"attachToDefaultContext\":true}}}}",
-        .{id},
-    );
-    std.debug.print("SENT: {s}\n", .{req});
-    pipe.writeMessage(a, child.write_fd, req) catch |err| {
-        std.debug.print("write failed: {s} (browser died?)\n", .{@errorName(err)});
-        return err;
-    };
-
-    var matched = false;
-    while (!matched) {
-        const raw = reader.readMessage(a, handshake_timeout_ms) catch |err| {
-            std.debug.print("read failed: {s}\n", .{@errorName(err)});
-            return err;
-        } orelse {
-            std.debug.print("EOF: browser closed the pipe without answering\n", .{});
-            return error.HandshakeFailed;
-        };
-        std.debug.print("RECV: {s}\n", .{raw});
-        switch (try router.dispatch(raw)) {
-            .response => |resp| {
-                if (resp.id != id) {
-                    std.debug.print("ignoring stale response id={d}\n", .{resp.id});
-                    continue;
-                }
-                matched = true;
-                if (resp.is_error) {
-                    std.debug.print("Browser.enable returned an ERROR: {s}\n", .{raw});
-                    return error.HandshakeFailed;
-                }
-                std.debug.print("Browser.enable OK (id={d} matched)\n", .{resp.id});
-            },
-            .event => |ev| std.debug.print("event: {s} session={?s}\n", .{ ev.method, ev.session_id }),
-            .invalid => std.debug.print("ignoring unrecognized message\n", .{}),
-        }
+    // Runtime.evaluate.
+    var ev = try d.evaluate(target, "1+1", 15_000);
+    defer ev.deinit(a);
+    if (ev.exception_text) |t| {
+        std.debug.print("evaluate threw: {s}\n", .{t});
+        return error.EvaluateFailed;
     }
+    std.debug.print("evaluate(\"1+1\") -> {s}\n", .{ev.value_json});
+    if (!std.mem.eql(u8, ev.value_json, "2")) {
+        std.debug.print("FAIL: expected 2, got {s}\n", .{ev.value_json});
+        return error.EvaluateMismatch;
+    }
+    std.debug.print("SMOKE PASS: evaluate(\"1+1\") == 2\n", .{});
 
-    // Stop: closing our pipe ends terminates the browser (Juggler pattern).
-    pipe.closeFds(&child);
-    // Only a clean exit-0 is success; anything else (signal, wait failure)
-    // is reported as a failure.
-    const code = pipe.wait(&child) catch |err| {
-        std.debug.print("browser exit check failed: {s}\n", .{@errorName(err)});
-        return err;
-    };
+    // Clean shutdown: closing the pipes makes the browser exit 0.
+    const code = try d.stop();
     std.debug.print("browser exited with code {d}\n", .{code});
+    if (code != 0) return error.BadBrowserExit;
 }
 
 fn ignoreSigpipe() void {

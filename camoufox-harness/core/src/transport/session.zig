@@ -91,6 +91,14 @@ pub const Router = struct {
         }
     }
 
+    pub const Event = struct {
+        method: []const u8,
+        /// null = root session.
+        session_id: ?[]const u8,
+        known_session: bool,
+        raw: []const u8,
+    };
+
     pub const Dispatch = union(enum) {
         /// A response matching a pending request (the pending entry is consumed).
         /// `raw` borrows from the dispatched `json` input.
@@ -102,13 +110,7 @@ pub const Router = struct {
         },
         /// A server-initiated event. `method`/`session_id` are arena-owned
         /// copies valid until the next `dispatch`; `raw` borrows from `json`.
-        event: struct {
-            method: []const u8,
-            /// null = root session.
-            session_id: ?[]const u8,
-            known_session: bool,
-            raw: []const u8,
-        },
+        event: Event,
         /// Message with neither a matching "id" nor a "method" (unknown id, malformed JSON).
         invalid: void,
     };
