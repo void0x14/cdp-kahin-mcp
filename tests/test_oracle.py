@@ -44,7 +44,7 @@ def test_server_initialize_and_list_tools() -> None:
     assert "kahin_pattern_suggest" in tool_names
     assert "kahin_pattern_forget" in tool_names
     assert "kahin_pattern_stats" in tool_names
-    assert len(tools) == 31
+    assert len(tools) == 32
     proc.terminate()
 
 

@@ -5,15 +5,18 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
 import httpx
-import websockets
 import websockets.asyncio.client
+from websockets.asyncio.client import ClientConnection
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -37,14 +40,62 @@ class BrowserEngine(ABC):
 
     def __init__(self) -> None:
         self._process: asyncio.subprocess.Process | None = None
-        self._ws: websockets.WebSocketClientProtocol | None = None
+        self._ws: ClientConnection | None = None
         self._msg_id = 0
+        self._session_id: str | None = None
         self._event_callbacks: list[Callable[[EventData], Awaitable[None] | None]] = []
         self._http: httpx.AsyncClient | None = None
+        self._pending: dict[int, asyncio.Future[dict[str, Any]]] = {}
+        self._reader: asyncio.Task[None] | None = None
 
     @abstractmethod
     async def start(self, headless: bool = True, port: int = 0, **kwargs: Any) -> EngineContext:
         ...
+
+    async def _connect_ws(self, ws_url: str) -> ClientConnection:
+        """Connect to a CDP WebSocket and start the background reader task."""
+        self._ws = await websockets.asyncio.client.connect(ws_url, max_size=2**24)
+        self._start_reader()
+        return self._ws
+
+    def _start_reader(self) -> None:
+        """Background task that drains the WS: resolves pending responses and
+        dispatches events. Needed because some engines (Obscura) emit events
+        after the command response, so draining only inside send_cdp loses them."""
+
+        async def reader() -> None:
+            assert self._ws is not None
+            try:
+                while True:
+                    raw = await self._ws.recv()
+                    data = json.loads(raw)
+                    if "id" in data:
+                        fut = self._pending.pop(data["id"], None)
+                        if fut is not None and not fut.done():
+                            if "error" in data:
+                                fut.set_exception(RuntimeError(f"CDP error: {data['error']}"))
+                            else:
+                                fut.set_result(data.get("result", {}))
+                    elif "method" in data:
+                        evt = EventData(
+                            method=data["method"],
+                            params=data.get("params", {}),
+                            session_id=data.get("sessionId"),
+                        )
+                        for cb in self._event_callbacks:
+                            try:
+                                result = cb(evt)
+                                if asyncio.iscoroutine(result):
+                                    await result
+                            except Exception:
+                                logger.exception("event callback failed for %s", evt.method)
+            except asyncio.CancelledError:
+                pass
+            except Exception:  # noqa: BLE001
+                # WS closed or the engine was stopped; the connection is dead.
+                logger.debug("CDP reader stopped: %s", type(self).__name__)
+
+        self._reader = asyncio.create_task(reader())
 
     async def _init_engine(
         self,
@@ -61,10 +112,10 @@ class BrowserEngine(ABC):
             env=env,
         )
         page_ws = await self._wait_for_page_ws(port)
-        self._ws = await websockets.asyncio.client.connect(page_ws, max_size=2**24)
+        await self._connect_ws(page_ws)
         await self.send_cdp("Page", "enable")
         await self.send_cdp("Runtime", "enable")
-        return EngineContext(engine_name=engine_name, ws_url=page_ws)
+        return EngineContext(engine_name=engine_name, ws_url=page_ws, session_id=self._session_id)
 
     async def _wait_for_page_ws(self, port: int, timeout: float = 15.0) -> str:
         """Wait for Chrome and return the first page target's WebSocket URL."""
@@ -85,7 +136,29 @@ class BrowserEngine(ABC):
             delay = min(delay * 1.5, 1.0)
         raise RuntimeError(f"{type(self).__name__}: no page target found on port {port} after {timeout}s")
 
+    async def _create_target(self, url: str = "about:blank") -> str:
+        """Open a page in the current browser connection and attach a session.
+
+        Obscura gives every WS connection its own isolated context, so the
+        page must be created inside the connection (Target.createTarget) and
+        a session attached before any page-scoped command works.
+        """
+        result = await self.send_cdp("Target", "createTarget", {"url": url})
+        target_id = result.get("targetId")
+        if not target_id:
+            raise RuntimeError(f"Target.createTarget returned no targetId: {result}")
+        attached = await self.send_cdp("Target", "attachToTarget", {"targetId": target_id, "flatten": True})
+        self._session_id = attached.get("sessionId") or f"{target_id}-session"
+        return target_id
+
     async def stop(self) -> None:
+        if self._reader is not None:
+            self._reader.cancel()
+            self._reader = None
+        for fut in self._pending.values():
+            if not fut.done():
+                fut.cancel()
+        self._pending.clear()
         if self._ws:
             await self._ws.close()
             self._ws = None
@@ -99,7 +172,7 @@ class BrowserEngine(ABC):
                 pass
             try:
                 await asyncio.wait_for(self._process.wait(), timeout=5)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 try:
                     self._process.kill()
                 except ProcessLookupError:
@@ -110,26 +183,21 @@ class BrowserEngine(ABC):
         if not self._ws:
             raise RuntimeError(f"{type(self).__name__} not started")
         self._msg_id += 1
-        msg = json.dumps({
+        msg: dict[str, Any] = {
             "id": self._msg_id,
             "method": f"{domain}.{command}",
             "params": params or {},
-        })
-        await self._ws.send(msg)
-        while True:
-            try:
-                raw = await asyncio.wait_for(self._ws.recv(), timeout=30)
-            except asyncio.TimeoutError:
-                raise RuntimeError(f"{type(self).__name__}: CDP response timeout (30s) for {domain}.{command}")
-            data = json.loads(raw)
-            if "id" in data and data["id"] == self._msg_id:
-                if "error" in data:
-                    raise RuntimeError(f"CDP error: {data['error']}")
-                return data.get("result", {})
-            if "method" in data:
-                evt = EventData(method=data["method"], params=data.get("params", {}), session_id=data.get("sessionId"))
-                for cb in self._event_callbacks:
-                    await cb(evt) if asyncio.iscoroutinefunction(cb) else cb(evt)
+        }
+        if self._session_id:
+            msg["sessionId"] = self._session_id
+        fut: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
+        self._pending[self._msg_id] = fut
+        await self._ws.send(json.dumps(msg))
+        try:
+            return await asyncio.wait_for(fut, timeout=30)
+        except TimeoutError:
+            self._pending.pop(self._msg_id, None)
+            raise RuntimeError(f"{type(self).__name__}: CDP response timeout (30s) for {domain}.{command}")
 
     async def screenshot(self, format: str = "png", full_page: bool = False) -> bytes:
         params = {"format": format}

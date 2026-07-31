@@ -19,7 +19,7 @@ def schema() -> SchemaEngine:
 
 
 @pytest.fixture
-def fate() -> Generator[FateDB, None, None]:
+def fate() -> Generator[FateDB]:
     fd, path = tempfile.mkstemp(suffix=".json")
     os.close(fd)
     db = FateDB(path=Path(path))

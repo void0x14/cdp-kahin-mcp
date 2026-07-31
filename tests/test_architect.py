@@ -61,7 +61,7 @@ def test_validate_command_valid(schema) -> None:
 
 
 def test_validate_command_typo(schema) -> None:
-    res = schema.validate_command("Page", "navigate", {"url": 123})
+    _res = schema.validate_command("Page", "navigate", {"url": 123})
     res2 = schema.validate_command("Page", "navigate", {"urll": "https://x.com", "referrerr": "bad"})
     assert res2["valid"] is False
     messages = [e["message"] for e in res2["errors"]]

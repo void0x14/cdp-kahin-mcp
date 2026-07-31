@@ -119,7 +119,7 @@ Kahin'de hata loglama ve kendini onarma sistemi gömülüdür:
 oracle.py               → MCP server (32 tool, giriş kapısı)
   _healer.py             → Hata yönetimi, loglama, kendini onarma
   the_source/architect   → CDP şema motoru (56 domain, 667 komut)
-  the_twins/shadow       → Obscura engine (hızlı Chrome, WebSocket CDP)
+  the_twins/shadow       → Obscura engine (gerçek Obscura binary, WebSocket CDP)
   the_twins/mirage       → Mirage engine (stealth, anti-detection)
   the_twins/chassis      → Ortak engine arayüzü (abstract)
   residual_self/fate     → Pattern DB (öğrenme, sorgulama, önerme)
@@ -131,7 +131,7 @@ oracle.py               → MCP server (32 tool, giriş kapısı)
 
 - [ ] **Juggler protokolü** için de uçtan uca dökümantasyon,kullanım ve pratik örnekleri desteği eklenmesi
 - [ ] **Camoufox** entegrasyonu yapılacak.Bizzat chrome gibi native olarak camoufoxuda her nimetinden yararlanarak kullanabilecek.Buna ek olarak vulpineos'in sağladığı bazı ek avantajları da kullanabilecek.Bütün bunlara ek olarak cdpnın illaki gerektiği noktalardada foxbridge entegresi ile işi arşa çıkartacak
-- [ ] **O ile başlayan taraıyıcı** vardıya ha onla alakalı startup problemleri varmış,stabil değilmiş,hangi aracın hangi tarayıcının çalıştığı belli olmuyormuş.Bunlar bilinen sorunlar,bunlarda düzeltilecek.
+- [x] **Obscura entegrasyonu tamamlandı** — gerçek Obscura binary'si (WebSocket CDP) ile çalışıyor, startup problemleri giderildi
 - [ ] **SKILLS** destekleri ve konfigre edilebilir kişsiel hazır skills oluşturma özelliği
 - [ ] **Tek tık kurulum** — `uvx kahin` ile direkt çalıştır
 - [ ] **Zero-dependency** hedefi (Go/Rust portu)

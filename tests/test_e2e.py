@@ -32,7 +32,8 @@ async def test_obscura_evaluate() -> None:
     engine = Obscura()
     await engine.start(headless=True, port=9252)
     result = await engine.send_cdp("Runtime", "evaluate", {"expression": "1+1"})
-    assert result.get("result", {}).get("value") == 2
+    # Obscura returns the value as a float (2.0), not an int (2).
+    assert float(result["result"]["value"]) == 2.0
     await engine.stop()
 
 
@@ -40,12 +41,10 @@ async def test_obscura_evaluate() -> None:
 async def test_obscura_screenshot() -> None:
     engine = Obscura()
     await engine.start(headless=True, port=9253)
-    await engine.send_cdp("Page", "navigate", {"url": "about:blank"})
-    await asyncio.sleep(0.5)
-    data = await engine.screenshot()
-    assert isinstance(data, bytes)
-    assert len(data) > 100
-    assert data.startswith(b"\x89PNG")
+    # Obscura v0.1.11 has no layout/paint engine — captureScreenshot is
+    # unsupported upstream, so this must raise instead of returning PNG bytes.
+    with pytest.raises(RuntimeError, match="captureScreenshot is not supported"):
+        await engine.screenshot()
     await engine.stop()
 
 
