@@ -517,11 +517,11 @@ pub const Driver = struct {
     /// Returns RAW image bytes (the Juggler `data` string is base64 and is
     /// decoded here).
     ///
-    /// The `clip` parameter is MANDATORY in this Juggler build — the
-    /// dispatcher rejects an undefined clip even though the schema marks it
-    /// optional (observed: "Object \"<root>.clip\" is undefined, but has
-    /// some scheme"). The clip is computed from the page itself: viewport
-    /// size via window.innerWidth/Height, full-page size via
+    /// The `clip` parameter is REQUIRED in this Juggler build — the schema
+    /// marks it mandatory (no `optional` flag; observed: "Object
+    /// \"<root>.clip\" is undefined, but has some scheme" when omitted). The
+    /// clip is computed from the page itself: viewport size via
+    /// window.innerWidth/Height, full-page size via
     /// documentElement.scrollWidth/Height (Juggler has no getLayoutMetrics;
     /// this evaluate is the schema-faithful substitute).
     pub fn screenshot(self: *Driver, target_id: []const u8, full_page: bool, timeout_ms: i32) ![]u8 {
@@ -861,9 +861,10 @@ pub const Driver = struct {
         const params = root.object.get("params") orelse return;
         if (params != .object) return;
         const frame_id = params.object.get("frameId") orelse return;
+        const nav_id = params.object.get("navigationId") orelse return;
         const error_text = params.object.get("errorText") orelse return;
-        if (frame_id != .string or error_text != .string) return;
-        p.lifecycle.onAbort(frame_id.string, error_text.string);
+        if (frame_id != .string or nav_id != .string or error_text != .string) return;
+        p.lifecycle.onAbort(frame_id.string, nav_id.string, error_text.string);
     }
 
     fn onNavigationStarted(self: *Driver, ev: session.Router.Event) !void {
@@ -1263,9 +1264,33 @@ test "driver: navigationAborted drives lifecycle to aborted" {
 
     const p = d.pages.get("t1") orelse return error.TestUnexpected;
     p.lifecycle.begin("f1");
+    p.lifecycle.setNavigationId("f1", "n1");
     try writeFake(&d, fds, "{\"method\":\"Page.navigationAborted\",\"params\":{\"frameId\":\"f1\",\"navigationId\":\"n1\",\"errorText\":\"NS_BINDING_ABORTED\"},\"sessionId\":\"s1\"}");
     try d.pump(1000);
     try testing.expectEqual(page.Lifecycle.State.aborted, p.lifecycle.state);
+}
+
+test "driver: navigationAborted for a superseded navigation is ignored" {
+    const fds = try testPipe();
+    defer {
+        _ = std.os.linux.close(fds[0]);
+        _ = std.os.linux.close(fds[1]);
+    }
+    var d = Driver.init(testing.allocator, fds[0], fds[1], false);
+    defer d.deinit();
+
+    try writeFake(&d, fds, "{\"method\":\"Browser.attachedToTarget\",\"params\":{\"sessionId\":\"s1\",\"targetInfo\":{\"type\":\"page\",\"targetId\":\"t1\"}}}");
+    try d.pump(1000);
+    try writeFake(&d, fds, "{\"method\":\"Page.frameAttached\",\"params\":{\"frameId\":\"f1\"},\"sessionId\":\"s1\"}");
+    try d.pump(1000);
+
+    const p = d.pages.get("t1") orelse return error.TestUnexpected;
+    p.lifecycle.begin("f1");
+    p.lifecycle.setNavigationId("f1", "n1");
+    try writeFake(&d, fds, "{\"method\":\"Page.navigationAborted\",\"params\":{\"frameId\":\"f1\",\"navigationId\":\"n0\",\"errorText\":\"NS_BINDING_ABORTED\"},\"sessionId\":\"s1\"}");
+    try d.pump(1000);
+    try testing.expectEqual(page.Lifecycle.State.waiting, p.lifecycle.state);
+    try testing.expectEqualStrings("", p.lifecycle.abort_text);
 }
 
 test "driver: executionContextDestroyed removes the context" {

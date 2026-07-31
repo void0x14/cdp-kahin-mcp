@@ -11,7 +11,7 @@
 //!           navigationStarted(frameId, navigationId),
 //!           navigationCommitted(frameId, navigationId?, url, name),
 //!           navigationAborted(frameId, navigationId, errorText),
-//!           sameDocumentNavigation(frameId, navigationId, url),
+//!           sameDocumentNavigation(frameId, url),
 //!           frameAttached(frameId, parentFrameId?), frameDetached(frameId)
 //!
 //! NOT in the schema (confirmed absent; not implemented):
@@ -126,7 +126,8 @@ pub fn decodeScreenshot(allocator: Allocator, b64: []const u8) ![]u8 {
 ///
 /// Driven by Page.eventFired ("load"/"DOMContentLoaded") and
 /// Page.navigationAborted events for the frame being navigated. Events for
-/// other frames or in the wrong state are ignored.
+/// other frames, in the wrong state, or carrying a stale (non-current)
+/// navigation id are ignored.
 ///
 /// String fields: frame_id borrows from the driver (page-owned, stable);
 /// navigation_id and abort_text are OWNED by the lifecycle (duped on store,
@@ -180,11 +181,14 @@ pub const Lifecycle = struct {
 
     /// Store `id` as an owned copy; "" clears. OOM keeps the previous id.
     fn replaceNavigationId(self: *Lifecycle, id: []const u8) void {
+        if (id.len == 0) {
+            if (self.navigation_id.len > 0) self.allocator.free(self.navigation_id);
+            self.navigation_id = "";
+            return;
+        }
+        const dup = self.allocator.dupe(u8, id) catch return; // OOM keeps previous id
         if (self.navigation_id.len > 0) self.allocator.free(self.navigation_id);
-        self.navigation_id = if (id.len == 0)
-            ""
-        else
-            self.allocator.dupe(u8, id) catch return;
+        self.navigation_id = dup;
     }
 
     /// Record the navigation id (from the navigate response or event).
@@ -204,9 +208,14 @@ pub const Lifecycle = struct {
         self.state = .done;
     }
 
-    /// Page.navigationAborted -> aborted, remember the error text.
-    pub fn onAbort(self: *Lifecycle, frame_id: []const u8, error_text: []const u8) void {
+    /// Page.navigationAborted -> aborted, remember the error text. An abort
+    /// for a SUPERSEDED navigation (a different id than the current one) or
+    /// arriving before the response id is known is stale (previous document)
+    /// and ignored — exactly like onCommitted.
+    pub fn onAbort(self: *Lifecycle, frame_id: []const u8, navigation_id: []const u8, error_text: []const u8) void {
         if (self.state != .waiting or !std.mem.eql(u8, frame_id, self.frame_id)) return;
+        if (self.navigation_id.len == 0) return; // response id unknown yet — stale document aborts
+        if (!std.mem.eql(u8, self.navigation_id, navigation_id)) return; // superseded navigation
         self.state = .aborted;
         if (self.abort_text.len > 0) self.allocator.free(self.abort_text);
         self.abort_text = self.allocator.dupe(u8, error_text) catch return;
@@ -309,9 +318,30 @@ test "lifecycle: begin -> abort -> aborted with text" {
     var lc = Lifecycle{ .allocator = testing.allocator };
     defer lc.deinit();
     lc.begin("f1");
-    lc.onAbort("f1", "NS_BINDING_ABORTED");
+    lc.setNavigationId("f1", "nav-1");
+    lc.onAbort("f1", "nav-1", "NS_BINDING_ABORTED");
     try testing.expectEqual(Lifecycle.State.aborted, lc.state);
     try testing.expectEqualStrings("NS_BINDING_ABORTED", lc.abort_text);
+}
+
+test "lifecycle: abort with a stale navigation id is ignored" {
+    var lc = Lifecycle{ .allocator = testing.allocator };
+    defer lc.deinit();
+    lc.begin("f1");
+    lc.setNavigationId("f1", "nav-23");
+    lc.onAbort("f1", "nav-22", "NS_BINDING_ABORTED"); // superseded navigation aborted
+    try testing.expectEqual(Lifecycle.State.waiting, lc.state);
+    try testing.expectEqualStrings("", lc.abort_text);
+    lc.onAbort("f1", "nav-23", "NS_BINDING_ABORTED"); // our navigation aborted
+    try testing.expectEqual(Lifecycle.State.aborted, lc.state);
+}
+
+test "lifecycle: abort before the response id is known is ignored" {
+    var lc = Lifecycle{ .allocator = testing.allocator };
+    defer lc.deinit();
+    lc.begin("f1");
+    lc.onAbort("f1", "nav-22", "NS_BINDING_ABORTED"); // previous-document abort
+    try testing.expectEqual(Lifecycle.State.waiting, lc.state);
 }
 
 test "lifecycle: load for another frame is ignored" {
@@ -328,7 +358,7 @@ test "lifecycle: events in idle state are no-ops" {
     var lc = Lifecycle{ .allocator = testing.allocator };
     defer lc.deinit();
     lc.onLoad("f1");
-    lc.onAbort("f1", "x");
+    lc.onAbort("f1", "nav-x", "x");
     try testing.expectEqual(Lifecycle.State.idle, lc.state);
 }
 
@@ -337,7 +367,7 @@ test "lifecycle: done state is terminal for later events" {
     defer lc.deinit();
     lc.begin("f1");
     lc.onLoad("f1");
-    lc.onAbort("f1", "late");
+    lc.onAbort("f1", "nav-x", "late");
     try testing.expectEqual(Lifecycle.State.done, lc.state);
 }
 
