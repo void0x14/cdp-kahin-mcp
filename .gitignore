@@ -8,7 +8,6 @@ __pycache__/
 .opencode/opencode-loop/
 
 # Personal notes — not part of the MCP package
-AGENTS.md
 MASTER-PLAN.md
 
 # Error logs
