@@ -7,6 +7,11 @@ __pycache__/
 
 .opencode/opencode-loop/
 
+# Personal notes — not part of the MCP package
+AGENTS.md
+MASTER-PLAN.md
+uv.lock
+
 # Error logs
 kahin/logs/
 logs/
