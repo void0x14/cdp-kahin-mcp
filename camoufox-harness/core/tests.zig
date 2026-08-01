@@ -12,5 +12,8 @@ test {
     _ = @import("adapters/network.zig");
     _ = @import("adapters/input.zig");
     _ = @import("adapters/target.zig");
+    _ = @import("process-manager/binary.zig");
+    _ = @import("process-manager/profile.zig");
+    _ = @import("process-manager/lifecycle.zig");
     _ = @import("driver.zig");
 }

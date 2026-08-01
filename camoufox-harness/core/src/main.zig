@@ -23,6 +23,7 @@ const std = @import("std");
 const linux = std.os.linux;
 
 const driver = @import("driver");
+const pm = driver.pm;
 
 const usage =
     \\usage: core <firefox-binary> [profile-dir] [port]
@@ -238,6 +239,96 @@ fn run(args: std.process.Init.Minimal) !void {
     defer a.free(closed);
     std.debug.print("closeTarget -> {s}\n", .{closed});
     if (std.mem.indexOf(u8, closed, "{}") == null) return error.CloseTargetFailed;
+
+    // ---- Faz 6: multi-context isolation (one instance, N contexts) ------
+    // Two contexts on the SAME instance: independent pages + documents.
+    const mctx_a = try d.newContext(driver.default_timeout_ms);
+    defer a.free(mctx_a);
+    const mctx_b = try d.newContext(driver.default_timeout_ms);
+    defer a.free(mctx_b);
+    const pta = try d.newPage(mctx_a, null, driver.default_timeout_ms);
+    defer a.free(pta);
+    const ptb = try d.newPage(mctx_b, null, driver.default_timeout_ms);
+    defer a.free(ptb);
+
+    const na = try d.navigate(pta, "data:text/html,<h1>alpha</h1>", driver.default_timeout_ms);
+    defer a.free(na);
+    const nb = try d.navigate(ptb, "data:text/html,<h1>beta</h1>", driver.default_timeout_ms);
+    defer a.free(nb);
+
+    var e_a = try d.evaluate(pta, "1+1", 15_000);
+    defer e_a.deinit(a);
+    var e_b = try d.evaluate(ptb, "2+3", 15_000);
+    defer e_b.deinit(a);
+    if (e_a.exception_text != null or !std.mem.eql(u8, e_a.value_json, "2")) return error.EvaluateFailed;
+    if (e_b.exception_text != null or !std.mem.eql(u8, e_b.value_json, "5")) return error.EvaluateFailed;
+    std.debug.print("SMOKE PASS: two contexts on one instance evaluate (a: 1+1=2, b: 2+3=5)\n", .{});
+
+    // Document isolation: each page sees only its own DOM.
+    var h_a = try d.evaluate(pta, "document.querySelector('h1').textContent", 15_000);
+    defer h_a.deinit(a);
+    var h_b = try d.evaluate(ptb, "document.querySelector('h1').textContent", 15_000);
+    defer h_b.deinit(a);
+    std.debug.print("isolation: ctx_a h1={s}, ctx_b h1={s}\n", .{ h_a.value_json, h_b.value_json });
+    if (!std.mem.eql(u8, h_a.value_json, "\"alpha\"") or !std.mem.eql(u8, h_b.value_json, "\"beta\"")) {
+        return error.IsolationFailed;
+    }
+    std.debug.print("SMOKE PASS: per-context document isolation\n", .{});
+
+    // Close ctx_a: its page dies with it; ctx_b must keep working.
+    try d.removeBrowserContext(mctx_a, driver.default_timeout_ms);
+    std.debug.print("SMOKE PASS: removeBrowserContext(ctx_a)\n", .{});
+
+    var e_b2 = try d.evaluate(ptb, "2+3", 15_000);
+    defer e_b2.deinit(a);
+    if (e_b2.exception_text != null or !std.mem.eql(u8, e_b2.value_json, "5")) return error.EvaluateFailed;
+    std.debug.print("SMOKE PASS: ctx_b still evaluates after ctx_a closed\n", .{});
+
+    // The closed context's page must be dead (removal took effect).
+    if (d.evaluate(pta, "1+1", 8_000)) |res| {
+        var r = res;
+        r.deinit(a);
+        std.debug.print("FAIL: ctx_a page still evaluates after context removal\n", .{});
+        return error.ContextRemovalIneffective;
+    } else |_| {
+        std.debug.print("SMOKE PASS: ctx_a page is dead after removal (evaluate fails)\n", .{});
+    }
+
+    // Clean up ctx_b explicitly, then clean stop -> exit 0.
+    const closed_b = try d.closeTarget(ptb, driver.default_timeout_ms);
+    defer a.free(closed_b);
+    try d.removeBrowserContext(mctx_b, driver.default_timeout_ms);
+    std.debug.print("SMOKE PASS: ctx_b closed\n", .{});
+
+    // ---- Faz 6: health-check (pipe gone -> instance dead) ----------------
+    // A second instance, spawned directly through the process manager.
+    const inst = try pm.Instance.spawn(a, exe, null, true);
+    defer inst.deinit(a);
+    if (inst.health() != .healthy) return error.HealthCheckFailed;
+    std.debug.print("health-check: instance healthy right after spawn (pid {d})\n", .{inst.child.pid});
+
+    // SIGKILL the browser externally; the pipe dies; health flips to dead.
+    const kill_rc = linux.kill(inst.child.pid, .KILL);
+    if (linux.errno(kill_rc) != .SUCCESS) return error.KillFailed;
+    var dead = false;
+    var tries: u32 = 0;
+    while (tries < 50) : (tries += 1) {
+        if (inst.health() == .dead) {
+            dead = true;
+            break;
+        }
+        sleepMs(100);
+    }
+    if (!dead) return error.HealthCheckFailed;
+    std.debug.print("SMOKE PASS: health-check detected dead instance after external kill\n", .{});
+
+    // Reap: a SIGKILLed child reports ChildSignaled (not exit 0).
+    if (inst.stop(5_000)) |krc| {
+        std.debug.print("note: killed instance exited with code {d}\n", .{krc});
+    } else |err| switch (err) {
+        error.ChildSignaled => std.debug.print("SMOKE PASS: killed instance reaped (ChildSignaled)\n", .{}),
+        else => return err,
+    }
 
     // Clean shutdown: closing the pipes makes the browser exit 0.
     const code = try d.stop();

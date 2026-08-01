@@ -27,6 +27,10 @@ const emulation = @import("adapters/emulation.zig");
 const network = @import("adapters/network.zig");
 const target = @import("adapters/target.zig");
 const input = @import("adapters/input.zig");
+/// Process manager (binary resolution, profile isolation, lifecycle,
+/// health-check). Re-exported so consumers of the driver module can spawn
+/// instances directly (smoke/health evidence).
+pub const pm = @import("process-manager/lifecycle.zig");
 
 pub const default_timeout_ms: i32 = 30_000;
 pub const enable_timeout_ms: i32 = 30_000;
@@ -124,6 +128,9 @@ pub const Driver = struct {
     verbose: bool,
     child: pipe.Spawned,
     reader: pipe.Reader,
+    /// Process-manager instance (set by `start`; owns spawn/reap lifecycle).
+    /// Null for `init`-built drivers (tests with self-pipes).
+    instance: ?*pm.Instance = null,
     router: session.Router,
     /// targetId -> Page (owns the Page structs).
     pages: std.StringHashMap(*Page),
@@ -155,35 +162,20 @@ pub const Driver = struct {
         return d;
     }
 
-    /// Spawn Camoufox with a Juggler pipe, then perform the Browser.enable
-    /// handshake on the root session. `profile` must be a directory that
-    /// exists (Firefox stalls otherwise) — it is created here if missing.
-    pub fn start(allocator: Allocator, exe: []const u8, profile: ?[]const u8, verbose: bool) !Driver {
-        const profile_path = try ensureProfile(allocator, profile);
-        // ponytail: profile_path is arena-owned by the caller (or leaked if
-        // caller passes a stack slice); argv lifetime ends at spawn.
-
-        const browser_argv = [_][]const u8{
-            exe,
-            "-juggler-pipe",
-            "-profile",
-            profile_path,
-            "-no-remote",
-            "-headless",
-        };
-
-        var d = Driver.init(allocator, -1, -1, verbose);
-        errdefer {
-            // (Faz 2 Minor b) Error path must not leak the child: closing the
-            // fds makes the browser exit, then reap it. `wait` after `closeFds`
-            // is safe — the browser dies on pipe EOF.
-            pipe.closeFds(&d.child);
-            if (d.child.pid > 0) _ = pipe.wait(&d.child) catch {};
-            d.deinit();
-        }
-
-        d.child = try pipe.spawn(allocator, &browser_argv);
-        d.reader = pipe.Reader.init(d.child.read_fd);
+    /// Spawn Camoufox through the process manager (binary resolution, pin
+    /// warning, isolated profile, lifecycle management), then perform the
+    /// Browser.enable handshake on the root session. `exe` null resolves via
+    /// KAHIN_CAMOUFOX_BIN / $HOME/.cache scan (mirage.py rule); `profile`
+    /// null creates an isolated per-instance profile dir.
+    pub fn start(allocator: Allocator, exe: ?[]const u8, profile: ?[]const u8, verbose: bool) !Driver {
+        const inst = try pm.Instance.spawn(allocator, exe, profile, verbose);
+        var d = Driver.init(allocator, inst.child.read_fd, inst.child.write_fd, verbose);
+        d.child = inst.child;
+        d.instance = inst;
+        errdefer d.deinit();
+        // Error path must not leak the child: close the fds (browser exits on
+        // EOF), reap it. `stop` before `deinit` — deinit only frees memory.
+        errdefer _ = inst.stop(5_000) catch {};
 
         const params = try browser.enableParams(allocator, true);
         defer allocator.free(params);
@@ -227,6 +219,9 @@ pub const Driver = struct {
         if (self.last_abort_text) |t| self.allocator.free(t);
         self.router.deinit();
         self.reader.deinit(self.allocator);
+        // Instance owns profile dir + binary path buffers (spawn already
+        // reaped the child via stop()); free its memory here.
+        if (self.instance) |inst| inst.deinit(self.allocator);
         self.* = undefined;
     }
 
@@ -875,8 +870,10 @@ pub const Driver = struct {
     }
 
     /// Close the pipes (browser exits cleanly) and reap it. Returns the
-    /// browser's exit code.
+    /// browser's exit code. Managed instances get a bounded wait with a
+    /// SIGKILL fallback for wedged children.
     pub fn stop(self: *Driver) !u8 {
+        if (self.instance) |inst| return inst.stop(10_000);
         pipe.closeFds(&self.child);
         return pipe.wait(&self.child);
     }
@@ -1422,23 +1419,6 @@ fn writeFrameNode(allocator: Allocator, w: anytype, p: *Page, frame_id: []const 
         try writeFrameNode(allocator, w, p, kv.key_ptr.*);
     }
     try w.writeAll("]}");
-}
-
-fn ensureProfile(allocator: Allocator, profile: ?[]const u8) ![]const u8 {
-    const path = if (profile) |p| p else try std.fmt.allocPrint(
-        allocator,
-        "/tmp/kahin-core-{d}-faz2",
-        .{std.os.linux.getpid()},
-    );
-    // std.fs.makeDirAbsolute is gone in 0.16; raw syscall keeps this simple.
-    const path_z = try allocator.dupeZ(u8, path);
-    defer allocator.free(path_z);
-    const rc = std.os.linux.mkdir(path_z.ptr, 0o700);
-    switch (std.os.linux.errno(rc)) {
-        .SUCCESS, .EXIST => {},
-        else => return error.MkdirFailed,
-    }
-    return path;
 }
 
 const testing = std.testing;
