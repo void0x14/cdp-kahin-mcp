@@ -206,7 +206,7 @@ async def browser_start(engine: str = "shadow", headless: bool = True, port: int
             _current_engine = Obscura()
             actual_port = port or 9241
         else:
-            _current_engine = Mirage()
+            _current_engine = Mirage(engine_name=engine)
             actual_port = 0  # Juggler pipe: no remote-debugging port (9222/9240 irrelevant)
 
         try:

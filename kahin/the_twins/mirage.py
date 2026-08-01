@@ -59,6 +59,11 @@ def _camoufox_bin() -> Path:
 class Mirage(BrowserEngine):
     """Stealth Camoufox engine speaking CDP-shaped JSON over the Zig sidecar."""
 
+    def __init__(self, engine_name: str = "mirage") -> None:
+        super().__init__()
+        self._engine_name = engine_name
+        self._stderr_file = None
+
     async def start(self, headless: bool = True, port: int = 0, **kwargs: Any) -> EngineContext:
         del headless, port, kwargs  # Juggler pipe: no headless flag, no port
         log_dir = Path(__file__).resolve().parents[2] / "logs"
@@ -74,7 +79,7 @@ class Mirage(BrowserEngine):
         )
         self._start_reader()
         return EngineContext(
-            engine_name="mirage",
+            engine_name=self._engine_name,
             ws_url="",  # IPC over stdio, not WebSocket
             meta={
                 "sidecar": str(_sidecar_bin()),

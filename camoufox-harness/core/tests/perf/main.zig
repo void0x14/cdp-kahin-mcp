@@ -39,9 +39,9 @@ const cmd_timeout_ms: i32 = 30_000;
 const eval_timeout_ms: i32 = 15_000;
 /// Interception workload target. Requests are intercepted BEFORE hitting
 /// the network, but Juggler does not emit isIntercepted for targets that
-/// fail connection setup immediately (observed: port 1 never registered) —
-/// point this at a live local server so every request reaches the
-/// interception point, then gets resumed/fulfilled/aborted regardless.
+/// fail connection setup immediately (observed: port 1 never registered).
+/// startInjectServer() owns a live listener on this port, so every request
+/// reaches the interception point, then gets resumed/fulfilled/aborted.
 const inject_port: u16 = 8333;
 
 pub fn main(args: std.process.Init.Minimal) u8 {
@@ -108,7 +108,7 @@ fn run(args: std.process.Init.Minimal) !void {
     const drv: *driver.Driver = &d.?;
     std.debug.print("=== cold start (spawn -> Browser.enable) ===\n", .{});
     for (cold_lats.items, 0..) |us, s| std.debug.print("  sample {d}: {d:.2} ms\n", .{ s + 1, usToMs(us) });
-    summarize(a, cold_lats.items).print();
+    (try summarize(a, cold_lats.items)).print();
 
     // ---- RSS idle (browser up, no page) ---------------------------------
     const pid = drv.instance.?.child.pid;
@@ -144,7 +144,7 @@ fn run(args: std.process.Init.Minimal) !void {
         try eval_lats.append(a, t1 - t0);
     }
     std.debug.print("=== Runtime.evaluate round-trip ===\n", .{});
-    summarize(a, eval_lats.items).print();
+    (try summarize(a, eval_lats.items)).print();
 
     // ---- Page.navigate round trip (load-gated) ---------------------------
     var nav_lats: std.array_list.Aligned(i64, null) = .empty;
@@ -159,7 +159,7 @@ fn run(args: std.process.Init.Minimal) !void {
         try nav_lats.append(a, t1 - t0);
     }
     std.debug.print("=== Page.navigate round-trip (load-gated) ===\n", .{});
-    summarize(a, nav_lats.items).print();
+    (try summarize(a, nav_lats.items)).print();
 
     // ---- Page.dispatchKeyEvent (Input equivalent) round trip --------------
     var key_lats: std.array_list.Aligned(i64, null) = .empty;
@@ -171,9 +171,11 @@ fn run(args: std.process.Init.Minimal) !void {
         try key_lats.append(a, t1 - t0);
     }
     std.debug.print("=== Page.dispatchKeyEvent round-trip ===\n", .{});
-    summarize(a, key_lats.items).print();
+    (try summarize(a, key_lats.items)).print();
 
     // ---- Network interception decisions -----------------------------------
+    // The benchmark's own listener supplies live request targets (§ above).
+    _ = std.Thread.spawn(.{}, startInjectServer, .{}) catch return error.InjectServerSpawn;
     try drv.setInterception(tgt, true, cmd_timeout_ms);
 
     var resume_lats: std.array_list.Aligned(i64, null) = .empty;
@@ -188,7 +190,7 @@ fn run(args: std.process.Init.Minimal) !void {
         try resume_lats.append(a, t1 - t0);
     }
     std.debug.print("=== Network.resumeInterceptedRequest decision ===\n", .{});
-    summarize(a, resume_lats.items).print();
+    (try summarize(a, resume_lats.items)).print();
 
     var fulfill_lats: std.array_list.Aligned(i64, null) = .empty;
     defer fulfill_lats.deinit(a);
@@ -202,7 +204,7 @@ fn run(args: std.process.Init.Minimal) !void {
         try fulfill_lats.append(a, t1 - t0);
     }
     std.debug.print("=== Network.fulfillInterceptedRequest decision ===\n", .{});
-    summarize(a, fulfill_lats.items).print();
+    (try summarize(a, fulfill_lats.items)).print();
 
     var abort_lats: std.array_list.Aligned(i64, null) = .empty;
     defer abort_lats.deinit(a);
@@ -216,7 +218,7 @@ fn run(args: std.process.Init.Minimal) !void {
         try abort_lats.append(a, t1 - t0);
     }
     std.debug.print("=== Network.abortInterceptedRequest decision ===\n", .{});
-    summarize(a, abort_lats.items).print();
+    (try summarize(a, abort_lats.items)).print();
 
     try drv.setInterception(tgt, false, cmd_timeout_ms);
 
@@ -248,7 +250,7 @@ fn run(args: std.process.Init.Minimal) !void {
             }
         }
         std.debug.print("  contexts={d}\n", .{n});
-        summarize(a, lats.items).print();
+        (try summarize(a, lats.items)).print();
         for (0..live) |c| {
             try drv.removeBrowserContext(ctxs[c], cmd_timeout_ms);
             a.free(ctxs[c]);
@@ -261,6 +263,37 @@ fn run(args: std.process.Init.Minimal) !void {
     std.debug.print("clean stop: browser exit code {d}\n", .{code});
     if (code != 0) return error.BadBrowserExit;
     std.debug.print("PERF PASS\n", .{});
+}
+
+/// Benchmark-owned HTTP listener on 127.0.0.1:inject_port. Interception
+/// needs a live target; the benchmark supplies it, no external server
+/// required. Runs on a spawned thread; process exit reaps it.
+fn startInjectServer() void {
+    const fd = linux.socket(linux.AF.INET, linux.SOCK.STREAM, 0);
+    if (linux.errno(fd) != .SUCCESS) return;
+    defer _ = linux.close(@intCast(fd));
+    const one: u32 = 1;
+    _ = linux.setsockopt(@intCast(fd), linux.SOL.SOCKET, linux.SO.REUSEADDR, @ptrCast(&one), @sizeOf(u32));
+    var addr: linux.sockaddr.in = .{
+        .family = linux.AF.INET,
+        .port = std.mem.nativeToBig(u16, inject_port),
+        .addr = std.mem.nativeToBig(u32, 0x7F000001),
+    };
+    if (linux.errno(linux.bind(@intCast(fd), @ptrCast(&addr), @sizeOf(linux.sockaddr.in))) != .SUCCESS) {
+        std.debug.print("PERF: inject server bind failed on 127.0.0.1:{d}\n", .{inject_port});
+        return;
+    }
+    if (linux.errno(linux.listen(@intCast(fd), 16)) != .SUCCESS) return;
+    const resp = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+    var client: linux.sockaddr.in = undefined;
+    var clen: linux.socklen_t = @sizeOf(linux.sockaddr.in);
+    while (true) {
+        const c = linux.accept(@intCast(fd), @ptrCast(&client), &clen);
+        if (linux.errno(c) == .SUCCESS) {
+            _ = linux.write(@intCast(c), resp.ptr, resp.len);
+            _ = linux.close(@intCast(c));
+        }
+    }
 }
 
 /// data URL used for the "loaded" RSS measurement (moderate DOM).
@@ -298,11 +331,9 @@ fn firstPendingRid(a: std.mem.Allocator, d: *driver.Driver) ![]u8 {
 }
 
 /// p50/p95/p99 (nearest-rank) + min/max/mean over an owned sorted copy.
-fn summarize(a: std.mem.Allocator, lats: []const i64) Stats {
-    const sorted = a.dupe(i64, lats) catch return .{
-        .n = lats.len, .min_ms = 0, .max_ms = 0, .mean_ms = 0,
-        .p50_ms = 0, .p95_ms = 0, .p99_ms = 0,
-    };
+/// OOM propagates: a silent zeroed Stats would masquerade as a real run.
+fn summarize(a: std.mem.Allocator, lats: []const i64) !Stats {
+    const sorted = try a.dupe(i64, lats);
     defer a.free(sorted);
     std.mem.sort(i64, sorted, {}, std.sort.asc(i64));
 
