@@ -93,9 +93,10 @@ class Mirage(BrowserEngine):
             lines = ["user_pref({!r}, {!r});".format(k, v) for k, v in prefs.items()]
             (profile_dir / "user.js").write_text("\n".join(lines) + "\n")
 
-        args = [str(_sidecar_bin()), str(_camoufox_bin()), str(profile_dir)]
+        args = [str(_sidecar_bin()), str(_camoufox_bin())]
         if not headless:
             args.append("--visible")  # visible window (stealth vs anti-bot)
+        args.append(str(profile_dir))
         log_dir = Path(__file__).resolve().parents[2] / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         # File lives as long as the child process, not a with-block.

@@ -1,15 +1,35 @@
 {
   "name": "@kahinmcp/kahin",
-  "version": "0.1.1",
-  "description": "Kahin, hibrit bir CDP ansiklopedisi, anti-detect browser otomasyon MCP sidir. Yerleşik olarak obscura ve camoufox kullanır, dinamik olarak göreve göre seçer. Seçimi ajanınız yapar.",
+  "version": "0.1.2",
+  "description": "Kahin — CDP ansiklopedisi + anti-detect browser otomasyon MCP sunucusu. Obscura ve Camoufox motorlarını kullanır, motor seçimini ajana bırakır.",
   "bin": {
     "kahin": "bin/kahin.mjs"
   },
   "files": [
-    "bin"
+    "bin",
+    "wheel"
   ],
   "engines": {
     "node": ">=18"
   },
-  "license": "MIT"
+  "license": "AGPL-3.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/void0x14/cdp-kahin-mcp.git"
+  },
+  "homepage": "https://github.com/void0x14/cdp-kahin-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/void0x14/cdp-kahin-mcp/issues"
+  },
+  "keywords": [
+    "cdp",
+    "chrome-devtools-protocol",
+    "mcp",
+    "model-context-protocol",
+    "browser-automation",
+    "camoufox",
+    "anti-detect",
+    "llm",
+    "ai"
+  ]
 }
