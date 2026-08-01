@@ -167,8 +167,8 @@ pub const Driver = struct {
     /// Browser.enable handshake on the root session. `exe` null resolves via
     /// KAHIN_CAMOUFOX_BIN / $HOME/.cache scan (mirage.py rule); `profile`
     /// null creates an isolated per-instance profile dir.
-    pub fn start(allocator: Allocator, exe: ?[]const u8, profile: ?[]const u8, verbose: bool) !Driver {
-        const inst = try pm.Instance.spawn(allocator, exe, profile, verbose);
+    pub fn start(allocator: Allocator, exe: ?[]const u8, profile: ?[]const u8, verbose: bool, visible: bool) !Driver {
+        const inst = try pm.Instance.spawn(allocator, exe, profile, verbose, !visible);
         var d = Driver.init(allocator, inst.child.read_fd, inst.child.write_fd, verbose);
         d.child = inst.child;
         d.instance = inst;

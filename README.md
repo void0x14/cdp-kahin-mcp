@@ -33,7 +33,16 @@ CDP'yi bilmeyen AI'a Chrome'u kontrol etmeyi öğreten, yanlış yapınca düzel
 
 ## Kurulum
 
-Zorunlu: Python 3.12+ · Chrome/Chromium
+Zorunlu: Python 3.12+ · Chrome/Chromium (otomatik kurulur, repo klonlamaya gerek yok)
+
+```bash
+pnpm add -g kahin
+kahin --upgrade   # ilk çalıştırmada Python ortamını kurar (~30 sn)
+```
+
+`kahin` çalışınca MCP stdio server'ı başlar. Python ortamı `~/.local/share/kahin/` altında yönetilir; `kahin --upgrade` ile en yeni sürüme geçilir.
+
+Kaynak kodunla geliştirme:
 
 ```bash
 git clone https://github.com/void0x14/cdp-kahin-mcp
@@ -49,7 +58,7 @@ uv pip install -e .
 ```json
 "kahin": {
   "type": "local",
-  "command": ["python3", "-m", "kahin.oracle"],
+  "command": ["kahin"],
   "enabled": true
 }
 ```
@@ -62,8 +71,8 @@ uv pip install -e .
 {
   "mcpServers": {
     "kahin": {
-      "command": "python3",
-      "args": ["-m", "kahin.oracle"]
+      "command": "kahin",
+      "args": []
     }
   }
 }
@@ -130,10 +139,10 @@ oracle.py               → MCP server (32 tool, giriş kapısı)
 ## 🗺️ Yol Haritası
 
 - [ ] **Juggler protokolü** için de uçtan uca dökümantasyon,kullanım ve pratik örnekleri desteği eklenmesi
-- [ ] **Camoufox** entegrasyonu yapılacak.Bizzat chrome gibi native olarak camoufoxuda her nimetinden yararlanarak kullanabilecek.Buna ek olarak vulpineos'in sağladığı bazı ek avantajları da kullanabilecek.Bütün bunlara ek olarak cdpnın illaki gerektiği noktalardada foxbridge entegresi ile işi arşa çıkartacak
+- [x] **Camoufox entegrasyonu tamamlandı** — gerçek Camoufox (Zig sidecar + Juggler pipe) ile native çalışıyor; engine seçimi ajan tarafından `shadow`/`mirage` parametresiyle yapılıyor
 - [x] **Obscura entegrasyonu tamamlandı** — gerçek Obscura binary'si (WebSocket CDP) ile çalışıyor, startup problemleri giderildi
 - [ ] **SKILLS** destekleri ve konfigre edilebilir kişsiel hazır skills oluşturma özelliği
-- [ ] **Tek tık kurulum** — `uvx kahin` ile direkt çalıştır
+- [x] **Tek tık kurulum** — `pnpm add -g kahin`, sonra `kahin` (ilk çalıştırmada Python ortamını otomatik kurar)
 - [ ] **Zero-dependency** hedefi (Go/Rust portu)
 - [ ] **LSP modu** — kod içinde hata yakalama, AI'a yanlışını yüzüne vurma
 - [ ] **Tool sayısı 50+** — eksik CDP domain tool'ları
@@ -141,7 +150,7 @@ oracle.py               → MCP server (32 tool, giriş kapısı)
 - [ ] **Gerçek zamanlı izleme** — AI'ın Kahin'i nasıl kullandığını canlı gör
 - [ ] **Web dashboard** — tool çağrıları, hata oranları, trendler
 - [ ] **MCP Ekosistemi** — üçüncü taraf MCP'lere proxy/entegrasyon
-- [ ] **CLI aracı** — `kahin` komutu ile hızlı sorgulama
+- [x] **CLI aracı** — `kahin` komutu ile hızlı sorgulama (npm launcher, `pnpm add -g kahin`)
 - [ ] **Pasif tarama** — arka planda CDP event'lerini izle, değişiklik olunca bildir
 - [ ] **Dokümantasyon sitesi** — kapsamlı kullanım kılavuzu
 

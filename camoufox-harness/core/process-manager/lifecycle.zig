@@ -43,7 +43,7 @@ pub const Instance = struct {
     /// Spawn Camoufox with Juggler args. `exe` null or "" resolves via
     /// binary.resolve (env / cache); `profile` null creates an isolated
     /// default profile dir; an explicit profile is created if missing.
-    pub fn spawn(allocator: Allocator, exe: ?[]const u8, profile: ?[]const u8, verbose: bool) !*Instance {
+    pub fn spawn(allocator: Allocator, exe: ?[]const u8, profile: ?[]const u8, verbose: bool, headless: bool) !*Instance {
         var owned_bin: ?[]u8 = null;
         var warning: ?[]u8 = null;
         errdefer {
@@ -85,15 +85,17 @@ pub const Instance = struct {
             .verbose = verbose,
         };
 
-        const argv = [_][]const u8{
-            bin,
-            "-juggler-pipe",
-            "-profile",
-            profile_path,
-            "-no-remote",
-            "-headless",
-        };
-        inst.child = try pipe.spawn(allocator, &argv);
+        var argv_list: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer argv_list.deinit(allocator);
+        try argv_list.append(allocator, bin);
+        try argv_list.append(allocator, "-juggler-pipe");
+        try argv_list.append(allocator, "-profile");
+        try argv_list.append(allocator, profile_path);
+        try argv_list.append(allocator, "-no-remote");
+        // KAHIN_HEADLESS=0 => visible window (stealth; some anti-bot layers
+        // distrust the -headless flag). Unset/other => headless (default).
+        if (headless) try argv_list.append(allocator, "-headless");
+        inst.child = try pipe.spawn(allocator, argv_list.items);
         errdefer {
             // Spawn-error path: closing the fds makes the browser exit, then
             // reap it (pipe EOF exit rule).
@@ -224,7 +226,7 @@ pub const Manager = struct {
     /// guard for limit 1).
     pub fn spawn(self: *Manager, exe: ?[]const u8, profile: ?[]const u8, verbose: bool) !*Instance {
         if (self.instances.items.len >= self.max_instances) return error.LimitReached;
-        const inst = try Instance.spawn(self.allocator, exe, profile, verbose);
+        const inst = try Instance.spawn(self.allocator, exe, profile, verbose, true);
         errdefer {
             // (Faz 7 Minor b) append OOM must not leak the running child:
             // stop (close fds -> browser exits, reap) before freeing the

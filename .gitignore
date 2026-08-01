@@ -12,3 +12,6 @@ kahin/logs/
 logs/
 .zig-cache/
 zig-out/
+dist/
+npm/*.tgz
+camoufox-harness/core/root

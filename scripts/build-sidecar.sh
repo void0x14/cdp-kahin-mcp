@@ -23,7 +23,7 @@ case "$version" in
 esac
 
 echo "zig $version — building sidecar"
-"$ZIG" build-exe --dep driver -Mroot=ipc_main.zig -Mdriver=driver.zig -O ReleaseSafe
+"$ZIG" build-exe --dep driver -Mroot=ipc_main.zig -Mdriver=driver.zig -O ReleaseSafe -femit-bin=zig-out/bin/kahin-sidecar
 mkdir -p ../vendor/bin
 cp zig-out/bin/kahin-sidecar ../vendor/bin/kahin-sidecar
 echo "vendored: camoufox-harness/vendor/bin/kahin-sidecar"

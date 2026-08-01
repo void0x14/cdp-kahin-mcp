@@ -1,0 +1,15 @@
+{
+  "name": "@kahinmcp/kahin",
+  "version": "0.1.1",
+  "description": "Kahin, hibrit bir CDP ansiklopedisi, anti-detect browser otomasyon MCP sidir. Yerleşik olarak obscura ve camoufox kullanır, dinamik olarak göreve göre seçer. Seçimi ajanınız yapar.",
+  "bin": {
+    "kahin": "bin/kahin.mjs"
+  },
+  "files": [
+    "bin"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}

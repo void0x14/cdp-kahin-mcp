@@ -13,10 +13,16 @@ import base64
 import json
 import logging
 import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
 from kahin.the_twins.chassis import BrowserEngine, EngineContext, EventData
+
+try:
+    from camoufox.utils import launch_options
+except ImportError:  # pragma: no cover - harness without the camoflox package
+    launch_options = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +36,12 @@ def _sidecar_bin() -> Path:
         if path.is_file():
             return path
         raise RuntimeError(f"KAHIN_ZIG_CORE points to a missing sidecar: {path}")
+    # Installed wheel ships the sidecar inside the package (kahin/_vendor/);
+    # source-tree installs use the repo copy. Prefer the package copy so the
+    # pip-installed runtime (pnpm launcher -> PyPI) never needs the repo.
+    pkg = Path(__file__).resolve().parents[1] / "_vendor" / "kahin-sidecar"
+    if pkg.is_file():
+        return pkg
     path = (
         Path(__file__).resolve().parents[2] / "camoufox-harness" / "vendor" / "bin" / "kahin-sidecar"
     )
@@ -65,17 +77,35 @@ class Mirage(BrowserEngine):
         self._stderr_file = None
 
     async def start(self, headless: bool = True, port: int = 0, **kwargs: Any) -> EngineContext:
-        del headless, port, kwargs  # Juggler pipe: no headless flag, no port
+        del port  # Juggler pipe: no port.
+        # BrowserForge fingerprint -> CAMOU_CONFIG_* env (master plan §2.1.5).
+        # Every start() draws a fresh identity; the sidecar passes our
+        # environment through to the Camoufox child verbatim (pipe.zig
+        # buildEnvp reads /proc/self/environ).
+        opts = launch_options() if launch_options is not None else {"env": {}, "firefox_user_prefs": {}}
+        env = {**os.environ, **opts["env"]}
+
+        # firefox_user_prefs -> <profile>/user.js (webgl etc. must be set
+        # before the browser boots; the sidecar only mkdirs the profile).
+        profile_dir = Path(tempfile.mkdtemp(prefix="kahin-fp-"))
+        prefs = opts.get("firefox_user_prefs") or {}
+        if prefs:
+            lines = ["user_pref({!r}, {!r});".format(k, v) for k, v in prefs.items()]
+            (profile_dir / "user.js").write_text("\n".join(lines) + "\n")
+
+        args = [str(_sidecar_bin()), str(_camoufox_bin()), str(profile_dir)]
+        if not headless:
+            args.append("--visible")  # visible window (stealth vs anti-bot)
         log_dir = Path(__file__).resolve().parents[2] / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         # File lives as long as the child process, not a with-block.
         self._stderr_file = await asyncio.to_thread(open, log_dir / "kahin-sidecar.err", "ab")
         self._process = await asyncio.create_subprocess_exec(
-            str(_sidecar_bin()),
-            str(_camoufox_bin()),
+            *args,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=self._stderr_file,
+            env=env,
         )
         self._start_reader()
         return EngineContext(

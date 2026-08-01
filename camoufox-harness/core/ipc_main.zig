@@ -69,8 +69,24 @@ fn run(args: std.process.Init.Minimal) !void {
         return error.InvalidArgs;
     }
     const exe = std.mem.sliceTo(argv[1], 0);
-    const verbose = argv.len >= 3 and std.mem.eql(u8, std.mem.sliceTo(argv[2], 0), "--verbose");
-    const prof_arg: ?[]const u8 = if (verbose) (if (argv.len >= 4) std.mem.sliceTo(argv[3], 0) else null) else (if (argv.len >= 3) std.mem.sliceTo(argv[2], 0) else null);
+    var visible = false;
+    var verbose = false;
+    const prof_arg: ?[]const u8 = blk: {
+        var i: usize = 2;
+        while (i < argv.len) : (i += 1) {
+            const a = std.mem.sliceTo(argv[i], 0);
+            if (std.mem.eql(u8, a, "--visible")) {
+                visible = true;
+                continue;
+            }
+            if (std.mem.eql(u8, a, "--verbose")) {
+                verbose = true;
+                continue;
+            }
+            break :blk a;
+        }
+        break :blk null;
+    };
     var prof_buf: [64]u8 = undefined;
     const profile: ?[]const u8 = prof_arg orelse
         std.fmt.bufPrint(&prof_buf, "/tmp/kahin-sidecar-{d}", .{linux.getpid()}) catch "kahin-sidecar-default";
@@ -81,7 +97,7 @@ fn run(args: std.process.Init.Minimal) !void {
     defer _ = gpa.deinit();
     const a = gpa.allocator();
 
-    var d = try driver_mod.Driver.start(a, exe, profile, verbose);
+    var d = try driver_mod.Driver.start(a, exe, profile, verbose, visible);
     defer d.deinit();
     defer _ = d.stop() catch 0;
 
