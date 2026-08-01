@@ -3,14 +3,19 @@
 // Kurulum: pnpm add -g @kahinmcp/kahin
 
 import { spawn } from "node:child_process";
-import { mkdirSync, existsSync, copyFileSync } from "node:fs";
+import { mkdirSync, existsSync, copyFileSync, readdirSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const KAHIN_VERSION = "0.1.2";
-const WHEEL = join(__dirname, "..", "wheel", `kahin-${KAHIN_VERSION}-py3-none-any.whl`);
+const VENDOR = join(__dirname, "..", "lib", "vendor");
+const wheelName = readdirSync(VENDOR).find((f) => f.startsWith("kahin-") && f.endsWith(".whl"));
+if (!wheelName) {
+  process.stderr.write(`[kahin] Wheel bulunamadı: ${VENDOR}/kahin-*.whl\n`);
+  process.exit(1);
+}
+const WHEEL = join(VENDOR, wheelName);
 const HOME = process.env.KAHIN_HOME || join(homedir(), ".local", "share", "kahin");
 const VENV = join(HOME, "venv");
 const PY = process.platform === "win32" ? join(VENV, "Scripts", "python.exe") : join(VENV, "bin", "python");
@@ -31,12 +36,12 @@ async function setup() {
     process.exit(1);
   }
   mkdirSync(HOME, { recursive: true });
-  const needsInstall = !existsSync(PY) || !existsSync(MARKER) || (await import("node:fs/promises")).readFile(MARKER, "utf8").catch(() => "") !== KAHIN_VERSION;
+  const needsInstall = !existsSync(PY) || !existsSync(MARKER) || (await import("node:fs/promises")).readFile(MARKER, "utf8").catch(() => "") !== wheelName;
   if (!needsInstall) return;
 
   process.stderr.write("[kahin] Python ortamı kuruluyor (ilk sefer) — ~30 sn...\n");
   const start = Date.now();
-  const wheelCopy = join(HOME, `kahin-${KAHIN_VERSION}-py3-none-any.whl`);
+  const wheelCopy = join(HOME, wheelName);
   copyFileSync(WHEEL, wheelCopy);
   let code;
   if (process.env.UV && existsSync(process.env.UV)) {
@@ -54,7 +59,7 @@ async function setup() {
     process.stderr.write(`[kahin] Kurulum başarısız. Log: ${LOG} — elle kur: python3 -m venv ${VENV} && ${PY} -m pip install ${wheelCopy}\n`);
     process.exit(1);
   }
-  (await import("node:fs/promises")).writeFile(MARKER, KAHIN_VERSION);
+  (await import("node:fs/promises")).writeFile(MARKER, wheelName);
   process.stderr.write(`[kahin] Hazır (${((Date.now() - start) / 1000).toFixed(0)} sn).\n`);
 }
 
