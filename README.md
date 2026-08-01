@@ -43,7 +43,7 @@ pnpm add -g kahin
 
 Bu kadar. Kurulum sonrası Kahin, sistemindeki AI CLI araçlarını otomatik tespit eder ve kendini kaydeder:
 
-**Claude Code · Claude Desktop · Cursor · Windsurf · opencode · Codex CLI · Gemini CLI · Zed · VS Code**
+**Claude Code · Claude Desktop · Cursor · Windsurf · opencode · Codex CLI · Gemini CLI · Zed · VS Code · Cline · Cline CLI · Roo Code · Kilo Code · Continue · Amazon Q · Trae · BoltAI · Antigravity · Amp · MCPorter · GitHub Copilot CLI · Goose**
 
 Mevcut config'lerine dokunmaz, sadece `kahin` girişini ekler (merge). Zaten kayıtlıysa atlar (idempotent). Elle JSON yazmana gerek yok.
 
