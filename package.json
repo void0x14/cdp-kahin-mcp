@@ -5,6 +5,10 @@
   "bin": {
     "kahin": "bin/kahin.mjs"
   },
+  "scripts": {
+    "postinstall": "node bin/setup.mjs",
+    "setup": "node bin/setup.mjs"
+  },
   "files": [
     "bin",
     "LICENSE"
@@ -15,11 +19,11 @@
   "license": "AGPL-3.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/void0x14/cdp-kahin-mcp.git"
+    "url": "git+https://github.com/void0x14/kahin-mcp.git"
   },
-  "homepage": "https://github.com/void0x14/cdp-kahin-mcp#readme",
+  "homepage": "https://github.com/void0x14/kahin-mcp#readme",
   "bugs": {
-    "url": "https://github.com/void0x14/cdp-kahin-mcp/issues"
+    "url": "https://github.com/void0x14/kahin-mcp/issues"
   },
   "keywords": [
     "cdp",

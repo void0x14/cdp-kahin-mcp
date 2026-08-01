@@ -30,6 +30,13 @@ async function setup() {
 }
 
 const args = process.argv.slice(2);
+
+if (args[0] === "setup") {
+  const { setup } = await import("./setup.mjs");
+  setup();
+  process.exit(0);
+}
+
 const python = await setup();
 const child = spawn(python, ["-m", "kahin.oracle", ...args], { stdio: "inherit" });
 child.on("exit", (code, signal) => {

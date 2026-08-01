@@ -33,14 +33,29 @@ CDP'yi bilmeyen AI'a Chrome'u kontrol etmeyi öğreten, yanlış yapınca düzel
 
 ## Kurulum
 
-Zorunlu: Python 3.12+ · Chrome/Chromium (otomatik kurulur, repo klonlamaya gerek yok)
+Zorunlu: Python 3.12+ · Chrome/Chromium · Node.js 18+ (npm launcher için)
+
+### Otomatik kurulum — tek komut
 
 ```bash
 pnpm add -g kahin
-kahin --upgrade   # ilk çalıştırmada Python ortamını kurar (~30 sn)
 ```
 
-`kahin` çalışınca MCP stdio server'ı başlar. Python ortamı `~/.local/share/kahin/` altında yönetilir; `kahin --upgrade` ile en yeni sürüme geçilir.
+Bu kadar. Kurulum sonrası Kahin, sistemindeki AI CLI araçlarını otomatik tespit eder ve kendini kaydeder:
+
+**Claude Code · Claude Desktop · Cursor · Windsurf · opencode · Codex CLI · Gemini CLI · Zed · VS Code**
+
+Mevcut config'lerine dokunmaz, sadece `kahin` girişini ekler (merge). Zaten kayıtlıysa atlar (idempotent). Elle JSON yazmana gerek yok.
+
+Yeni bir araç kurduysan veya kurulum kaçırdıysa:
+
+```bash
+kahin setup
+```
+
+Otomatik kurulumu devre dışı bırakmak için: `KAHIN_SKIP_AUTO_SETUP=1`
+
+`kahin` çalışınca MCP stdio server'ı başlar. Python ortamı `~/.local/share/kahin/` altında yönetilir.
 
 Kaynak kodunla geliştirme:
 
@@ -49,33 +64,6 @@ git clone https://github.com/void0x14/cdp-kahin-mcp
 cd cdp-kahin-mcp
 uv venv && source .venv/bin/activate
 uv pip install -e .
-```
-
-### opencode'a ekle
-
-`~/.config/opencode/opencode.json`:
-
-```json
-"kahin": {
-  "type": "local",
-  "command": ["kahin"],
-  "enabled": true
-}
-```
-
-### Claude Code'a ekle
-
-`doggystyle/.mcp.json` veya herhangi bir projenin köküne:
-
-```json
-{
-  "mcpServers": {
-    "kahin": {
-      "command": "kahin",
-      "args": []
-    }
-  }
-}
 ```
 
 ## Kullanım
