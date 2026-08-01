@@ -10,7 +10,6 @@ __pycache__/
 # Personal notes — not part of the MCP package
 AGENTS.md
 MASTER-PLAN.md
-uv.lock
 
 # Error logs
 kahin/logs/
