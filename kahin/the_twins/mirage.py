@@ -13,8 +13,6 @@ import base64
 import json
 import logging
 import os
-import shutil
-import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -24,65 +22,22 @@ logger = logging.getLogger(__name__)
 
 _REQUEST_TIMEOUT = 30.0
 
-_SIDECAR_BUILD_ARGS = (
-    "build-exe",
-    "--dep", "driver",
-    "-Mroot=ipc_main.zig",
-    "-Mdriver=driver.zig",
-    "-O", "ReleaseSafe",
-)
-
 
 def _sidecar_bin() -> Path:
     env = os.environ.get("KAHIN_ZIG_CORE")
-    base = Path(env) if env else Path(__file__).resolve().parents[2] / "camoufox-harness" / "core"
-    bin_path = base / "zig-out" / "bin" / "kahin-sidecar"
-    if not bin_path.is_file():
-        _build_sidecar(base, bin_path)
-    return bin_path
-
-
-def _build_sidecar(base: Path, bin_path: Path) -> None:
-    """Build the sidecar on demand — an MCP server must not need manual steps."""
-    zig = _find_zig()
-    logger.info("Building sidecar (first use): %s -> %s", zig, bin_path)
-    bin_path.parent.mkdir(parents=True, exist_ok=True)
-    proc = subprocess.run(
-        [str(zig), *_SIDECAR_BUILD_ARGS, f"-femit-bin={bin_path}"],
-        cwd=base,
-        capture_output=True,
-        text=True,
-        timeout=120,
-        check=False,
+    if env:
+        path = Path(env) / "zig-out" / "bin" / "kahin-sidecar"
+        if path.is_file():
+            return path
+        raise RuntimeError(f"KAHIN_ZIG_CORE points to a missing sidecar: {path}")
+    path = (
+        Path(__file__).resolve().parents[2] / "camoufox-harness" / "vendor" / "bin" / "kahin-sidecar"
     )
-    if proc.returncode != 0:
-        raise RuntimeError(f"Sidecar build failed (zig {zig}):\n{proc.stderr[-2000:]}")
-
-
-def _find_zig() -> Path:
-    """Locate a 0.16.x zig: KAHIN_ZIG_BIN (explicit), the known 0.16 install,
-    or PATH. Non-0.16 zig builds fail (stdlib drift), so verify the version."""
-    env = os.environ.get("KAHIN_ZIG_BIN")
-    candidates = [Path(env)] if env else []
-    candidates.append(Path.home() / ".local" / "opt" / "zig-x86_64-linux-0.16.0" / "zig")
-    which = shutil.which("zig")
-    if which:
-        candidates.append(Path(which))
-    for zig in candidates:
-        if not zig.is_file():
-            continue
-        try:
-            version = subprocess.run(
-                [str(zig), "version"], capture_output=True, text=True, timeout=10, check=False
-            ).stdout
-        except OSError:
-            continue
-        if version.startswith("0.16."):
-            return zig
-    raise RuntimeError(
-        "Zig 0.16.x not found (the sidecar build requires it). "
-        "Install it or set KAHIN_ZIG_BIN."
-    )
+    if not path.is_file():
+        raise RuntimeError(
+            f"Vendored sidecar binary missing: {path}. Rebuild it with scripts/build-sidecar.sh"
+        )
+    return path
 
 
 def _camoufox_bin() -> Path:
