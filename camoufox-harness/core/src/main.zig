@@ -330,6 +330,56 @@ fn run(args: std.process.Init.Minimal) !void {
         else => return err,
     }
 
+    // ---- Faz 7: crash-recovery ------------------------------------------
+    // A driver whose browser is SIGKILLed externally must surface a CLEAN
+    // error on the next command (no hang), and a fresh instance must be
+    // obtainable afterwards.
+    const inst2 = try pm.Instance.spawn(a, exe, null, true);
+    var d2 = driver.Driver.init(a, inst2.child.read_fd, inst2.child.write_fd, false);
+    d2.child = inst2.child;
+    d2.instance = inst2;
+
+    _ = linux.kill(inst2.child.pid, .KILL);
+    var dead2 = false;
+    var tries2: u32 = 0;
+    while (tries2 < 50) : (tries2 += 1) {
+        if (inst2.health() == .dead) {
+            dead2 = true;
+            break;
+        }
+        sleepMs(100);
+    }
+    if (!dead2) return error.HealthCheckFailed;
+
+    // The next send must fail fast with a clean error — never hang.
+    const crash_params = try driver.browser.enableParams(a, false);
+    defer a.free(crash_params);
+    if (d2.send(null, driver.browser.method_enable, crash_params, 3_000)) |resp| {
+        var r = resp;
+        r.deinit(a);
+        std.debug.print("FAIL: send after SIGKILL unexpectedly succeeded\n", .{});
+        return error.CrashNotDetected;
+    } else |err| {
+        std.debug.print("SMOKE PASS: send after crash -> error {s} (clean, no hang)\n", .{@errorName(err)});
+    }
+
+    // Reap the dead instance, then prove a NEW instance is obtainable.
+    if (inst2.stop(5_000)) |krc2| {
+        std.debug.print("note: crashed instance exited with code {d}\n", .{krc2});
+    } else |err| switch (err) {
+        error.ChildSignaled => std.debug.print("SMOKE PASS: crashed instance reaped (ChildSignaled)\n", .{}),
+        else => return err,
+    }
+    d2.deinit();
+
+    const inst3 = try pm.Instance.spawn(a, exe, null, true);
+    defer inst3.deinit(a);
+    if (inst3.health() != .healthy) return error.HealthCheckFailed;
+    std.debug.print("SMOKE PASS: new instance obtainable after crash (pid {d})\n", .{inst3.child.pid});
+    const code3 = try inst3.stop(5_000);
+    if (code3 != 0) return error.BadBrowserExit;
+    std.debug.print("SMOKE PASS: crash-recovery instance closed cleanly (exit {d})\n", .{code3});
+
     // Clean shutdown: closing the pipes makes the browser exit 0.
     const code = try d.stop();
     std.debug.print("browser exited with code {d}\n", .{code});

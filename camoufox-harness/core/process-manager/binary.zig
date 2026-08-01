@@ -39,12 +39,8 @@ pub const Resolution = struct {
 
 /// Resolve the Camoufox binary (env override, then $HOME cache scan).
 pub fn resolve(allocator: Allocator) !Resolution {
-    if (getEnv(allocator, env_var)) |env_path| {
-        if (fileExists(env_path)) {
-            return .{ .path = env_path };
-        }
-        allocator.free(env_path);
-        return error.CamoufoxBinEnvMissing;
+    if (try pickEnvPath(allocator, getEnv(allocator, env_var))) |env_path| {
+        return .{ .path = env_path };
     }
 
     const home = getEnv(allocator, "HOME") orelse return error.NoHome;
@@ -58,6 +54,17 @@ pub fn resolve(allocator: Allocator) !Resolution {
     // contain the pinned ref.
     if (res.warning == null) res.warning = try checkPinAuto(allocator, res.path);
     return res;
+}
+
+/// Decide what a KAHIN_CAMOUFOX_BIN value means: null/"" -> null (fall back
+/// to the cache scan, Faz 7 Minor d); a path that exists -> owned path; a
+/// path that does not exist -> error (an explicit override that is wrong
+/// must not silently fall back).
+pub fn pickEnvPath(allocator: Allocator, env_value: ?[]const u8) !?[]u8 {
+    const v = env_value orelse return null;
+    if (v.len == 0) return null;
+    if (fileExists(v)) return try allocator.dupe(u8, v);
+    return error.CamoufoxBinEnvMissing;
 }
 
 /// Scan `official_root` for `<version>/camoufox-bin` directories; return the
@@ -355,4 +362,17 @@ test "binary: checkPin tolerates missing ref line" {
     const w = try checkPin(testing.allocator, lock, "/x/camoufox-bin");
     defer if (w) |s| testing.allocator.free(s);
     try testing.expect(w == null);
+}
+
+test "binary: empty or absent env override falls back to cache scan" {
+    // Faz 7 Minor d: KAHIN_CAMOUFOX_BIN="" must behave like "unset" — the
+    // cache scan takes over instead of a hard error.
+    const a = testing.allocator;
+    try testing.expect((try pickEnvPath(a, null)) == null);
+    try testing.expect((try pickEnvPath(a, "")) == null);
+    // An explicit but nonexistent path is still an error (no silent fallback).
+    try testing.expectError(error.CamoufoxBinEnvMissing, pickEnvPath(a, "/nonexistent/kahin-camoufox-bin"));
+    const p = (try pickEnvPath(a, "/bin/true")).?;
+    defer a.free(p);
+    try testing.expectEqualStrings("/bin/true", p);
 }

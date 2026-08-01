@@ -11,14 +11,25 @@ const Allocator = std.mem.Allocator;
 /// Monotonic per-process counter for default profile naming.
 var next_profile_id: u64 = 0;
 
-/// Create `path` (0700). Tolerates an existing directory; errors otherwise.
+/// Create `path` (0700). Tolerates an existing DIRECTORY (idempotent);
+/// an existing regular file at `path` is an error — a stale file must
+/// never be silently reused as a profile (Faz 7 Minor c: pid-reuse state
+/// reuse guard). Verified with openat(O_DIRECTORY), not just EEXIST.
 pub fn ensureDir(path: []const u8) !void {
     const z = try std.heap.page_allocator.dupeZ(u8, path);
     defer std.heap.page_allocator.free(z);
     const rc = linux.mkdir(z.ptr, 0o700);
     switch (linux.errno(rc)) {
-        .SUCCESS, .EXIST => {},
+        .SUCCESS => return,
+        .EXIST => {},
         else => return error.MkdirFailed,
+    }
+    // EEXIST: only tolerate a real directory; anything else (a file, a
+    // dangling symlink) must not be treated as a usable profile dir.
+    const fd = linux.open(z.ptr, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true }, 0);
+    switch (linux.errno(fd)) {
+        .SUCCESS => _ = linux.close(@intCast(fd)),
+        else => return error.ProfileNotADirectory,
     }
 }
 
@@ -37,6 +48,22 @@ fn rmdirPath(path: []const u8) void {
     const z = testing.allocator.dupeZ(u8, path) catch return;
     defer testing.allocator.free(z);
     _ = linux.rmdir(z.ptr);
+}
+
+fn unlinkPath(path: []const u8) void {
+    const z = testing.allocator.dupeZ(u8, path) catch return;
+    defer testing.allocator.free(z);
+    _ = linux.unlink(z.ptr);
+}
+
+fn touchPath(path: []const u8) !void {
+    const z = try testing.allocator.dupeZ(u8, path);
+    defer testing.allocator.free(z);
+    const fd = linux.open(z.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .CLOEXEC = true }, 0o600);
+    switch (linux.errno(fd)) {
+        .SUCCESS => _ = linux.close(@intCast(fd)),
+        else => return error.TouchFailed,
+    }
 }
 
 test "profile: ensureDir creates and tolerates existing" {
@@ -70,4 +97,15 @@ test "profile: defaultProfile is unique per call" {
     // Both exist (created inside defaultProfile).
     try ensureDir(p1);
     try ensureDir(p2);
+}
+
+test "profile: ensureDir rejects a regular file in the way" {
+    const a = testing.allocator;
+    const path = try std.fmt.allocPrint(a, "/tmp/kahin-prof-file-{d}", .{linux.getpid()});
+    defer a.free(path);
+    defer unlinkPath(path);
+    try touchPath(path);
+    // A stale FILE at the profile path must error, never be tolerated as a
+    // directory (Faz 7 Minor c).
+    try testing.expectError(error.ProfileNotADirectory, ensureDir(path));
 }

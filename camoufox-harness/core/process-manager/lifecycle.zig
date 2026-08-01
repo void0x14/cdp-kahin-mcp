@@ -169,7 +169,11 @@ pub const Instance = struct {
                     _ = linux.kill(self.child.pid, .KILL);
                     const rc2 = linux.waitpid(self.child.pid, &status, 0);
                     if (linux.errno(rc2) != .SUCCESS) return error.WaitFailed;
-                    signaled = true;
+                    // (Faz 7 Minor a) The child may have exited cleanly in
+                    // the window between the deadline poll and the SIGKILL
+                    // delivery — report its real exit code then instead of
+                    // a misleading ChildSignaled.
+                    if (!linux.W.IFEXITED(status)) signaled = true;
                 } else {
                     sleepMs(reap_poll_ms);
                     continue;
@@ -221,7 +225,13 @@ pub const Manager = struct {
     pub fn spawn(self: *Manager, exe: ?[]const u8, profile: ?[]const u8, verbose: bool) !*Instance {
         if (self.instances.items.len >= self.max_instances) return error.LimitReached;
         const inst = try Instance.spawn(self.allocator, exe, profile, verbose);
-        errdefer inst.deinit(self.allocator);
+        errdefer {
+            // (Faz 7 Minor b) append OOM must not leak the running child:
+            // stop (close fds -> browser exits, reap) before freeing the
+            // struct. deinit alone would orphan the process.
+            _ = inst.stop(stop_timeout_ms) catch {};
+            inst.deinit(self.allocator);
+        }
         try self.instances.append(self.allocator, inst);
         return inst;
     }
@@ -330,6 +340,38 @@ test "lifecycle: health transitions healthy -> dead after SIGKILL" {
     try testing.expectEqual(Health.dead, inst.health());
     // Reap: the SIGKILLed child reports ChildSignaled.
     try testing.expectError(error.ChildSignaled, inst.stop(10_000));
+}
+
+test "lifecycle: crash-recovery — reaped instance, fresh spawn works" {
+    // Browser killed externally (SIGKILL): health flips dead, stop() reaps
+    // with ChildSignaled, and a NEW instance must be obtainable right away
+    // (Faz 7 crash-recovery contract).
+    const a = try Instance.spawnArgv(testing.allocator, &.{ "/bin/sleep", "30" }, null, false);
+    defer a.deinit(testing.allocator);
+    _ = linux.kill(a.child.pid, .KILL);
+    const deadline = nowMs() + 5_000;
+    while (a.health() == .healthy) {
+        if (nowMs() >= deadline) return error.TestTimeout;
+        sleepMs(10);
+    }
+    try testing.expectError(error.ChildSignaled, a.stop(10_000));
+
+    const b = try Instance.spawnArgv(testing.allocator, &.{ "/bin/true" }, null, false);
+    defer b.deinit(testing.allocator);
+    try testing.expectEqual(Health.healthy, b.health());
+    try testing.expectEqual(@as(u8, 0), try b.stop(10_000));
+}
+
+test "lifecycle: crash-recovery — manager slot released after remove" {
+    var m = Manager.init(testing.allocator, 1);
+    defer m.deinit();
+    const inst_a = try m.spawn("/bin/true", null, false);
+    _ = try inst_a.stop(10_000);
+    m.remove(inst_a);
+    // Limit slot is free again: a fresh spawn must succeed.
+    const inst_b = try m.spawn("/bin/true", null, false);
+    _ = try inst_b.stop(10_000);
+    m.remove(inst_b);
 }
 
 test "lifecycle: stop falls back to SIGKILL for a wedged child" {
