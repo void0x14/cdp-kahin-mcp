@@ -7,7 +7,6 @@
   },
   "files": [
     "bin",
-    "lib/vendor",
     "LICENSE"
   ],
   "engines": {
