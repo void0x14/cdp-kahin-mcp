@@ -1,6 +1,6 @@
 {
   "name": "@kahinmcp/kahin",
-  "version": "0.1.4",
+  "version": "0.1.6",
   "description": "Kahin — CDP ansiklopedisi + anti-detect browser otomasyon MCP sunucusu. Obscura ve Camoufox motorlarını kullanır, motor seçimini ajana bırakır.",
   "bin": {
     "kahin": "bin/kahin.mjs"
