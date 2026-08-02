@@ -344,6 +344,22 @@ test "lifecycle: health transitions healthy -> dead after SIGKILL" {
     try testing.expectError(error.ChildSignaled, inst.stop(10_000));
 }
 
+test "lifecycle: health reports dead after child exit" {
+    // Task 1 (sidecar): spawn a real child, health -> healthy, SIGKILL it,
+    // let the HUP settle, health -> dead. The sidecar exit-on-browser-death
+    // path builds on exactly this: a killed browser closes its pipe ends, so
+    // Instance.health() flips to dead and the main loop breaks.
+    var inst = try Instance.spawnArgv(testing.allocator, &.{ "/bin/sleep", "30" }, null, false);
+    defer inst.deinit(testing.allocator);
+    try testing.expectEqual(Health.healthy, inst.health());
+
+    _ = linux.kill(inst.child.pid, .KILL);
+    sleepMs(50);
+    try testing.expectEqual(Health.dead, inst.health());
+    // Reap the SIGKILLed child (ChildSignaled) so no zombie is left behind.
+    try testing.expectError(error.ChildSignaled, inst.stop(10_000));
+}
+
 test "lifecycle: crash-recovery — reaped instance, fresh spawn works" {
     // Browser killed externally (SIGKILL): health flips dead, stop() reaps
     // with ChildSignaled, and a NEW instance must be obtainable right away

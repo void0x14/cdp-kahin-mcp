@@ -113,8 +113,13 @@ fn run(args: std.process.Init.Minimal) !void {
         _ = linux.poll(&pollfds, pollfds.len, -1); // block until stdin or browser speaks
 
         // Idle events flow upward continuously (oracle collectors are async).
-        if (pollfds[1].revents & (linux.POLL.IN | linux.POLL.HUP) != 0) {
+        if (pollfds[1].revents & (linux.POLL.IN | linux.POLL.HUP | linux.POLL.ERR) != 0) {
             drainEvents(&d, a, 0) catch {};
+            // Browser fd went away (HUP) or errored: the browser is gone —
+            // the sidecar shuts down WITH the browser (defer d.stop() reaps).
+            if (pollfds[1].revents & (linux.POLL.HUP | linux.POLL.ERR) != 0) {
+                running = false;
+            }
         }
         if (pollfds[0].revents & (linux.POLL.IN | linux.POLL.HUP) != 0) {
             const line = readLine(a) catch null orelse break; // stdin EOF -> take the browser down
@@ -129,7 +134,7 @@ fn run(args: std.process.Init.Minimal) !void {
         }
     }
 
-    _ = try d.stop();
+    _ = d.stop() catch 0; // browser may already be gone (HUP exit path)
     if (current_target) |t| a.free(t);
     pending.deinit(a);
     line_buf.deinit(a);
@@ -234,6 +239,18 @@ fn handleTarget(d: *driver_mod.Driver, a: Allocator, id: u32, command: []const u
 fn handleBrowser(d: *driver_mod.Driver, a: Allocator, id: u32, command: []const u8, params: std.json.Value) !void {
     // Handshake already performed inside Driver.start.
     if (std.mem.eql(u8, command, "enable")) return respondOk(a, id, "{}");
+
+    if (std.mem.eql(u8, command, "health")) {
+        // Sidecar-local status — no Juggler call: alive = process-manager
+        // health (pipe HUP + /proc state), pid = browser pid, state is a
+        // string mirror of alive. Works even when the browser is gone.
+        const alive = if (d.instance) |inst| inst.health() == .healthy else false;
+        const pid: i32 = if (d.instance) |inst| inst.child.pid else -1;
+        const state: []const u8 = if (alive) "running" else "dead";
+        const out = try std.json.Stringify.valueAlloc(a, .{ .alive = alive, .pid = pid, .state = state }, .{});
+        defer a.free(out);
+        return respondOk(a, id, out);
+    }
 
     if (std.mem.eql(u8, command, "createBrowserContext")) {
         const ctx = try d.newContext(request_timeout_ms);
@@ -547,6 +564,10 @@ fn readChunk(d: *driver_mod.Driver, a: Allocator) !void {
             const slice = chunk[0..n];
             try d.reader.buf.appendSlice(a, slice);
             try pending.appendSlice(a, slice);
+        } else {
+            // Clean EOF (read 0): every browser-side write end is closed —
+            // the browser exited. Same shutdown signal as POLL.HUP.
+            running = false;
         },
         else => {},
     }
