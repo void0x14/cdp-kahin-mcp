@@ -1,0 +1,11 @@
+image: node:20
+
+npm-publish:
+  script:
+    - bash scripts/npm-publish.sh
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      changes:
+        - package.json
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      when: manual

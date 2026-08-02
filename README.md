@@ -60,8 +60,8 @@ Otomatik kurulumu devre dışı bırakmak için: `KAHIN_SKIP_AUTO_SETUP=1`
 Kaynak kodunla geliştirme:
 
 ```bash
-git clone https://github.com/void0x14/cdp-kahin-mcp
-cd cdp-kahin-mcp
+git clone https://gitlab.com/void0x14/kahin-mcp
+cd kahin-mcp
 uv venv && source .venv/bin/activate
 uv pip install -e .
 ```
