@@ -39,3 +39,8 @@ target-version = "py314"
 
 [tool.pyright]
 pythonVersion = "3.14"
+
+[dependency-groups]
+dev = [
+    "pytest-asyncio>=1.4.0",
+]
