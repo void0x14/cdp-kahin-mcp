@@ -16,12 +16,14 @@ NO ``result`` key. The sidecar now treats a reply that has NEITHER
 ``error`` NOR ``result`` as success with an empty result (Playwright does
 the same), so the scenarios below run their full assertions — no skips.
 
-Other verified build facts (skip reasons below):
-- data: URL requests emit NO Network.* events (and Network.enable is not
-  supported on this build) -> the network-body scenario cannot run
-  network-free and is skipped.
+Other verified build fact (skip reason below):
 - localStorage is blocked on data: URLs ("The operation is insecure.") —
   the storage scenario therefore uses a file:// page (still network-free).
+
+Real-HTTP network coverage (requests list, response body, interception
+continue/abort) lives in test_e2e_network.py — data: URLs emit no
+Network.* events (a data:-URL artifact, not a tool bug), so network
+scenarios need a server-backed URL.
 """
 
 from __future__ import annotations
@@ -37,14 +39,8 @@ from pytest_asyncio import fixture as async_fixture
 
 from kahin import _state as state
 from kahin.the_twins import mirage as mirage_mod
-from kahin.tools import dejavu_mirage, dialog_mirage, emulation_mirage, engine, pilot
+from kahin.tools import dialog_mirage, emulation_mirage, engine, pilot
 from kahin.tools import pilot_mirage, storage_mirage, trainman_mirage
-
-_NETWORK_MSG = (
-    "this Camoufox build emits no Network.* events for data: URL requests "
-    "(and Network.enable is unsupported) — network-body scenario needs a "
-    "server-backed URL, which the suite avoids (no network deps)."
-)
 
 
 def _real_available() -> bool:
@@ -184,36 +180,6 @@ async def test_cookie_round_trip(mirage_tools: None) -> None:
 
     cookies = _loads(await storage_mirage.mirage_cookie_get())["cookies"]
     assert all(c.get("name") != "kahin_e2e" for c in cookies), cookies
-
-
-@pytest.mark.asyncio
-async def test_network_body_via_fetch(mirage_tools: None) -> None:
-    """fetch() inside a data: page -> request listed -> body retrievable.
-
-    Attempted first; this Camoufox build emits no Network.* events for
-    data: URLs (probe: forwarded stream contains only Page./Runtime./
-    Browser. events), so the scenario is skipped with the evidence.
-    """
-    html = """<html><body><script>
-      fetch('data:text/plain,hello-fetch-body')
-        .then(r => r.text())
-        .then(t => { document.body.dataset.fetched = t; });
-    </script></body></html>"""
-    await _navigate(_doc(html))
-    await asyncio.sleep(1.0)  # request events would arrive through the idle drain
-
-    reqs = _loads(await dejavu_mirage.mirage_network_requests())
-    fetch_reqs = [
-        e for e in reqs
-        if e["event"] == "requestWillBeSent"
-        and "hello-fetch-body" in (e["params"].get("url") or "")
-    ]
-    if not fetch_reqs:
-        pytest.skip(_NETWORK_MSG)
-    request_id = fetch_reqs[0]["params"]["requestId"]
-
-    body = _loads(await dejavu_mirage.mirage_get_response_body(request_id))
-    assert "hello-fetch-body" in body["body"], body
 
 
 @pytest.mark.asyncio
