@@ -92,6 +92,10 @@ class Mirage(BrowserEngine):
         # events the sidecar forwards verbatim. DOM tools resolve a frame_id
         # to the main-world context of that frame.
         self._frame_contexts: dict[str, dict[str, str]] = {}
+        # Page.fileChooserOpened (file-input click while interception is on):
+        # latest params + event, consumed by wait_for_chooser (Gap C upload).
+        self._pending_chooser: dict[str, Any] | None = None
+        self._chooser_event = asyncio.Event()
 
     async def start(self, headless: bool = True, port: int = 0, **kwargs: Any) -> EngineContext:
         del port  # Juggler pipe: no port.
@@ -170,6 +174,7 @@ class Mirage(BrowserEngine):
                     elif "method" in data:
                         self._track_session(data)
                         self._track_context(data)
+                        self._track_chooser(data)
                         evt = EventData(
                             method=data["method"],
                             params=data.get("params", {}),
@@ -234,6 +239,33 @@ class Mirage(BrowserEngine):
         if not sid:
             return None
         return self._frame_contexts.get(sid, {}).get(frame_id)
+
+    def _track_chooser(self, data: dict[str, Any]) -> None:
+        """Record Page.fileChooserOpened (file input clicked while
+        Page.setInterceptFileChooserDialog is enabled) into the pending slot
+        and set the event so wait_for_chooser can consume it (Gap C)."""
+        if data.get("method") == "Page.fileChooserOpened":
+            self._pending_chooser = data.get("params", {}) or {}
+            self._chooser_event.set()
+
+    async def wait_for_chooser(self, timeout: float) -> dict[str, Any] | None:
+        """Return the fileChooserOpened params, waiting up to ``timeout`` for
+        one when nothing is pending yet; None on timeout.
+
+        Covers both orders: the input was already clicked (pending chooser is
+        returned immediately) or the click will come after this call (the
+        event fires while we wait). The slot is cleared on consume, so a
+        second upload waits for a NEW chooser.
+        """
+        if self._pending_chooser is None:
+            try:
+                await asyncio.wait_for(self._chooser_event.wait(), timeout=timeout)
+            except asyncio.TimeoutError:
+                return None
+        chooser = self._pending_chooser
+        self._pending_chooser = None
+        self._chooser_event.clear()
+        return chooser
 
     def _track_session(self, data: dict[str, Any]) -> None:
         """Update the targetId -> sessionId map from Juggler target events."""

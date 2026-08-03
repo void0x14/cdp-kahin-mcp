@@ -27,6 +27,7 @@ from kahin.tools import storage_mirage  # noqa: F401
 from kahin.tools import trainman  # noqa: F401
 from kahin.tools import trainman_mirage  # noqa: F401
 from kahin.tools import trainman_obscura  # noqa: F401
+from kahin.tools import upload_mirage  # noqa: F401
 
 __all__ = [
     "dejavu",
@@ -46,4 +47,5 @@ __all__ = [
     "trainman",
     "trainman_mirage",
     "trainman_obscura",
+    "upload_mirage",
 ]
