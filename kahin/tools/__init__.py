@@ -22,6 +22,7 @@ from kahin.tools import pilot  # noqa: F401
 from kahin.tools import pilot_mirage  # noqa: F401
 from kahin.tools import pilot_obscura  # noqa: F401
 from kahin.tools import prophecy  # noqa: F401
+from kahin.tools import screencast_mirage  # noqa: F401
 from kahin.tools import seraph  # noqa: F401
 from kahin.tools import storage_mirage  # noqa: F401
 from kahin.tools import trainman  # noqa: F401
@@ -42,6 +43,7 @@ __all__ = [
     "pilot_mirage",
     "pilot_obscura",
     "prophecy",
+    "screencast_mirage",
     "seraph",
     "storage_mirage",
     "trainman",

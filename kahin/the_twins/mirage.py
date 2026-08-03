@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import tempfile
+from collections import deque
 from pathlib import Path
 from typing import Any, Callable
 
@@ -96,6 +97,14 @@ class Mirage(BrowserEngine):
         # latest params + event, consumed by wait_for_chooser (Gap C upload).
         self._pending_chooser: dict[str, Any] | None = None
         self._chooser_event = asyncio.Event()
+        # Page.screencastFrame (live screencast, Gap D): params of every
+        # unconsumed frame (data is base64-JPEG, ack'd on consume — see
+        # wait_for_screencast_frame). The event carries NO screencastId, so
+        # the stream id returned by Page.startScreencast is tracked here and
+        # echoed back on every screencastFrameAck.
+        self._screencast_frames: deque[dict[str, Any]] = deque(maxlen=64)
+        self._screencast_event = asyncio.Event()
+        self._screencast_id: str | None = None
 
     async def start(self, headless: bool = True, port: int = 0, **kwargs: Any) -> EngineContext:
         del port  # Juggler pipe: no port.
@@ -175,6 +184,7 @@ class Mirage(BrowserEngine):
                         self._track_session(data)
                         self._track_context(data)
                         self._track_chooser(data)
+                        self._track_screencast(data)
                         evt = EventData(
                             method=data["method"],
                             params=data.get("params", {}),
@@ -266,6 +276,74 @@ class Mirage(BrowserEngine):
         self._pending_chooser = None
         self._chooser_event.clear()
         return chooser
+
+    def _track_screencast(self, data: dict[str, Any]) -> None:
+        """Queue Page.screencastFrame params (Gap D live screencast).
+
+        The frame's ``data`` is a base64-encoded JPEG (Camoufox encodes
+        JPEG, not PNG — nsScreencastService.cpp). Frames are queued BEFORE
+        the client acks them; camoufox's kMaxFramesInFlight=1 stalls the
+        stream when an ack is missing, so every consumed frame must be
+        ack'd (the screencast_frame tool does this via
+        Page.screencastFrameAck). The event params carry no screencastId —
+        the stream id is remembered from Page.startScreencast.
+        """
+        if data.get("method") == "Page.screencastFrame":
+            params = data.get("params", {}) or {}
+            if params.get("data"):
+                self._screencast_frames.append(params)
+                self._screencast_event.set()
+
+    async def wait_for_screencast_frame(self, timeout: float) -> dict[str, Any] | None:
+        """Return the OLDEST pending screencastFrame params (base64-JPEG in
+        ``data``), waiting up to ``timeout`` when nothing is queued yet;
+        None on timeout. A frame stays queued until this consumes it — the
+        caller must then Page.screencastFrameAck its stream id (mismatched
+        ids are a no-op on Camoufox). The queue keeps up to 64 unacked
+        frames, so a slow consumer sees the oldest one first.
+        """
+        if not self._screencast_frames:
+            try:
+                await asyncio.wait_for(self._screencast_event.wait(), timeout=timeout)
+            except asyncio.TimeoutError:
+                return None
+        frame = self._screencast_frames.popleft()
+        if not self._screencast_frames:
+            self._screencast_event.clear()
+        return frame
+
+    def screencast_pending(self) -> dict[str, Any]:
+        """Unacked frame count + newest frame summary + stream id — stream
+        health: pending > 0 while frames wait for their ack (Camoufox holds
+        at kMaxFramesInFlight=1 unacked frames, so a long-lived non-zero
+        count means the consumer stalled)."""
+        last = self._screencast_frames[-1] if self._screencast_frames else None
+        return {
+            "pending": len(self._screencast_frames),
+            "screencastId": self._screencast_id,
+            "active": self._screencast_id is not None,
+            "last": {
+                "deviceWidth": last.get("deviceWidth"),
+                "deviceHeight": last.get("deviceHeight"),
+                "dataLength": len(last.get("data", "")),
+            }
+            if last
+            else None,
+        }
+
+    def set_screencast_id(self, screencast_id: str) -> None:
+        """Remember the stream id returned by Page.startScreencast so the
+        frame tool can ack frames whose event carries no id."""
+        self._screencast_id = screencast_id
+
+    def clear_screencast(self) -> int:
+        """Drop all queued frames + the stream id (used on stopScreencast so
+        no stale frame survives the stream); returns the discarded count."""
+        discarded = len(self._screencast_frames)
+        self._screencast_frames.clear()
+        self._screencast_event.clear()
+        self._screencast_id = None
+        return discarded
 
     def _track_session(self, data: dict[str, Any]) -> None:
         """Update the targetId -> sessionId map from Juggler target events."""

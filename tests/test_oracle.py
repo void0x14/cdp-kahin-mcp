@@ -46,7 +46,8 @@ def test_server_initialize_and_list_tools() -> None:
     assert "kahin_pattern_stats" in tool_names
     # Faz 9 Task 3: 32 existing + 65 new Juggler-native tools = 97.
     # Gap C: +2 upload tools (set_file_chooser_intercept, upload_files) = 99.
-    assert len(tools) == 99
+    # Gap D: +4 screencast tools (start, frame, stop, pending) = 103.
+    assert len(tools) == 103
     for name in [
         "kahin_mirage_query",
         "kahin_mirage_click",
@@ -69,6 +70,10 @@ def test_server_initialize_and_list_tools() -> None:
         "kahin_mirage_websocket_list",
         "kahin_mirage_set_file_chooser_intercept",
         "kahin_mirage_upload_files",
+        "kahin_mirage_screencast_start",
+        "kahin_mirage_screencast_frame",
+        "kahin_mirage_screencast_stop",
+        "kahin_mirage_screencast_pending",
         "kahin_engine_health",
     ]:
         assert name in tool_names, f"missing tool {name}"
