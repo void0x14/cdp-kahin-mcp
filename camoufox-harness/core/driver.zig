@@ -67,6 +67,9 @@ const ContextInfo = struct {
     }
 };
 
+/// Viewport / full-content size measured from the page itself (Faz 9).
+const Size = struct { w: f64, h: f64 };
+
 /// One frame of the frame registry (Faz 3): id is the map key, parent/url
 /// are owned copies. `parent_id == null` marks the main frame.
 const FrameEntry = struct {
@@ -144,6 +147,13 @@ pub const Driver = struct {
     network_events: std.array_list.Aligned([]u8, null) = .empty,
     /// requestId -> InterceptedEntry (Faz 4 pending interception registry).
     intercepted: std.StringHashMap(InterceptedEntry),
+    /// Optional event tee (Faz 9): called with each raw event the pump
+    /// dispatches, so the sidecar can forward events that arrive while a
+    /// synchronous call is pumping (they would otherwise be consumed into
+    /// driver state and lost upward). Null in tests/embedded use; the sink
+    /// must copy `raw` (it borrows the pump's read buffer).
+    event_sink: ?*const fn (raw: []const u8, ctx: ?*anyopaque) void = null,
+    event_sink_ctx: ?*anyopaque = null,
 
     /// Wire a Driver onto existing fds (no spawn). Used by tests with a
     /// self-pipe; `start` spawns the browser and calls this.
@@ -284,7 +294,14 @@ pub const Driver = struct {
         } orelse return error.BrowserClosed;
         defer self.allocator.free(raw);
         if (self.verbose) std.debug.print("RECV: {s}\n", .{raw});
+        try self.dispatchRaw(raw);
+    }
 
+    /// Route one raw message exactly as pump does: resolve pending
+    /// responses, feed events into state and the event sink. Shared with
+    /// the sidecar's read-buffer forwarder so replayed events update state
+    /// identically to live ones.
+    pub fn dispatchRaw(self: *Driver, raw: []const u8) !void {
         switch (try self.router.dispatch(raw)) {
             .response => |resp| {
                 const pend: *Pending = @ptrCast(@alignCast(resp.context));
@@ -294,6 +311,7 @@ pub const Driver = struct {
             },
             .event => |ev| {
                 if (self.verbose) std.debug.print("EVENT: {s} session={?s}\n", .{ ev.method, ev.session_id });
+                if (self.event_sink) |sink| sink(ev.raw, self.event_sink_ctx);
                 try self.handleEvent(ev);
             },
             .invalid => {},
@@ -552,13 +570,7 @@ pub const Driver = struct {
     pub fn screenshot(self: *Driver, target_id: []const u8, full_page: bool, timeout_ms: i32) ![]u8 {
         const p = self.pages.get(target_id) orelse return error.UnknownTarget;
         if (p.session_id.len == 0) return error.TargetNotAttached;
-        try self.waitForMainFrame(p, nowMs() + timeout_ms);
-
-        const expr = if (full_page)
-            "[document.documentElement.scrollWidth, document.documentElement.scrollHeight]"
-        else
-            "[window.innerWidth, window.innerHeight]";
-        const size = try self.evalSize(p, expr, timeout_ms);
+        const size = try self.pageClipSize(target_id, full_page, timeout_ms);
         if (size.w <= 0 or size.h <= 0) return error.SizeUnavailable;
 
         const params = try page.screenshotParams(self.allocator, "image/png", .{ .width = size.w, .height = size.h }, null, null);
@@ -571,9 +583,26 @@ pub const Driver = struct {
         return page.decodeScreenshot(self.allocator, b64);
     }
 
+    /// Clip size for a screenshot: the page's REAL viewport
+    /// (window.innerWidth/Height) or full-content size
+    /// (documentElement.scrollWidth/Height). Juggler's Page.screenshot has
+    /// no fullPage flag — full page means a full-content clip. Shared with
+    /// the sidecar's screenshot handler so the clip is never a hardcoded
+    /// guess.
+    pub fn pageClipSize(self: *Driver, target_id: []const u8, full_page: bool, timeout_ms: i32) !Size {
+        const p = self.pages.get(target_id) orelse return error.UnknownTarget;
+        if (p.session_id.len == 0) return error.TargetNotAttached;
+        try self.waitForMainFrame(p, nowMs() + timeout_ms);
+        const expr = if (full_page)
+            "[document.documentElement.scrollWidth, document.documentElement.scrollHeight]"
+        else
+            "[window.innerWidth, window.innerHeight]";
+        return self.evalSize(p, expr, timeout_ms);
+    }
+
     /// Evaluate a [width, height] pair in the page (viewport or full
     /// content size).
-    fn evalSize(self: *Driver, p: *Page, expr: []const u8, timeout_ms: i32) !struct { w: f64, h: f64 } {
+    fn evalSize(self: *Driver, p: *Page, expr: []const u8, timeout_ms: i32) !Size {
         var res = try self.evaluate(p.target_id, expr, timeout_ms);
         defer res.deinit(self.allocator);
         if (res.exception_text != null or res.value_json.len == 0) return error.SizeUnavailable;

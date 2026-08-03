@@ -34,12 +34,13 @@
 //! calls now forward to the real Juggler domain (Juggler has Network.enable;
 //! unknown methods like Console.enable surface the genuine -32601 error).
 //!
-//! Events are forwarded by an idle drain: browser bytes are copied into a
-//! private forwarding buffer as they are read, so the driver's own pump
-//! still consumes everything it needs (session/frame/context state stays
-//! consistent). ponytail: events that arrive while a driver call is pumping
-//! (response in flight) are consumed by that pump and not forwarded upward;
-//! state is still correct.
+//! Events are forwarded by an idle drain: browser bytes are copied into the
+//! driver's read buffer as they are read; complete messages are replayed
+//! into the driver state AND emitted upward. The driver's pump also tees
+//! every event it dispatches while a call is in flight (response pending)
+//! into a private buffer, flushed upward once the call completes — so
+//! console/network events are not lost to Python during Runtime.evaluate
+//! and friends (Faz 9 Task 3 console collection).
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -55,9 +56,12 @@ const chunk_size: usize = 64 * 1024;
 var line_buf: std.array_list.Aligned(u8, null) = .empty;
 /// Set by Browser.close; the sidecar shuts down with the browser.
 var running: bool = true;
-/// Bytes pulled from the browser fd but not yet forwarded upward (may end
-/// with a partial message that spans two read chunks).
-var pending: std.array_list.Aligned(u8, null) = .empty;
+/// Raw events the driver's pump dispatched while a call was in flight,
+/// appended \x00-framed by the event sink (non-allocating call path) and
+/// flushed upward by flushSinkEvents once the call completes. Without this
+/// the pump consumes such events into driver state and they never reach
+/// Python (Task 3 console collection data loss).
+var sink_buf: std.array_list.Aligned(u8, null) = .empty;
 /// targetId of the page the caller last created; page-scoped commands run on it.
 var current_target: ?[]u8 = null;
 
@@ -108,6 +112,12 @@ fn run(args: std.process.Init.Minimal) !void {
     defer d.deinit();
     defer _ = d.stop() catch 0;
 
+    // Tee every event the driver's pump dispatches (calls in flight) into
+    // sink_buf; flushed upward after each request completes.
+    var sink_alloc = a;
+    d.event_sink = &eventSink;
+    d.event_sink_ctx = @ptrCast(&sink_alloc);
+
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
 
@@ -138,18 +148,23 @@ fn run(args: std.process.Init.Minimal) !void {
             defer a.free(line);
 
             drainEvents(&d, a, null, &out) catch {};
-            processRequest(&d, a, arena.allocator(), line, &out) catch |err| switch (err) {
-                error.BrokenPipe => return,
-                else => {}, // response already attempted; keep serving
+            processRequest(&d, a, arena.allocator(), line, &out) catch {
+                // Response already attempted; keep serving. Handlers map
+                // their own errors to -32000 (browser-dead EPIPE included:
+                // d.send raises BrokenPipe only inside handlers that now
+                // wrap it), so nothing propagates out of processRequest.
             };
             drainEvents(&d, a, 2, &out) catch {};
         }
-        try writeAllStdout(out.items);
+        writeAllStdout(out.items) catch |err| switch (err) {
+            error.BrokenPipe => return, // client went away: shut down cleanly
+            else => return err,
+        };
     }
 
     _ = d.stop() catch 0; // browser may already be gone (HUP exit path)
     if (current_target) |t| a.free(t);
-    pending.deinit(a);
+    sink_buf.deinit(a);
     line_buf.deinit(a);
 }
 
@@ -174,7 +189,14 @@ fn processRequest(d: *driver_mod.Driver, a: Allocator, aa: Allocator, line: []co
         try respondErr(a, out, 0, -32600, "id must be an integer");
         return;
     }
-    const id: u32 = @intCast(id_v.integer);
+    // Range-check before the cast: @intCast traps on negative or >u32 ids
+    // in ReleaseSafe, taking the whole sidecar down.
+    const id_raw: i64 = id_v.integer;
+    if (id_raw < 0 or id_raw > 0xFFFF_FFFF) {
+        try respondErr(a, out, 0, -32600, "id out of range");
+        return;
+    }
+    const id: u32 = @intCast(id_raw);
     const method_v = obj.get("method") orelse {
         try respondErr(a, out, id, -32600, "missing method");
         return;
@@ -261,7 +283,20 @@ fn handleClose(d: *driver_mod.Driver, a: Allocator, out: *std.array_list.Aligned
 fn handleNewPage(d: *driver_mod.Driver, a: Allocator, out: *std.array_list.Aligned(u8, null), id: u32, params: std.json.Value) !void {
     const ctx = getStringParam(params, "browserContextId");
     const url = getStringParam(params, "url");
-    const target_id = try d.newPage(ctx, url, request_timeout_ms);
+    const target_id = d.newPage(ctx, url, request_timeout_ms) catch |err| switch (err) {
+        error.WaitTimeout => {
+            try respondErr(a, out, id, -32000, "newPage timed out");
+            return;
+        },
+        error.TargetNotAttached => {
+            try respondErr(a, out, id, -32000, "new page never attached");
+            return;
+        },
+        else => {
+            try respondErr(a, out, id, -32000, "newPage failed");
+            return;
+        },
+    };
     defer a.free(target_id);
     try setCurrentTarget(a, target_id);
     const json = try std.json.Stringify.valueAlloc(a, .{ .targetId = target_id }, .{});
@@ -306,7 +341,11 @@ fn handleNavigate(d: *driver_mod.Driver, a: Allocator, out: *std.array_list.Alig
     return respondOk(a, out, id, json);
 }
 
-/// Page.screenshot translation: {format} -> {mimeType, clip, ...}.
+/// Page.screenshot translation: {format, fullPage, clip} ->
+/// {mimeType, clip, quality, omitDeviceScaleFactor}. Juggler has no
+/// fullPage flag, so CDP fullPage=true becomes a full-content clip; the
+/// default clip is the page's REAL viewport size (measured via evaluate,
+/// driver.pageClipSize), not a hardcoded guess.
 fn handleScreenshot(d: *driver_mod.Driver, a: Allocator, out: *std.array_list.Aligned(u8, null), id: u32, params: std.json.Value, session_id: ?[]const u8) !void {
     const p = resolvePageFor(d, session_id) orelse {
         try respondErr(a, out, id, -32600, "no page session");
@@ -316,6 +355,7 @@ fn handleScreenshot(d: *driver_mod.Driver, a: Allocator, out: *std.array_list.Al
     const mime = if (std.mem.eql(u8, format, "jpeg")) "image/jpeg" else "image/png";
     const quality = getIntParam(params, "quality");
     const omit = getBoolParam(params, "omitDeviceScaleFactor");
+    const full_page = getBoolParam(params, "fullPage") orelse false;
     const Clip = struct { x: f64, y: f64, width: f64, height: f64 };
     const clip_override = if (params == .object) params.object.get("clip") else null;
     const payload = if (clip_override != null and clip_override.? == .object)
@@ -324,12 +364,23 @@ fn handleScreenshot(d: *driver_mod.Driver, a: Allocator, out: *std.array_list.Al
             .{ .mimeType = mime, .clip = clip_override.?, .quality = quality, .omitDeviceScaleFactor = omit },
             .{ .emit_null_optional_fields = false },
         )
-    else
-        try std.json.Stringify.valueAlloc(
+    else blk: {
+        const size = d.pageClipSize(p.target_id, full_page, request_timeout_ms) catch |err| switch (err) {
+            error.WaitTimeout => {
+                try respondErr(a, out, id, -32000, "measuring page size timed out");
+                return;
+            },
+            else => {
+                try respondErr(a, out, id, -32000, "could not measure page size");
+                return;
+            },
+        };
+        break :blk try std.json.Stringify.valueAlloc(
             a,
-            .{ .mimeType = mime, .clip = Clip{ .x = 0, .y = 0, .width = 1280, .height = 720 }, .quality = quality, .omitDeviceScaleFactor = omit },
+            .{ .mimeType = mime, .clip = Clip{ .x = 0, .y = 0, .width = size.w, .height = size.h }, .quality = quality, .omitDeviceScaleFactor = omit },
             .{ .emit_null_optional_fields = false },
         );
+    };
     defer a.free(payload);
     var resp = try d.send(p.session_id, "Page.screenshot", payload, request_timeout_ms);
     defer resp.deinit(a);
@@ -433,7 +484,14 @@ fn respondFromRaw(a: Allocator, out: *std.array_list.Aligned(u8, null), id: u32,
             if (e.object.get("message")) |m| if (m == .string) break :blk m.string;
             break :blk "Juggler error";
         };
-        try respondErr(a, out, id, @intCast(code), msg);
+        // Clamp: @intCast traps on out-of-i32 codes in ReleaseSafe.
+        const code32: i32 = if (code > std.math.maxInt(i32))
+            std.math.maxInt(i32)
+        else if (code < std.math.minInt(i32))
+            std.math.minInt(i32)
+        else
+            @intCast(code);
+        try respondErr(a, out, id, code32, msg);
         return;
     }
     const result = root.object.get("result") orelse {
@@ -465,12 +523,11 @@ fn respondErr(a: Allocator, out: *std.array_list.Aligned(u8, null), id: u32, cod
     try writeOut(a, out, line);
 }
 
-/// Idle event drain: pull buffered browser data off the fd and forward every
-/// complete message upward. Messages are copied out of `pending` BEFORE the
-/// driver's pump ever sees them, so nothing is deleted from the driver's
-/// buffer and the driver's session/frame/context state stays consistent.
-/// `poll_ms` > 0 also waits briefly for events arriving right after the
-/// previous response; 0 = nonblocking read (fd already readable).
+/// Idle event drain: pull buffered browser data off the fd, replay every
+/// complete message into the driver state (so the driver's
+/// session/frame/context state stays consistent) and flush the event sink
+/// upward. `poll_ms` > 0 also waits briefly for events arriving right
+/// after the previous response; 0 = nonblocking read (fd already readable).
 fn drainEvents(d: *driver_mod.Driver, a: Allocator, poll_ms: ?i32, out: *std.array_list.Aligned(u8, null)) !void {
     if (poll_ms) |t| {
         if (t > 0) {
@@ -481,12 +538,15 @@ fn drainEvents(d: *driver_mod.Driver, a: Allocator, poll_ms: ?i32, out: *std.arr
             try readChunk(d, a); // fd already readable (EAGAIN when drained)
         }
     }
-    try forwardPending(a, out);
+    try forwardFromBuf(d);
+    try flushSinkEvents(a, out);
+    refreshCurrentTarget(d, a);
 }
 
-/// Read one chunk from the browser fd into the driver's buffer AND into a
-/// private copy (`pending`) used for forwarding; the driver never sees the
-/// copy, so its pump can consume the same bytes with no interference.
+/// Read one chunk from the browser fd into the driver's read buffer. The
+/// driver's pump and the forwarder share this single buffer: whatever the
+/// pump does not extract is replayed+forwarded by forwardFromBuf, so no
+/// event can fall between two buffers.
 fn readChunk(d: *driver_mod.Driver, a: Allocator) !void {
     var chunk: [chunk_size]u8 = undefined;
     const n = linux.read(d.reader.fd, &chunk, chunk.len);
@@ -494,7 +554,6 @@ fn readChunk(d: *driver_mod.Driver, a: Allocator) !void {
         .SUCCESS => if (n > 0) {
             const slice = chunk[0..n];
             try d.reader.buf.appendSlice(a, slice);
-            try pending.appendSlice(a, slice);
         } else {
             // Clean EOF (read 0): every browser-side write end is closed —
             // the browser exited. Same shutdown signal as POLL.HUP.
@@ -504,22 +563,59 @@ fn readChunk(d: *driver_mod.Driver, a: Allocator) !void {
     }
 }
 
-/// Forward every complete message in `pending`; a trailing partial message
-/// stays until the next readChunk completes it. If the driver's own pump
-/// read the tail of a split message (its \x00 landed in the driver's buffer,
-/// not ours), the partial is stale and is dropped. Event names are passed
-/// through VERBATIM (Juggler-native; the CDP Runtime.console ->
+/// Replay every complete message in the driver's read buffer into the
+/// driver state (identical to pump's dispatch) and drop it from the
+/// buffer; the event sink fires for each event, buffering it for
+/// flushSinkEvents — the single upward path. Messages the pump left
+/// buffered while a call was in flight (it extracts only what the call
+/// needs) are picked up here right after the call, so console/network
+/// events are not lost to Python. A trailing partial message stays until
+/// the next readChunk completes it. Event names are passed through
+/// VERBATIM (Juggler-native; the CDP Runtime.console ->
 /// Console.messageAdded translation was removed in Faz 9).
-fn forwardPending(a: Allocator, out: *std.array_list.Aligned(u8, null)) !void {
-    while (std.mem.indexOfScalar(u8, pending.items, 0)) |idx| {
-        const msg = pending.items[0..idx];
-        try emitEvent(a, out, msg);
-        const rest = pending.items[idx + 1 ..];
-        std.mem.copyForwards(u8, pending.items[0..rest.len], rest);
-        pending.shrinkRetainingCapacity(rest.len);
+fn forwardFromBuf(d: *driver_mod.Driver) !void {
+    while (std.mem.indexOfScalar(u8, d.reader.buf.items, 0)) |idx| {
+        const msg = d.reader.buf.items[0..idx];
+        try d.dispatchRaw(msg); // driver state first (it must never miss)
+        const rest = d.reader.buf.items[idx + 1 ..];
+        std.mem.copyForwards(u8, d.reader.buf.items[0..rest.len], rest);
+        d.reader.buf.shrinkRetainingCapacity(rest.len);
     }
-    if (pending.items.len > 0) return;
-    pending.clearRetainingCapacity();
+}
+
+/// Event sink callback (driver.event_sink): the pump dispatched an event
+/// while a call was in flight — buffer the raw JSON \x00-framed for
+/// flushing once the call returns. `ctx` is the *Allocator from run().
+/// Non-raising: OOM drops the event rather than failing the call.
+fn eventSink(raw: []const u8, ctx: ?*anyopaque) void {
+    const a: *Allocator = @ptrCast(@alignCast(ctx orelse return));
+    sink_buf.appendSlice(a.*, raw) catch return;
+    sink_buf.append(a.*, 0) catch return;
+}
+
+/// Flush events the sink buffered during a driver call (see eventSink).
+fn flushSinkEvents(a: Allocator, out: *std.array_list.Aligned(u8, null)) !void {
+    while (std.mem.indexOfScalar(u8, sink_buf.items, 0)) |idx| {
+        const msg = sink_buf.items[0..idx];
+        try emitEvent(a, out, msg);
+        const rest = sink_buf.items[idx + 1 ..];
+        std.mem.copyForwards(u8, sink_buf.items[0..rest.len], rest);
+        sink_buf.shrinkRetainingCapacity(rest.len);
+    }
+    if (sink_buf.items.len > 0) return;
+    sink_buf.clearRetainingCapacity();
+}
+
+/// Drop a stale current_target: the page the caller last created is gone
+/// (Browser.detachedFromTarget was processed by the driver). Keeps
+/// session-less Page calls from resolving against a dead target after a
+/// kill.
+fn refreshCurrentTarget(d: *driver_mod.Driver, a: Allocator) void {
+    const t = current_target orelse return;
+    if (d.pages.get(t) == null) {
+        a.free(t);
+        current_target = null;
+    }
 }
 
 /// Forward one Juggler event upward, names VERBATIM. Only the sessionId is
@@ -954,4 +1050,268 @@ test "router: events forwarded verbatim (no CDP translation)" {
     // no sessionId -> field omitted
     try emitEvent(a, &out, "{\"method\":\"Page.eventFired\",\"params\":{\"frameId\":\"f1\",\"name\":\"load\"}}");
     try testing.expectEqualStrings("{\"method\":\"Page.eventFired\",\"params\":{\"frameId\":\"f1\",\"name\":\"load\"}}\n", out.items);
+}
+
+test "router: id out of range errors -32600 instead of trapping" {
+    const rig = try testRig();
+    defer {
+        _ = std.os.linux.close(rig.cmd[0]);
+        _ = std.os.linux.close(rig.cmd[1]);
+        _ = std.os.linux.close(rig.resp[0]);
+        _ = std.os.linux.close(rig.resp[1]);
+    }
+    var d = rig.d;
+    defer d.deinit();
+
+    // negative id: @intCast would trap in ReleaseSafe
+    const neg = try runRequest(&d, "{\"id\":-1,\"method\":\"Browser.health\",\"params\":{}}");
+    defer testing.allocator.free(neg);
+    try testing.expectEqualStrings("{\"id\":0,\"error\":{\"code\":-32600,\"message\":\"id out of range\"}}\n", neg);
+
+    // id above u32::MAX
+    const big = try runRequest(&d, "{\"id\":4294967296,\"method\":\"Browser.health\",\"params\":{}}");
+    defer testing.allocator.free(big);
+    try testing.expectEqualStrings("{\"id\":0,\"error\":{\"code\":-32600,\"message\":\"id out of range\"}}\n", big);
+}
+
+test "router: screenshot clip comes from the real viewport, not a guess" {
+    const rig = try testRig();
+    defer {
+        _ = std.os.linux.close(rig.cmd[0]);
+        _ = std.os.linux.close(rig.cmd[1]);
+        _ = std.os.linux.close(rig.resp[0]);
+        _ = std.os.linux.close(rig.resp[1]);
+    }
+    var d = rig.d;
+    defer d.deinit();
+
+    try seedPage(&d, rig.resp, "t1", "s1", "f1");
+    try pipe.writeMessage(
+        testing.allocator,
+        rig.resp[1],
+        "{\"method\":\"Runtime.executionContextCreated\",\"params\":{\"executionContextId\":\"ctx-9\",\"auxData\":{\"frameId\":\"f1\"}},\"sessionId\":\"s1\"}",
+    );
+    try d.pump(1000);
+    try setCurrentTarget(testing.allocator, "t1");
+    defer {
+        if (current_target) |t| testing.allocator.free(t);
+        current_target = null;
+    }
+
+    // Size probe first, then the screenshot carrying the measured clip.
+    const expected = [_][]const u8{
+        "{\"id\":1,\"sessionId\":\"s1\",\"method\":\"Runtime.evaluate\",\"params\":{\"executionContextId\":\"ctx-9\",\"expression\":\"[window.innerWidth, window.innerHeight]\",\"returnByValue\":true}}",
+        "{\"id\":2,\"sessionId\":\"s1\",\"method\":\"Page.screenshot\",\"params\":{\"mimeType\":\"image/png\",\"clip\":{\"x\":0,\"y\":0,\"width\":900,\"height\":600}}}",
+    };
+    const reply = [_][]const u8{
+        "{\"id\":1,\"result\":{\"result\":{\"value\":[900,600]}}}",
+        "{\"id\":2,\"result\":{\"data\":\"QUJD\"}}",
+    };
+    const thread = try std.Thread.spawn(.{}, FakePeer.thread, .{ rig.cmd[0], rig.resp[1], &expected, &reply, &[_][]const u8{} });
+    defer thread.join();
+
+    const line = try runRequest(&d, "{\"id\":2,\"method\":\"Page.captureScreenshot\",\"params\":{}}");
+    defer testing.allocator.free(line);
+    try testing.expectEqualStrings("{\"id\":2,\"result\":{\"data\":\"QUJD\"}}\n", line);
+}
+
+test "router: screenshot fullPage=true probes the full-content size" {
+    const rig = try testRig();
+    defer {
+        _ = std.os.linux.close(rig.cmd[0]);
+        _ = std.os.linux.close(rig.cmd[1]);
+        _ = std.os.linux.close(rig.resp[0]);
+        _ = std.os.linux.close(rig.resp[1]);
+    }
+    var d = rig.d;
+    defer d.deinit();
+
+    try seedPage(&d, rig.resp, "t1", "s1", "f1");
+    try pipe.writeMessage(
+        testing.allocator,
+        rig.resp[1],
+        "{\"method\":\"Runtime.executionContextCreated\",\"params\":{\"executionContextId\":\"ctx-9\",\"auxData\":{\"frameId\":\"f1\"}},\"sessionId\":\"s1\"}",
+    );
+    try d.pump(1000);
+    try setCurrentTarget(testing.allocator, "t1");
+    defer {
+        if (current_target) |t| testing.allocator.free(t);
+        current_target = null;
+    }
+
+    const expected = [_][]const u8{
+        "{\"id\":1,\"sessionId\":\"s1\",\"method\":\"Runtime.evaluate\",\"params\":{\"executionContextId\":\"ctx-9\",\"expression\":\"[document.documentElement.scrollWidth, document.documentElement.scrollHeight]\",\"returnByValue\":true}}",
+        "{\"id\":2,\"sessionId\":\"s1\",\"method\":\"Page.screenshot\",\"params\":{\"mimeType\":\"image/png\",\"clip\":{\"x\":0,\"y\":0,\"width\":1920,\"height\":5000}}}",
+    };
+    const reply = [_][]const u8{
+        "{\"id\":1,\"result\":{\"result\":{\"value\":[1920,5000]}}}",
+        "{\"id\":2,\"result\":{\"data\":\"QUJD\"}}",
+    };
+    const thread = try std.Thread.spawn(.{}, FakePeer.thread, .{ rig.cmd[0], rig.resp[1], &expected, &reply, &[_][]const u8{} });
+    defer thread.join();
+
+    const line = try runRequest(&d, "{\"id\":2,\"method\":\"Page.captureScreenshot\",\"params\":{\"fullPage\":true}}");
+    defer testing.allocator.free(line);
+    try testing.expectEqualStrings("{\"id\":2,\"result\":{\"data\":\"QUJD\"}}\n", line);
+}
+
+test "router: screenshot size-probe failure responds -32000 (no swallowed error)" {
+    const rig = try testRig();
+    defer {
+        _ = std.os.linux.close(rig.cmd[0]);
+        _ = std.os.linux.close(rig.cmd[1]);
+        _ = std.os.linux.close(rig.resp[0]);
+        _ = std.os.linux.close(rig.resp[1]);
+    }
+    var d = rig.d;
+    defer d.deinit();
+
+    try seedPage(&d, rig.resp, "t1", "s1", "f1");
+    try pipe.writeMessage(
+        testing.allocator,
+        rig.resp[1],
+        "{\"method\":\"Runtime.executionContextCreated\",\"params\":{\"executionContextId\":\"ctx-9\",\"auxData\":{\"frameId\":\"f1\"}},\"sessionId\":\"s1\"}",
+    );
+    try d.pump(1000);
+    try setCurrentTarget(testing.allocator, "t1");
+    defer {
+        if (current_target) |t| testing.allocator.free(t);
+        current_target = null;
+    }
+
+    const expected = [_][]const u8{
+        "{\"id\":1,\"sessionId\":\"s1\",\"method\":\"Runtime.evaluate\",\"params\":{\"executionContextId\":\"ctx-9\",\"expression\":\"[window.innerWidth, window.innerHeight]\",\"returnByValue\":true}}",
+    };
+    const reply = [_][]const u8{"{\"id\":1,\"error\":{\"code\":-32000,\"message\":\"evaluate failed\"}}"};
+    const thread = try std.Thread.spawn(.{}, FakePeer.thread, .{ rig.cmd[0], rig.resp[1], &expected, &reply, &[_][]const u8{} });
+    defer thread.join();
+
+    const line = try runRequest(&d, "{\"id\":2,\"method\":\"Page.captureScreenshot\",\"params\":{}}");
+    defer testing.allocator.free(line);
+    try testing.expectEqualStrings("{\"id\":2,\"error\":{\"code\":-32000,\"message\":\"could not measure page size\"}}\n", line);
+}
+
+test "router: events pumped during a driver call are flushed upward (sink)" {
+    const rig = try testRig();
+    defer {
+        _ = std.os.linux.close(rig.cmd[0]);
+        _ = std.os.linux.close(rig.cmd[1]);
+        _ = std.os.linux.close(rig.resp[0]);
+        _ = std.os.linux.close(rig.resp[1]);
+    }
+    var d = rig.d;
+    defer d.deinit();
+
+    try seedPage(&d, rig.resp, "t1", "s1", "f1");
+    try pipe.writeMessage(
+        testing.allocator,
+        rig.resp[1],
+        "{\"method\":\"Runtime.executionContextCreated\",\"params\":{\"executionContextId\":\"ctx-9\",\"auxData\":{\"frameId\":\"f1\"}},\"sessionId\":\"s1\"}",
+    );
+    try d.pump(1000);
+    try setCurrentTarget(testing.allocator, "t1");
+    defer {
+        if (current_target) |t| testing.allocator.free(t);
+        current_target = null;
+    }
+
+    // Sink wired exactly like run() does.
+    var sink_alloc = testing.allocator;
+    d.event_sink = &eventSink;
+    d.event_sink_ctx = @ptrCast(&sink_alloc);
+    defer {
+        sink_buf.deinit(testing.allocator);
+        sink_buf = .empty;
+    }
+
+    // The console event lands BEFORE the evaluate response: the driver's
+    // pump dispatches it during the call (consumed into state, teed by the
+    // sink). flushSinkEvents must emit it after the call.
+    try pipe.writeMessage(
+        testing.allocator,
+        rig.resp[1],
+        "{\"method\":\"Runtime.console\",\"params\":{\"type\":\"log\",\"text\":\"hi\"},\"sessionId\":\"s1\"}",
+    );
+    const expected = [_][]const u8{"{\"id\":1,\"sessionId\":\"s1\",\"method\":\"Runtime.evaluate\",\"params\":{\"executionContextId\":\"ctx-9\",\"expression\":\"1+1\",\"returnByValue\":true}}"};
+    const reply = [_][]const u8{"{\"id\":1,\"result\":{\"result\":{\"type\":\"number\",\"value\":2}}}"};
+    const thread = try std.Thread.spawn(.{}, FakePeer.thread, .{ rig.cmd[0], rig.resp[1], &expected, &reply, &[_][]const u8{} });
+    defer thread.join();
+
+    const line = try runRequest(&d, "{\"id\":10,\"method\":\"Runtime.evaluate\",\"params\":{\"expression\":\"1+1\"}}");
+    defer testing.allocator.free(line);
+    try testing.expectEqualStrings("{\"id\":10,\"result\":{\"result\":{\"type\":\"number\",\"value\":2}}}\n", line);
+
+    var out2: std.array_list.Aligned(u8, null) = .empty;
+    defer out2.deinit(testing.allocator);
+    try flushSinkEvents(testing.allocator, &out2);
+    try testing.expectEqualStrings("{\"method\":\"Runtime.console\",\"params\":{\"type\":\"log\",\"text\":\"hi\"},\"sessionId\":\"s1\"}\n", out2.items);
+}
+
+test "router: idle events drain through the shared read buffer (drainEvents)" {
+    const rig = try testRig();
+    defer {
+        _ = std.os.linux.close(rig.cmd[0]);
+        _ = std.os.linux.close(rig.cmd[1]);
+        _ = std.os.linux.close(rig.resp[0]);
+        _ = std.os.linux.close(rig.resp[1]);
+    }
+    var d = rig.d;
+    defer d.deinit();
+
+    var sink_alloc = testing.allocator;
+    d.event_sink = &eventSink;
+    d.event_sink_ctx = @ptrCast(&sink_alloc);
+    defer {
+        sink_buf.deinit(testing.allocator);
+        sink_buf = .empty;
+    }
+
+    try pipe.writeMessage(
+        testing.allocator,
+        rig.resp[1],
+        "{\"method\":\"Runtime.console\",\"params\":{\"type\":\"warning\",\"text\":\"w\"},\"sessionId\":\"s1\"}",
+    );
+    var out: std.array_list.Aligned(u8, null) = .empty;
+    defer out.deinit(testing.allocator);
+    try drainEvents(&d, testing.allocator, 0, &out);
+    try testing.expectEqualStrings("{\"method\":\"Runtime.console\",\"params\":{\"type\":\"warning\",\"text\":\"w\"},\"sessionId\":\"s1\"}\n", out.items);
+    // forwarded exactly once
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, out.items, "Runtime.console"));
+}
+
+test "router: detachedFromTarget clears a stale current_target" {
+    const rig = try testRig();
+    defer {
+        _ = std.os.linux.close(rig.cmd[0]);
+        _ = std.os.linux.close(rig.cmd[1]);
+        _ = std.os.linux.close(rig.resp[0]);
+        _ = std.os.linux.close(rig.resp[1]);
+    }
+    var d = rig.d;
+    defer d.deinit();
+
+    try seedPage(&d, rig.resp, "t1", "s1", "f1");
+    try setCurrentTarget(testing.allocator, "t1");
+    defer {
+        if (current_target) |t| testing.allocator.free(t);
+        current_target = null;
+    }
+
+    // Detach event: the driver drops the page; refreshCurrentTarget must
+    // drop the stale target id (freeing it) so session-less Page calls
+    // stop resolving against a dead target.
+    try pipe.writeMessage(
+        testing.allocator,
+        rig.resp[1],
+        "{\"method\":\"Browser.detachedFromTarget\",\"params\":{\"sessionId\":\"s1\",\"targetId\":\"t1\"}}",
+    );
+    var out: std.array_list.Aligned(u8, null) = .empty;
+    defer out.deinit(testing.allocator);
+    try drainEvents(&d, testing.allocator, 0, &out);
+    try testing.expect(current_target == null);
+
+    // After the kill, a session-less Page call errors cleanly.
+    const line = try runRequest(&d, "{\"id\":3,\"method\":\"Page.navigate\",\"params\":{\"url\":\"about:blank\"}}");
+    defer testing.allocator.free(line);
+    try testing.expectEqualStrings("{\"id\":3,\"error\":{\"code\":-32600,\"message\":\"no page session\"}}\n", line);
 }
