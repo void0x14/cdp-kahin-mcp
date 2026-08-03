@@ -10,6 +10,7 @@ categories live in the ``*_obscura.py`` / ``*_mirage.py`` stubs (filled in
 by later phases).
 """
 
+from kahin.tools import accessibility_mirage  # noqa: F401
 from kahin.tools import dejavu  # noqa: F401
 from kahin.tools import dejavu_mirage  # noqa: F401
 from kahin.tools import dejavu_obscura  # noqa: F401
@@ -31,6 +32,7 @@ from kahin.tools import trainman_obscura  # noqa: F401
 from kahin.tools import upload_mirage  # noqa: F401
 
 __all__ = [
+    "accessibility_mirage",
     "dejavu",
     "dejavu_mirage",
     "dejavu_obscura",

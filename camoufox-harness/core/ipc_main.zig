@@ -237,11 +237,15 @@ fn processRequest(d: *driver_mod.Driver, a: Allocator, aa: Allocator, line: []co
 }
 
 /// Page-oriented Juggler method families: forwarded on the page session.
+/// Accessibility (Camoufox fork, targets ['page'] — vendored Protocol.js)
+/// joins the page families; on the root session its handler is absent
+/// ("Handler for does not implement method Accessibility.getFullAXTree").
 fn isPageDomain(method: []const u8) bool {
     return std.mem.startsWith(u8, method, "Page.") or
         std.mem.startsWith(u8, method, "Runtime.") or
         std.mem.startsWith(u8, method, "Network.") or
-        std.mem.startsWith(u8, method, "Heap.");
+        std.mem.startsWith(u8, method, "Heap.") or
+        std.mem.startsWith(u8, method, "Accessibility.");
 }
 
 /// Raw forward to the browser: the Juggler response (result OR its genuine
@@ -994,6 +998,64 @@ test "router: Network.enable is forwarded (no-op removed)" {
     const line = try runRequest(&d, "{\"id\":9,\"method\":\"Network.enable\",\"params\":{},\"sessionId\":\"s1\"}");
     defer testing.allocator.free(line);
     try testing.expectEqualStrings("{\"id\":9,\"result\":{}}\n", line);
+}
+
+test "router: Accessibility.getFullAXTree forwards on the page session" {
+    const rig = try testRig();
+    defer {
+        _ = std.os.linux.close(rig.cmd[0]);
+        _ = std.os.linux.close(rig.cmd[1]);
+        _ = std.os.linux.close(rig.resp[0]);
+        _ = std.os.linux.close(rig.resp[1]);
+    }
+    var d = rig.d;
+    defer d.deinit();
+
+    // Accessibility is a Camoufox-only page domain (targets ['page'] in the
+    // vendored Protocol.js). The root session has NO handler for it — the
+    // browser answers "Handler for does not implement method" — so the
+    // sidecar must keep the request on the page session, not drop it to
+    // root like unknown methods.
+    try seedPage(&d, rig.resp, "t1", "s1", "f1");
+    const expected = [_][]const u8{"{\"id\":1,\"sessionId\":\"s1\",\"method\":\"Accessibility.getFullAXTree\",\"params\":{}}"};
+    const reply = [_][]const u8{"{\"id\":1,\"result\":{\"tree\":{\"role\":\"document\",\"name\":\"\",\"children\":[{\"role\":\"button\",\"name\":\"Close\"}]}}}"};
+    const thread = try std.Thread.spawn(.{}, FakePeer.thread, .{ rig.cmd[0], rig.resp[1], &expected, &reply, &[_][]const u8{} });
+    defer thread.join();
+
+    const line = try runRequest(&d, "{\"id\":11,\"method\":\"Accessibility.getFullAXTree\",\"params\":{},\"sessionId\":\"s1\"}");
+    defer testing.allocator.free(line);
+    try testing.expectEqualStrings(
+        "{\"id\":11,\"result\":{\"tree\":{\"role\":\"document\",\"name\":\"\",\"children\":[{\"role\":\"button\",\"name\":\"Close\"}]}}}\n",
+        line,
+    );
+}
+
+test "router: Accessibility.getFullAXTree without sessionId uses the current page" {
+    const rig = try testRig();
+    defer {
+        _ = std.os.linux.close(rig.cmd[0]);
+        _ = std.os.linux.close(rig.cmd[1]);
+        _ = std.os.linux.close(rig.resp[0]);
+        _ = std.os.linux.close(rig.resp[1]);
+    }
+    var d = rig.d;
+    defer d.deinit();
+
+    try seedPage(&d, rig.resp, "t1", "s1", "f1");
+    try setCurrentTarget(testing.allocator, "t1");
+    defer {
+        if (current_target) |t| testing.allocator.free(t);
+        current_target = null;
+    }
+
+    const expected = [_][]const u8{"{\"id\":1,\"sessionId\":\"s1\",\"method\":\"Accessibility.getFullAXTree\",\"params\":{}}"};
+    const reply = [_][]const u8{"{\"id\":1,\"result\":{\"tree\":{\"role\":\"document\"}}}"};
+    const thread = try std.Thread.spawn(.{}, FakePeer.thread, .{ rig.cmd[0], rig.resp[1], &expected, &reply, &[_][]const u8{} });
+    defer thread.join();
+
+    const line = try runRequest(&d, "{\"id\":12,\"method\":\"Accessibility.getFullAXTree\",\"params\":{}}");
+    defer testing.allocator.free(line);
+    try testing.expectEqualStrings("{\"id\":12,\"result\":{\"tree\":{\"role\":\"document\"}}}\n", line);
 }
 
 test "router: Browser.* methods go to the root session" {
