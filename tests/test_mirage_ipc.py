@@ -23,7 +23,7 @@ for line in sys.stdin:
         print(json.dumps({"method": "Console.messageAdded",
                           "params": {"message": {"type": "log", "args": ["hi"], "url": "", "line": 1, "column": 1}},
                           "sessionId": "sess-1"}), flush=True)
-    print(json.dumps({"id": rid, "result": {"echo": req["domain"] + "." + req["command"]}}), flush=True)
+    print(json.dumps({"id": rid, "result": {"echo": req["method"]}}), flush=True)
 """
 
 

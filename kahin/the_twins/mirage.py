@@ -1,9 +1,9 @@
 """the_twins/mirage.py — Mirage: real Camoufox via the Zig IPC sidecar.
 
 The sidecar (camoufox-harness/core/ipc_main.zig) owns the Juggler pipe and
-exposes a CDP-shaped JSON-over-stdio contract: requests
-{"id","domain","command","params"} -> {"id","result"|"error"}; events flow
-out as {"method","params","sessionId"} lines (Console.messageAdded etc.).
+exposes a Juggler-native JSON-over-stdio contract: requests
+{"id","method","params","sessionId"?} -> {"id","result"|"error"}; events flow
+out as {"method","params","sessionId"} lines, verbatim.
 """
 
 from __future__ import annotations
@@ -69,7 +69,7 @@ def _camoufox_bin() -> Path:
 
 
 class Mirage(BrowserEngine):
-    """Stealth Camoufox engine speaking CDP-shaped JSON over the Zig sidecar."""
+    """Stealth Camoufox engine speaking Juggler methods over the Zig sidecar."""
 
     def __init__(self, engine_name: str = "mirage") -> None:
         super().__init__()
@@ -171,7 +171,8 @@ class Mirage(BrowserEngine):
         if self._process is None or self._process.stdin is None:
             raise RuntimeError("Mirage not started")
         self._msg_id += 1
-        msg = {"id": self._msg_id, "domain": domain, "command": command, "params": params or {}}
+        # Juggler-native wire: domain+command fold into one method token.
+        msg = {"id": self._msg_id, "method": f"{domain}.{command}", "params": params or {}}
         fut: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
         self._pending[self._msg_id] = fut
         self._process.stdin.write((json.dumps(msg) + "\n").encode())

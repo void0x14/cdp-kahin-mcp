@@ -16,4 +16,5 @@ test {
     _ = @import("process-manager/profile.zig");
     _ = @import("process-manager/lifecycle.zig");
     _ = @import("driver.zig");
+    _ = @import("ipc_main.zig");
 }

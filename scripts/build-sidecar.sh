@@ -23,6 +23,7 @@ case "$version" in
 esac
 
 echo "zig $version — building sidecar"
+mkdir -p zig-out/bin
 "$ZIG" build-exe --dep driver -Mroot=ipc_main.zig -Mdriver=driver.zig -O ReleaseSafe -femit-bin=zig-out/bin/kahin-sidecar
 mkdir -p ../vendor/bin
 cp zig-out/bin/kahin-sidecar ../vendor/bin/kahin-sidecar
