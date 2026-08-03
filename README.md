@@ -16,16 +16,23 @@ AI modeller Chrome'un içine girip sayfa gezip kod çalıştırabilir ama CDP'yi
 
 56 domain, 667 komut, 237 event, 609 type — Chrome 148 protokolü gömülü.
 
-## 32 Tool · 6 Kategori
+## 97 Tool · 4 Kategori Ailesi · 2 Engine
+
+Tool'lar engine-ayrımlı kategori dosyalarında (`kahin/tools/`): paylaşılan çekirdek + Obscura + Camoufox aileleri.
 
 | Kategori | Ne işe yarar | Tool sayısı |
 |----------|-------------|-------------|
-| 🧠 CDP Bilgi | Domain/komut/event/type sorgulama, semantik arama | 7 |
-| ✅ Doğrulama | Komut doğrulama, typo tespiti, hata çözümleme | 3 |
-| 🚀 Browser Kontrol | Chrome başlat/durdur, gezin, tıkla, kod çalıştır, ekran görüntüsü | 9 |
-| 🔗 Session | Yeni sayfa aç/kapat, session listele | 4 |
-| 🔍 Debug | CDP event geçmişi, network istekleri, console mesajları | 4 |
-| 📈 Pattern DB | Kullanım desenlerini öğren, sorgula, öner | 5 |
+|  GRIMOIRE — CDP Bilgi | Domain/komut/event/type sorgulama, semantik arama | 7 |
+|  SERAPH — Doğrulama | Komut doğrulama, typo tespiti, hata çözümleme | 3 |
+|  PILOT — Browser Kontrol | Chrome başlat/durdur, gezin, tıkla, kod çalıştır, ekran görüntüsü | 8 |
+|  TRAINMAN — Session | Yeni sayfa aç/kapat, session listele | 4 |
+|  DEJA_VU — Debug | CDP event geçmişi, network istekleri, console mesajları | 4 |
+|  PROPHECY — Pattern DB | Kullanım desenlerini öğren, sorgula, öner | 5 |
+|  HEALER | Hata istatistikleri | 1 |
+|  MIRAGE — Camoufox Native (65) | Juggler protokolü üstünde DOM, Input, PageEx, Tab, Network, Storage, Emulation, Dialog/Download/Worker/WS, Engine sağlığı | 65 |
+|  OBSCURA — Ayrı kategori | Obscura'ya özel tool'lar (hazırlanıyor) | 0 |
+
+**Toplam: 97 tool.**
 
 ## Bir satırda özet
 
@@ -38,7 +45,7 @@ Zorunlu: Python 3.12+ · Chrome/Chromium · Node.js 18+ (npm launcher için)
 ### Otomatik kurulum — tek komut
 
 ```bash
-pnpm add -g kahin
+pnpm add -g @kahinmcp/kahin
 ```
 
 Bu kadar. Kurulum sonrası Kahin, sistemindeki AI CLI araçlarını otomatik tespit eder ve kendini kaydeder:
@@ -80,6 +87,17 @@ Gerisini AI halleder. Ama dilersen tool'ları direkt de çağırabilirsin:
 → kahin_error_decode(error_code=-32601) → hatayı çözümler
 ```
 
+Camoufox (Juggler native) ile, engine `mirage` seçilince:
+
+```
+→ kahin_browser_start(engine="mirage")
+→ kahin_mirage_query("#input") → kahin_mirage_type("merhaba")
+→ kahin_mirage_click("#btn") → kahin_mirage_get_text("#result")
+→ kahin_mirage_cookie_set/get/clear → kahin_mirage_storage_local_get
+→ kahin_mirage_set_user_agent / set_viewport / set_geolocation
+→ kahin_engine_health
+```
+
 Tam liste için: [AGENTS.md](AGENTS.md)
 
 ## Proje Felsefesi
@@ -91,7 +109,7 @@ Tam liste için: [AGENTS.md](AGENTS.md)
 
 ## Bağımlılıklar
 
-mcp · orjson · Levenshtein · websockets · httpx · camoufox · Pillow
+mcp · orjson · Levenshtein · websockets · httpx · camoufox · Pillow · pydantic
 
 ## Port Uyarısı
 
@@ -113,13 +131,22 @@ Kahin'de hata loglama ve kendini onarma sistemi gömülüdür:
 ## Mimari
 
 ```
-oracle.py               → MCP server (32 tool, giriş kapısı)
-  _healer.py             → Hata yönetimi, loglama, kendini onarma
-  the_source/architect   → CDP şema motoru (56 domain, 667 komut)
-  the_twins/shadow       → Obscura engine (gerçek Obscura binary, WebSocket CDP)
-  the_twins/mirage       → Mirage engine (stealth, anti-detection)
-  the_twins/chassis      → Ortak engine arayüzü (abstract)
-  residual_self/fate     → Pattern DB (öğrenme, sorgulama, önerme)
+oracle.py               → MCP server (bootstrap: mcp instance + engine lifecycle + main)
+  tools/                → 97 tool, engine-ayrımlı kategori dosyaları
+    _common.py          → _safe_cdp, _require_engine, _auto_learn
+    grimoire/seraph/prophecy/healer → CDP bilgi + doğrulama + pattern (paylaşılan)
+    pilot/trainman/dejavu           → browser/session/debug (paylaşılan)
+    pilot_mirage/trainman_mirage/dejavu_mirage → Camoufox DOM+Input+PageEx / Tab / Network+Console
+    storage_mirage/emulation_mirage/dialog_mirage → Storage / Emulation / Dialog+Download+Worker+WS
+    pilot_obscura/trainman_obscura/dejavu_obscura → Obscura ayrı kategoriler (hazırlanıyor)
+    engine.py           → engine_health
+  _healer.py            → Hata yönetimi, loglama, kendini onarma
+  the_source/architect  → CDP şema motoru (56 domain, 667 komut)
+  the_twins/shadow      → Obscura engine (gerçek Obscura binary, WebSocket CDP)
+  the_twins/mirage      → Mirage engine (Zig sidecar, Juggler native pipe, stealth)
+  the_twins/chassis     → Ortak engine arayüzü (abstract: call/is_alive/on_death)
+  residual_self/fate    → Pattern DB (öğrenme, sorgulama, önerme)
+camoufox-harness/       → Zig sidecar (Juggler protocol, vendor binary gömülü)
 ```
 
 ---
@@ -130,15 +157,16 @@ oracle.py               → MCP server (32 tool, giriş kapısı)
 - [x] **Camoufox entegrasyonu tamamlandı** — gerçek Camoufox (Zig sidecar + Juggler pipe) ile native çalışıyor; engine seçimi ajan tarafından `shadow`/`mirage` parametresiyle yapılıyor
 - [x] **Obscura entegrasyonu tamamlandı** — gerçek Obscura binary'si (WebSocket CDP) ile çalışıyor, startup problemleri giderildi
 - [ ] **SKILLS** destekleri ve konfigre edilebilir kişsiel hazır skills oluşturma özelliği
-- [x] **Tek tık kurulum** — `pnpm add -g kahin`, sonra `kahin` (ilk çalıştırmada Python ortamını otomatik kurar)
+- [x] **Tek tık kurulum** — `pnpm add -g @kahinmcp/kahin`, sonra `kahin` (ilk çalıştırmada Python ortamını otomatik kurar)
 - [ ] **Zero-dependency** hedefi (Go/Rust portu)
 - [ ] **LSP modu** — kod içinde hata yakalama, AI'a yanlışını yüzüne vurma
-- [ ] **Tool sayısı 50+** — eksik CDP domain tool'ları
+- [x] **Tool sayısı 97** — Camoufox Juggler-native 65 tool (DOM, Input, Network, Storage, Emulation, Dialog, Tab, Worker/WS) + paylaşılan 32 çekirdek
+- [ ] **Obscura ayrı tool'ları** — CDP-yeteneklerine özel pilot_obscura/trainman_obscura/dejavu_obscura kategorilerini doldur
 
 - [ ] **Gerçek zamanlı izleme** — AI'ın Kahin'i nasıl kullandığını canlı gör
 - [ ] **Web dashboard** — tool çağrıları, hata oranları, trendler
 - [ ] **MCP Ekosistemi** — üçüncü taraf MCP'lere proxy/entegrasyon
-- [x] **CLI aracı** — `kahin` komutu ile hızlı sorgulama (npm launcher, `pnpm add -g kahin`)
+- [x] **CLI aracı** — `kahin` komutu ile hızlı sorgulama (npm launcher, `pnpm add -g @kahinmcp/kahin`)
 - [ ] **Pasif tarama** — arka planda CDP event'lerini izle, değişiklik olunca bildir
 - [ ] **Dokümantasyon sitesi** — kapsamlı kullanım kılavuzu
 
@@ -154,7 +182,7 @@ oracle.py               → MCP server (32 tool, giriş kapısı)
 ## Geliştirme
 
 ```bash
-.venv/bin/pytest tests/          # 66 test, 0 failed
-.venv/bin/ruff check kahin/      # lint
-.venv/bin/python -m kahin.oracle # manuel başlatma
+uv run pytest tests/          # 84 test (83 pass, 1 skip)
+uv run ruff check kahin/      # lint
+uv run python -m kahin.oracle # manuel başlatma
 ```
