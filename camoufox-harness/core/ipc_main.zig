@@ -394,12 +394,22 @@ fn handleFrameTree(d: *driver_mod.Driver, a: Allocator, out: *std.array_list.Ali
         try respondErr(a, out, id, -32600, "no page session");
         return;
     };
-    const frame_id = p.main_frame_id orelse "";
-    const Frame = struct { id: []const u8, name: []const u8 = "", url: []const u8 = "" };
-    const Node = struct { frame: Frame, childFrames: []const Frame = &.{} };
-    const json = try std.json.Stringify.valueAlloc(a, .{ .frameTree = Node{ .frame = .{ .id = frame_id } } }, .{});
-    defer a.free(json);
-    return respondOk(a, out, id, json);
+    const tree = d.getFrameTree(p.target_id) catch |err| switch (err) {
+        error.UnknownTarget => {
+            try respondErr(a, out, id, -32600, "no page session");
+            return;
+        },
+        error.NoMainFrame, error.UnknownFrame => {
+            try respondErr(a, out, id, -32000, "no frame tree");
+            return;
+        },
+        else => {
+            try respondErr(a, out, id, -32000, "frame tree failed");
+            return;
+        },
+    };
+    defer a.free(tree);
+    return respondOk(a, out, id, tree);
 }
 
 /// Runtime.evaluate — keeps the evaluateWithRetry context-race handling.

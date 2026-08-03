@@ -312,8 +312,9 @@ class Mirage(BrowserEngine):
         self._death_callbacks.append(callback)  # type: ignore[arg-type]
 
     async def screenshot(self, format: str = "png", full_page: bool = False) -> bytes:
-        """Page.captureScreenshot passthrough. Juggler captures the viewport;
-        full_page falls back to the viewport until the sidecar supports clips."""
+        """Page.captureScreenshot passthrough. The sidecar translates
+        full_page into a full-content clip (size measured via evaluate);
+        otherwise the real viewport is captured."""
         result = await self.call("Page.captureScreenshot", {"format": format, "fullPage": full_page})
         data = result.get("data")
         if data is None:

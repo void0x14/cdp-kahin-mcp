@@ -86,7 +86,7 @@ kahin_pattern_suggest(partial="navig")
 | `kahin_error_decode` | CDP hata kodunu çözümle, alternatif öner |
 | `kahin_get_dependencies` | Komutun ön koşullarını göster |
 
-### PILOT — Browser Kontrol (9)
+### PILOT — Browser Kontrol (8)
 | Tool | Ne işe yarar? |
 |------|---------------|
 | `kahin_browser_start` | Browser motoru başlat (shadow/mirage) |

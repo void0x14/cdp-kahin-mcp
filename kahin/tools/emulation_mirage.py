@@ -20,6 +20,7 @@ from __future__ import annotations
 from typing import Any
 
 
+from kahin import _state as state
 from kahin.oracle import mcp
 from kahin.tools._common import (
     _DW,
@@ -32,8 +33,9 @@ from kahin.tools._common import (
 
 # Last viewportSize sent by mirage_set_viewport — lets
 # mirage_set_device_scale_factor rebuild a full viewport without needing a
-# loaded document (Runtime.evaluate requires a page).
-_last_viewport_size: dict[str, Any] | None = None
+# loaded document (Runtime.evaluate requires a page). Keyed by the engine
+# instance so a restarted engine never reuses a previous browser's size.
+_last_viewport: tuple[Any, dict[str, Any]] | None = None
 
 
 async def _read_viewport_size() -> dict[str, Any] | None:
@@ -67,9 +69,9 @@ async def mirage_set_viewport(
 ) -> str:
     """Mirage: set the default viewport size (Browser.setDefaultViewport)."""
     async with _healer_ref.safe("kahin_mirage_set_viewport", width=width, height=height):
-        global _last_viewport_size
-        _last_viewport_size = {"width": width, "height": height}
-        viewport: dict[str, Any] = {"viewportSize": _last_viewport_size}
+        global _last_viewport
+        _last_viewport = (state._current_engine, {"width": width, "height": height})
+        viewport: dict[str, Any] = {"viewportSize": _last_viewport[1]}
         if device_scale_factor is not None:
             viewport["deviceScaleFactor"] = device_scale_factor
         return await _mirage_call("Browser.setDefaultViewport", {"viewport": viewport})
@@ -80,7 +82,13 @@ async def mirage_set_device_scale_factor(device_scale_factor: float) -> str:
     """Mirage: override devicePixelRatio (Browser.setDefaultViewport with the
     current viewportSize + the new deviceScaleFactor)."""
     async with _healer_ref.safe("kahin_mirage_set_device_scale_factor", device_scale_factor=device_scale_factor):
-        size = _last_viewport_size or await _read_viewport_size()
+        # Cache only counts for the SAME engine instance: a restarted browser
+        # gets the real viewport (measured) instead of the previous one.
+        size = None
+        if _last_viewport is not None and _last_viewport[0] is state._current_engine:
+            size = _last_viewport[1]
+        if size is None:
+            size = await _read_viewport_size()
         viewport: dict[str, Any] = {"deviceScaleFactor": float(device_scale_factor)}
         if size:
             viewport["viewportSize"] = size

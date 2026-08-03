@@ -47,6 +47,9 @@ async def mirage_get_response_body(request_id: str) -> str:
     """Mirage: response body of a request (Network.getResponseBody ->
     {base64body, evicted?}), decoded to text when possible."""
     async with _healer_ref.safe("kahin_mirage_get_response_body", request_id=request_id[:80]):
+        # Intentional: _require_engine (not _require_mirage) — Network.
+        # getResponseBody exists in BOTH protocols (Juggler NetworkEx and CDP),
+        # and Obscura.call folds the Juggler token back into a CDP command.
         err = await _require_engine()
         if err:
             return err

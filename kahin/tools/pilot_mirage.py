@@ -392,9 +392,15 @@ async def _main_frame_id() -> tuple[str | None, str | None]:
 
 @mcp.tool(name="kahin_mirage_reload", annotations=_RW)
 async def mirage_reload() -> str:
-    """Mirage: reload the current page (Page.reload — takes no params)."""
+    """Mirage: reload the current page (Page.reload with the main frameId —
+    Juggler resolves the reload target by frameId, like goBack/goForward)."""
     async with _healer_ref.safe("kahin_mirage_reload"):
-        return await _mirage_call("Page.reload")
+        frame_id, err = await _main_frame_id()
+        if err:
+            return err
+        if not frame_id:
+            return '{"error": "no main frame available"}'
+        return await _mirage_call("Page.reload", {"frameId": frame_id})
 
 
 @mcp.tool(name="kahin_mirage_go_back", annotations=_RW)
@@ -425,7 +431,13 @@ async def mirage_go_forward() -> str:
 async def mirage_stop() -> str:
     """Mirage: stop page loading (Runtime.evaluate window.stop())."""
     async with _healer_ref.safe("kahin_mirage_stop"):
-        await _mirage_evaluate("window.stop(); true")
+        result = await _mirage_evaluate("window.stop(); true")
+        try:
+            parsed = orjson.loads(result)
+        except ValueError:
+            return result
+        if isinstance(parsed, dict) and "error" in parsed:
+            return result
         return '{"stopped": true}'
 
 
