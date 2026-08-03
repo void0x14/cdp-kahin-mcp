@@ -30,6 +30,7 @@ from kahin.tools._common import (
     _RW,
     _healer_ref,
     _mirage_call,
+    _mirage_eval_result,
     _mirage_evaluate,
     _mirage_engine,
     _require_mirage,
@@ -56,8 +57,11 @@ async def _dispatch_mouse(
     return await _mirage_call("Page.dispatchMouseEvent", params)
 
 
-async def _element_point(selector: str) -> tuple[float, float] | str:
+async def _element_point(selector: str, frame_id: str | None = None) -> tuple[float, float] | str:
     """Center point of the element's bounding rect via Runtime.evaluate.
+    With frame_id the rect is measured in that frame's world and offset by
+    the hosting <iframe>'s position (window.frameElement), so the returned
+    coordinates are always parent-viewport absolute — same as the main frame.
     Returns ("error", msg) tuple marker or coordinates."""
     expr = (
         "(() => {"
@@ -65,19 +69,17 @@ async def _element_point(selector: str) -> tuple[float, float] | str:
         '  if (!el) return {"error": "not found"};'
         '  el.scrollIntoView({block: "center", inline: "center"});'
         "  const r = el.getBoundingClientRect();"
-        '  return {x: r.x + r.width / 2, y: r.y + r.height / 2};'
+        "  const fe = window.frameElement;"
+        "  const fo = fe ? fe.getBoundingClientRect() : {x: 0, y: 0};"
+        "  return {x: fo.x + r.x + r.width / 2, y: fo.y + r.y + r.height / 2};"
         "})()"
     )
-    err = await _require_mirage()
-    if err:
-        return err
-    try:
-        result = await _mirage_engine().call("Runtime.evaluate", {"expression": expr})
-        if result.get("exceptionDetails"):
-            return orjson.dumps({"error": "evaluate threw", "exception": result["exceptionDetails"]}).decode()
-        point = (result.get("result") or {}).get("value")
-    except RuntimeError as e:
-        return orjson.dumps({"error": f"Juggler evaluate failed: {e}"}).decode()
+    result = await _mirage_eval_result(expr, frame_id)
+    if isinstance(result, str):
+        return result
+    if result.get("exceptionDetails"):
+        return orjson.dumps({"error": "evaluate threw", "exception": result["exceptionDetails"]}).decode()
+    point = (result.get("result") or {}).get("value")
     if not isinstance(point, dict):
         return '{"error": "element not found"}'
     if "error" in point:
@@ -89,9 +91,10 @@ async def _element_point(selector: str) -> tuple[float, float] | str:
 
 
 @mcp.tool(name="kahin_mirage_query", annotations=_RO)
-async def mirage_query(selector: str) -> str:
+async def mirage_query(selector: str, frame_id: str | None = None) -> str:
     """Mirage: info about the first element matching a CSS selector (tag, id,
-    class, text, visibility, rect) via Runtime.evaluate."""
+    class, text, visibility, rect) via Runtime.evaluate. frame_id: target an
+    iframe (kahin_mirage_frame_tree); main frame is the default."""
     async with _healer_ref.safe("kahin_mirage_query", selector=selector[:80]):
         expr = (
             "(() => {"
@@ -108,12 +111,13 @@ async def mirage_query(selector: str) -> str:
             "  };"
             "})()"
         )
-        return await _mirage_evaluate(expr)
+        return await _mirage_evaluate(expr, frame_id)
 
 
 @mcp.tool(name="kahin_mirage_query_all", annotations=_RO)
-async def mirage_query_all(selector: str, limit: int = 100) -> str:
-    """Mirage: list matching elements (tag, id, text, visibility), capped."""
+async def mirage_query_all(selector: str, limit: int = 100, frame_id: str | None = None) -> str:
+    """Mirage: list matching elements (tag, id, text, visibility), capped.
+    frame_id: target an iframe (kahin_mirage_frame_tree); main frame default."""
     async with _healer_ref.safe("kahin_mirage_query_all", selector=selector[:80], limit=limit):
         expr = (
             "(() => {"
@@ -129,15 +133,16 @@ async def mirage_query_all(selector: str, limit: int = 100) -> str:
             "  });"
             "})()"
         )
-        return await _mirage_evaluate(expr)
+        return await _mirage_evaluate(expr, frame_id)
 
 
 @mcp.tool(name="kahin_mirage_click", annotations=_DW)
-async def mirage_click(selector: str) -> str:
+async def mirage_click(selector: str, frame_id: str | None = None) -> str:
     """Mirage: click an element by CSS selector — real mouse events
-    (Page.dispatchMouseEvent mousedown+mouseup at the element center)."""
-    async with _healer_ref.safe("kahin_mirage_click", selector=selector[:80]):
-        point = await _element_point(selector)
+    (Page.dispatchMouseEvent mousedown+mouseup at the element center).
+    frame_id: target an iframe (kahin_mirage_frame_tree); main frame default."""
+    async with _healer_ref.safe("kahin_mirage_click", selector=selector[:80], frame_id=frame_id):
+        point = await _element_point(selector, frame_id)
         if not isinstance(point, tuple):
             return point
         x, y = point
@@ -148,10 +153,11 @@ async def mirage_click(selector: str) -> str:
 
 
 @mcp.tool(name="kahin_mirage_type", annotations=_RW)
-async def mirage_type(selector: str, text: str) -> str:
+async def mirage_type(selector: str, text: str, frame_id: str | None = None) -> str:
     """Mirage: focus an element and type text via Page.insertText (Juggler's
-    real text-insertion method)."""
-    async with _healer_ref.safe("kahin_mirage_type", selector=selector[:80], text=text[:80]):
+    real text-insertion method). frame_id: target an iframe
+    (kahin_mirage_frame_tree); main frame default."""
+    async with _healer_ref.safe("kahin_mirage_type", selector=selector[:80], text=text[:80], frame_id=frame_id):
         expr = (
             "(() => {"
             f"  const el = document.querySelector({_q(selector)});"
@@ -160,11 +166,15 @@ async def mirage_type(selector: str, text: str) -> str:
             '  return "focused";'
             "})()"
         )
+        result = await _mirage_eval_result(expr, frame_id)
+        if isinstance(result, str):
+            return result
+        if result.get("exceptionDetails"):
+            return orjson.dumps({"error": "evaluate threw", "exception": result["exceptionDetails"]}).decode()
         err = await _require_mirage()
         if err:
             return err
         try:
-            await _mirage_engine().call("Runtime.evaluate", {"expression": expr})
             result = await _mirage_engine().call("Page.insertText", {"text": text})
         except RuntimeError as e:
             return orjson.dumps({"error": f"Juggler call failed: {e}"}).decode()
@@ -172,35 +182,38 @@ async def mirage_type(selector: str, text: str) -> str:
 
 
 @mcp.tool(name="kahin_mirage_get_text", annotations=_RO)
-async def mirage_get_text(selector: str) -> str:
-    """Mirage: trimmed textContent of the first matching element."""
-    async with _healer_ref.safe("kahin_mirage_get_text", selector=selector[:80]):
+async def mirage_get_text(selector: str, frame_id: str | None = None) -> str:
+    """Mirage: trimmed textContent of the first matching element.
+    frame_id: target an iframe (kahin_mirage_frame_tree); main frame default."""
+    async with _healer_ref.safe("kahin_mirage_get_text", selector=selector[:80], frame_id=frame_id):
         expr = (
             "(() => {"
             f"  const el = document.querySelector({_q(selector)});"
             "  return el ? (el.textContent || '').trim() : null;"
             "})()"
         )
-        return await _mirage_evaluate(expr)
+        return await _mirage_evaluate(expr, frame_id)
 
 
 @mcp.tool(name="kahin_mirage_get_attribute", annotations=_RO)
-async def mirage_get_attribute(selector: str, name: str) -> str:
-    """Mirage: attribute value of the first matching element."""
-    async with _healer_ref.safe("kahin_mirage_get_attribute", selector=selector[:80], name=name[:80]):
+async def mirage_get_attribute(selector: str, name: str, frame_id: str | None = None) -> str:
+    """Mirage: attribute value of the first matching element.
+    frame_id: target an iframe (kahin_mirage_frame_tree); main frame default."""
+    async with _healer_ref.safe("kahin_mirage_get_attribute", selector=selector[:80], name=name[:80], frame_id=frame_id):
         expr = (
             "(() => {"
             f"  const el = document.querySelector({_q(selector)});"
             f"  return el ? (el.getAttribute({_q(name)}) ?? null) : null;"
             "})()"
         )
-        return await _mirage_evaluate(expr)
+        return await _mirage_evaluate(expr, frame_id)
 
 
 @mcp.tool(name="kahin_mirage_set_attribute", annotations=_RW)
-async def mirage_set_attribute(selector: str, name: str, value: str) -> str:
-    """Mirage: set an attribute on the first matching element."""
-    async with _healer_ref.safe("kahin_mirage_set_attribute", selector=selector[:80], name=name[:80], value=value[:80]):
+async def mirage_set_attribute(selector: str, name: str, value: str, frame_id: str | None = None) -> str:
+    """Mirage: set an attribute on the first matching element.
+    frame_id: target an iframe (kahin_mirage_frame_tree); main frame default."""
+    async with _healer_ref.safe("kahin_mirage_set_attribute", selector=selector[:80], name=name[:80], value=value[:80], frame_id=frame_id):
         expr = (
             "(() => {"
             f"  const el = document.querySelector({_q(selector)});"
@@ -209,13 +222,14 @@ async def mirage_set_attribute(selector: str, name: str, value: str) -> str:
             '  return "set";'
             "})()"
         )
-        return await _mirage_evaluate(expr)
+        return await _mirage_evaluate(expr, frame_id)
 
 
 @mcp.tool(name="kahin_mirage_focus", annotations=_RW)
-async def mirage_focus(selector: str) -> str:
-    """Mirage: focus the first matching element."""
-    async with _healer_ref.safe("kahin_mirage_focus", selector=selector[:80]):
+async def mirage_focus(selector: str, frame_id: str | None = None) -> str:
+    """Mirage: focus the first matching element.
+    frame_id: target an iframe (kahin_mirage_frame_tree); main frame default."""
+    async with _healer_ref.safe("kahin_mirage_focus", selector=selector[:80], frame_id=frame_id):
         expr = (
             "(() => {"
             f"  const el = document.querySelector({_q(selector)});"
@@ -224,15 +238,16 @@ async def mirage_focus(selector: str) -> str:
             '  return "focused";'
             "})()"
         )
-        return await _mirage_evaluate(expr)
+        return await _mirage_evaluate(expr, frame_id)
 
 
 @mcp.tool(name="kahin_mirage_hover", annotations=_RW)
-async def mirage_hover(selector: str) -> str:
+async def mirage_hover(selector: str, frame_id: str | None = None) -> str:
     """Mirage: move the mouse over the element center (dispatchMouseEvent
-    mousemove)."""
-    async with _healer_ref.safe("kahin_mirage_hover", selector=selector[:80]):
-        point = await _element_point(selector)
+    mousemove). frame_id: target an iframe (kahin_mirage_frame_tree); main
+    frame default."""
+    async with _healer_ref.safe("kahin_mirage_hover", selector=selector[:80], frame_id=frame_id):
+        point = await _element_point(selector, frame_id)
         if not isinstance(point, tuple):
             return point
         x, y = point
@@ -242,9 +257,10 @@ async def mirage_hover(selector: str) -> str:
 
 
 @mcp.tool(name="kahin_mirage_get_html", annotations=_RO)
-async def mirage_get_html(selector: str | None = None) -> str:
-    """Mirage: outerHTML of the first matching element, or the whole document."""
-    async with _healer_ref.safe("kahin_mirage_get_html", selector=selector or ""):
+async def mirage_get_html(selector: str | None = None, frame_id: str | None = None) -> str:
+    """Mirage: outerHTML of the first matching element, or the whole document.
+    frame_id: target an iframe (kahin_mirage_frame_tree); main frame default."""
+    async with _healer_ref.safe("kahin_mirage_get_html", selector=selector or "", frame_id=frame_id):
         if selector:
             expr = (
                 "(() => {"
@@ -254,42 +270,39 @@ async def mirage_get_html(selector: str | None = None) -> str:
             )
         else:
             expr = "document.documentElement.outerHTML"
-        return await _mirage_evaluate(expr)
+        return await _mirage_evaluate(expr, frame_id)
 
 
 @mcp.tool(name="kahin_mirage_wait_selector", annotations=_RO)
-async def mirage_wait_selector(selector: str, timeout: float = 10.0) -> str:
-    """Mirage: poll Runtime.evaluate until the selector matches (or timeout)."""
-    async with _healer_ref.safe("kahin_mirage_wait_selector", selector=selector[:80], timeout=timeout):
-        err = await _require_mirage()
-        if err:
-            return err
-        engine = _mirage_engine()
+async def mirage_wait_selector(selector: str, timeout: float = 10.0, frame_id: str | None = None) -> str:
+    """Mirage: poll Runtime.evaluate until the selector matches (or timeout).
+    frame_id: target an iframe (kahin_mirage_frame_tree); main frame default."""
+    async with _healer_ref.safe("kahin_mirage_wait_selector", selector=selector[:80], timeout=timeout, frame_id=frame_id):
         expr = f"!!document.querySelector({_q(selector)})"
         deadline = asyncio.get_running_loop().time() + float(timeout)
-        try:
-            while True:
-                result = await engine.call("Runtime.evaluate", {"expression": expr})
-                if (result.get("result") or {}).get("value") is True:
-                    return orjson.dumps({"found": True, "selector": selector}).decode()
-                if asyncio.get_running_loop().time() >= deadline:
-                    return orjson.dumps({"found": False, "selector": selector, "timeout": timeout}).decode()
-                await asyncio.sleep(0.25)
-        except RuntimeError as e:
-            return orjson.dumps({"error": f"Juggler evaluate failed: {e}"}).decode()
+        while True:
+            result = await _mirage_eval_result(expr, frame_id)
+            if isinstance(result, str):
+                return result
+            if (result.get("result") or {}).get("value") is True:
+                return orjson.dumps({"found": True, "selector": selector, "frame_id": frame_id}).decode()
+            if asyncio.get_running_loop().time() >= deadline:
+                return orjson.dumps({"found": False, "selector": selector, "frame_id": frame_id, "timeout": timeout}).decode()
+            await asyncio.sleep(0.25)
 
 
 @mcp.tool(name="kahin_mirage_get_value", annotations=_RO)
-async def mirage_get_value(selector: str) -> str:
-    """Mirage: value of an input/select/textarea (or null when missing)."""
-    async with _healer_ref.safe("kahin_mirage_get_value", selector=selector[:80]):
+async def mirage_get_value(selector: str, frame_id: str | None = None) -> str:
+    """Mirage: value of an input/select/textarea (or null when missing).
+    frame_id: target an iframe (kahin_mirage_frame_tree); main frame default."""
+    async with _healer_ref.safe("kahin_mirage_get_value", selector=selector[:80], frame_id=frame_id):
         expr = (
             "(() => {"
             f"  const el = document.querySelector({_q(selector)});"
             "  return el ? (el.value ?? null) : null;"
             "})()"
         )
-        return await _mirage_evaluate(expr)
+        return await _mirage_evaluate(expr, frame_id)
 
 
 # ============================= Input (7) ===================================

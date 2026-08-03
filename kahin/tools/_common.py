@@ -156,17 +156,51 @@ async def _mirage_call(method: str, params: dict[str, Any] | None = None) -> str
         }).decode()
 
 
-async def _mirage_evaluate(expression: str) -> str:
-    """Runtime.evaluate via Mirage; returns result.value as pretty JSON."""
+async def _mirage_eval_result(expression: str, frame_id: str | None = None) -> dict[str, Any] | str:
+    """Run an expression in a frame's main world; raw Juggler result dict.
+
+    Default (frame_id=None) keeps the historical path: Runtime.evaluate,
+    whose sidecar handler always resolves the MAIN frame's context. With a
+    frame_id the context is resolved from the Mirage frame->context map and
+    the expression runs via Runtime.callFunction — a passthrough method that
+    accepts an explicit executionContextId (the browser's Juggler dispatcher
+    requires it) — so it executes inside that frame's own world.
+    Returns a JSON error string on engine/context failure.
+    """
     err = await _require_mirage()
     if err:
         return err
+    engine = _mirage_engine()
+    method = "Runtime.evaluate"
+    params: dict[str, Any] = {"expression": expression}
+    if frame_id is not None:
+        ctx_id = engine.resolve_context(frame_id)
+        if ctx_id is None:
+            return orjson.dumps({
+                "error": f"no execution context for frame {frame_id}; "
+                "list frames with kahin_mirage_frame_tree",
+            }, option=orjson.OPT_INDENT_2).decode()
+        method = "Runtime.callFunction"
+        params = {
+            "executionContextId": ctx_id,
+            "functionDeclaration": "function(expr) { return eval(expr); }",
+            "args": [{"value": expression}],
+            "returnByValue": True,
+        }
     try:
-        result = await _mirage_engine().call("Runtime.evaluate", {"expression": expression})
+        return await engine.call(method, params)
     except RuntimeError as e:
         return orjson.dumps({"error": f"Juggler evaluate failed: {e}"}, option=orjson.OPT_INDENT_2).decode()
     except Exception as e:
         return orjson.dumps({"error": f"Connection lost: {e}"}).decode()
+
+
+async def _mirage_evaluate(expression: str, frame_id: str | None = None) -> str:
+    """Evaluate an expression (optionally in a specific frame's main world);
+    returns result.value as pretty JSON."""
+    result = await _mirage_eval_result(expression, frame_id)
+    if isinstance(result, str):
+        return result
     if result.get("exceptionDetails"):
         return orjson.dumps({
             "error": "evaluate threw",

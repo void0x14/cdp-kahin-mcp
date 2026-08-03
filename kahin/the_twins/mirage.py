@@ -87,6 +87,11 @@ class Mirage(BrowserEngine):
         # targetId -> Juggler sessionId, learned from attachedToTarget events.
         self._sessions: dict[str, str] = {}
         self._current_target: str | None = None
+        # sessionId -> {frameId -> executionContextId} (main world only),
+        # fed by Runtime.executionContextCreated/Destroyed/ContextsCleared
+        # events the sidecar forwards verbatim. DOM tools resolve a frame_id
+        # to the main-world context of that frame.
+        self._frame_contexts: dict[str, dict[str, str]] = {}
 
     async def start(self, headless: bool = True, port: int = 0, **kwargs: Any) -> EngineContext:
         del port  # Juggler pipe: no port.
@@ -164,6 +169,7 @@ class Mirage(BrowserEngine):
                                 fut.set_result(data.get("result", {}))
                     elif "method" in data:
                         self._track_session(data)
+                        self._track_context(data)
                         evt = EventData(
                             method=data["method"],
                             params=data.get("params", {}),
@@ -189,6 +195,45 @@ class Mirage(BrowserEngine):
                 self._mark_dead()
 
         self._reader = asyncio.create_task(reader())
+
+    def _track_context(self, data: dict[str, Any]) -> None:
+        """Maintain sessionId -> {frameId -> executionContextId} (main world).
+
+        Runtime.executionContextCreated carries the frame in auxData.frameId;
+        contexts with a name (e.g. __playwright_utility_world__) do NOT map
+        to page DOM, so only unnamed (main world) contexts are kept.
+        executionContextDestroyed drops the id; executionContextsCleared
+        (full navigation) resets the session's map.
+        """
+        method = data.get("method")
+        params = data.get("params", {}) or {}
+        sid = data.get("sessionId")
+        if method == "Runtime.executionContextCreated":
+            ctx_id = params.get("executionContextId")
+            aux = params.get("auxData") or {}
+            frame_id = aux.get("frameId")
+            if not ctx_id or not frame_id or not sid:
+                return
+            if aux.get("name"):
+                return  # utility world — not page DOM
+            self._frame_contexts.setdefault(sid, {})[frame_id] = ctx_id
+        elif method == "Runtime.executionContextDestroyed":
+            ctx_id = params.get("executionContextId")
+            if not sid or not ctx_id:
+                return
+            for frame_id, cid in list(self._frame_contexts.get(sid, {}).items()):
+                if cid == ctx_id:
+                    del self._frame_contexts[sid][frame_id]
+        elif method == "Runtime.executionContextsCleared":
+            if sid:
+                self._frame_contexts.pop(sid, None)
+
+    def resolve_context(self, frame_id: str) -> str | None:
+        """Main-world executionContextId for a frame on the current target."""
+        sid = self._sessions.get(self._current_target or "")
+        if not sid:
+            return None
+        return self._frame_contexts.get(sid, {}).get(frame_id)
 
     def _track_session(self, data: dict[str, Any]) -> None:
         """Update the targetId -> sessionId map from Juggler target events."""
