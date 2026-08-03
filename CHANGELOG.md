@@ -2,6 +2,28 @@
 
 Tüm önemli değişiklikler bu dosyada tutulur. Format: [Keep a Changelog](https://keepachangelog.com/tr/1.1.0/) — [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] — 2026-08-03
+
+### Eklenen
+- **7 yeni tool (toplam 104)**:
+  - **Iframe erişimi**: 12 DOM tool'una opsiyonel `frame_id` parametresi — `Runtime.callFunction` ile hedef frame'in `executionContextId`'si üstünde evaluate; `Runtime.executionContextCreated/Destroyed/Cleared` event'lerinden frame→context map (Mirage reader loop'ta)
+  - **Dosya yükleme (2)**: `kahin_mirage_set_file_chooser_intercept`, `kahin_mirage_upload_files` — `Page.setInterceptFileChooserDialog` + `fileChooserOpened` bekleme + `Page.setFileInputFiles` (absolute path zorunlu, multi-file, timeout)
+  - **Canlı screencast (4)**: `kahin_mirage_screencast_start/frame/stop/pending` — `Page.startScreencast` (base64-JPEG frame'ler), her frame için zorunlu `screencastFrameAck` (kMaxFramesInFlight=1), FIFO frame queue, stop'ta temizlik
+  - **Erişilebilirlik (1)**: `kahin_mirage_accessibility_tree` — `Accessibility.getFullAXTree` (Camoufox-only; upstream Playwright'da yok, CDP'de de yok)
+- **Gerçek HTTP e2e** (`tests/test_e2e_network.py`): network_requests, get_response_body, interception continue/abort — localhost stdlib server ile, dış ağ yok
+- **Iframe e2e** (`tests/test_e2e_iframe.py`): frame tree, iframe içi query/click/type — 4 PASS
+- **Upload e2e** (`tests/test_e2e_upload.py`): single/multi dosya byte-exact, timeout, absolute path zorunluluğu — 4 PASS
+- **Screencast e2e** (`tests/test_e2e_screencast.py`): start/clamp, JPEG magic + ack stream, pending queue, stop temizliği — 4 PASS
+- **A11y e2e** (`tests/test_e2e_accessibility.py`): role/name/placeholder yansıması, nodeCount/truncated — 4 PASS
+
+### Değişen
+- Sidecar router: `Accessibility.*` page session kuralına eklendi (önceden root'a düşüyordu → `-32000 "Handler for ... does not implement"`); 196 Zig test
+- `Network.enable`'in Juggler'da OLMADIĞI doğrulandı (event'ler default) — network tool'ları gerçek HTTP'te as-is çalışıyor, bug yok
+- data: URL network skip testi kaldırıldı (yerini gerçek HTTP e2e aldı)
+
+### Düzeltilen
+- `Accessibility.getFullAXTree` route bug'ı (page session'a yönlendirme)
+
 ## [0.2.0] — 2026-08-03
 
 ### Eklenen

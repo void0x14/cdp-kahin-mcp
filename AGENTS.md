@@ -66,7 +66,7 @@ kahin_pattern_query(context="doggystyle")
 kahin_pattern_suggest(partial="navig")
 ```
 
-## Tool Listesi (97 adet)
+## Tool Listesi (104 adet)
 
 ### GRIMOIRE — CDP Bilgi (7)
 | Tool | Ne işe yarar? |
@@ -123,9 +123,9 @@ kahin_pattern_suggest(partial="navig")
 | `kahin_pattern_forget` | Pattern sil |
 | `kahin_pattern_stats` | Pattern istatistikleri |
 
-### MIRAGE — Juggler Native (65) — sadece `engine="mirage"` ile çalışır
+### MIRAGE — Juggler Native (72) — sadece `engine="mirage"` ile çalışır
 
-#### DOM (12)
+#### DOM (12) — hepsinde opsiyonel `frame_id` parametresi (iframe içi erişim; listeleme: `kahin_mirage_frame_tree`)
 | Tool | Ne işe yarar? |
 |------|---------------|
 | `kahin_mirage_query` | CSS selector ile ilk elementi bul |
@@ -217,6 +217,25 @@ kahin_pattern_suggest(partial="navig")
 |------|---------------|
 | `kahin_engine_health` | Çalışan motor sağlığı (Mirage: Browser.health) |
 
+#### Upload (2)
+| Tool | Ne işe yarar? |
+|------|---------------|
+| `kahin_mirage_set_file_chooser_intercept` | File chooser interception'ı aç/kapat (Page.setInterceptFileChooserDialog) |
+| `kahin_mirage_upload_files` | Dosya yükle (Page.fileChooserOpened bekle + Page.setFileInputFiles; absolute path zorunlu) |
+
+#### Screencast (4)
+| Tool | Ne işe yarar? |
+|------|---------------|
+| `kahin_mirage_screencast_start` | Canlı ekran kaydı başlat (Page.startScreencast → screencastId) |
+| `kahin_mirage_screencast_frame` | Bir sonraki frame'i al (base64 JPEG) + otomatik ack |
+| `kahin_mirage_screencast_stop` | Kaydı durdur, kalan frame'leri temizle |
+| `kahin_mirage_screencast_pending` | Bekleyen (ack'siz) frame sayısı + stream sağlığı |
+
+#### Accessibility (1)
+| Tool | Ne işe yarar? |
+|------|---------------|
+| `kahin_mirage_accessibility_tree` | Erişilebilirlik ağacı (Accessibility.getFullAXTree — Camoufox-only, CDP'de yok) |
+
 ## Örnek İş Akışları
 
 ### 1. CDP Komutu Araştırma + Doğrulama + Gönderme
@@ -293,6 +312,14 @@ kahin_mirage_set_locale      kahin_mirage_set_timezone   kahin_mirage_set_geoloc
 kahin_mirage_dialog_list     kahin_mirage_dialog_accept  kahin_mirage_dialog_dismiss
 kahin_mirage_download_list   kahin_mirage_download_save  kahin_mirage_worker_list
 kahin_mirage_websocket_list  kahin_engine_health
+```
+
+Faz 10 gap kapatma (gerçek HTTP e2e + iframe + upload + screencast + a11y) sonrası eklendi:
+```
+kahin_mirage_set_file_chooser_intercept kahin_mirage_upload_files
+kahin_mirage_screencast_start   kahin_mirage_screencast_frame
+kahin_mirage_screencast_stop    kahin_mirage_screencast_pending
+kahin_mirage_accessibility_tree
 ```
 
 ## Önemli Notlar
