@@ -8,16 +8,13 @@ functions the MCP server exposes, so the tool contract (JSON-string
 answers, error strings instead of raises, engine liveness eviction) is
 what gets verified.
 
-KNOWN SIDECAR BUG (reported, NOT fixed — zig is read-only in this task):
-no-return Juggler commands (Browser.setCookies / clearCookies /
-setUserAgentOverride / setDefaultViewport / Browser.clearCache /
-Page.close / Page.insertText / Page.dispatchMouseEvent /
-Page.handleDialog) DO run in the browser, but the browser replies
-``{"id":N}`` without a ``result`` key and the sidecar's ``respondFromRaw``
-(camoufox-harness/core/ipc_main.zig) rejects such replies with
--32603 "Juggler response has no result". Playwright itself tolerates
-result-less replies. Scenarios that need those commands assert everything
-that works first, then ``pytest.skip`` with this reason.
+SIDECAR FIX (ipc_main.zig respondFromRaw): no-return Juggler commands
+(Browser.setCookies / clearCookies / setUserAgentOverride /
+setDefaultViewport / Browser.clearCache / Page.close / Page.insertText /
+Page.dispatchMouseEvent / Page.handleDialog) reply with ``{"id":N}`` and
+NO ``result`` key. The sidecar now treats a reply that has NEITHER
+``error`` NOR ``result`` as success with an empty result (Playwright does
+the same), so the scenarios below run their full assertions — no skips.
 
 Other verified build facts (skip reasons below):
 - data: URL requests emit NO Network.* events (and Network.enable is not
@@ -43,11 +40,6 @@ from kahin.the_twins import mirage as mirage_mod
 from kahin.tools import dejavu_mirage, dialog_mirage, emulation_mirage, engine, pilot
 from kahin.tools import pilot_mirage, storage_mirage, trainman_mirage
 
-_SIDECAR_MSG = (
-    "sidecar bug: no-return Juggler replies ({\"id\":N}) are rejected as -32603 "
-    "'Juggler response has no result' (ipc_main.zig respondFromRaw); the command "
-    "did run in the browser. Zig is read-only in this task — reported, not fixed."
-)
 _NETWORK_MSG = (
     "this Camoufox build emits no Network.* events for data: URL requests "
     "(and Network.enable is unsupported) — network-body scenario needs a "
@@ -79,11 +71,6 @@ def _loads(text: str) -> Any:
     return json.loads(text)
 
 
-def _sidecar_no_result(text: str) -> bool:
-    """True when the tool answer carries the sidecar's -32603 reply bug."""
-    return "Juggler response has no result" in text
-
-
 @async_fixture
 async def mirage_tools() -> AsyncGenerator[None, None]:
     """Start real Camoufox through kahin_browser_start + one tab, then stop."""
@@ -111,7 +98,8 @@ async def test_dom_flow_type_click_read(mirage_tools: None) -> None:
     """query -> type -> click -> get_text sees the post-click DOM.
 
     query/get_text run on the real evaluate surface; type (Page.insertText)
-    and click (Page.dispatchMouseEvent) hit the reported sidecar bug.
+    and click (Page.dispatchMouseEvent) are no-return commands the sidecar
+    now answers with an empty result.
     """
     html = """<html><body>
       <button id="go">Go</button>
@@ -132,13 +120,9 @@ async def test_dom_flow_type_click_read(mirage_tools: None) -> None:
     assert info["visible"] is True, info
 
     typed = await pilot_mirage.mirage_type("#inp", "hello")
-    if _sidecar_no_result(typed):
-        pytest.skip(_SIDECAR_MSG)
     assert _loads(typed)["typed"] == 5, typed
 
     clicked = await pilot_mirage.mirage_click("#go")
-    if _sidecar_no_result(clicked):
-        pytest.skip(_SIDECAR_MSG)
     assert _loads(clicked)["clicked"] == "#go", clicked
 
     text = _loads(await pilot_mirage.mirage_get_text("#out"))
@@ -149,7 +133,7 @@ async def test_dom_flow_type_click_read(mirage_tools: None) -> None:
 async def test_multi_tab_lifecycle(mirage_tools: None) -> None:
     """tab_new x2 -> tab_list == 2 -> switch -> close -> tab_list == 1.
 
-    new/list/switch are real; close (Page.close) hits the sidecar bug.
+    new/list/switch/close are all real Juggler calls.
     """
     first = _loads(await trainman_mirage.mirage_tab_list())
     assert len(first) == 1, first
@@ -167,8 +151,6 @@ async def test_multi_tab_lifecycle(mirage_tools: None) -> None:
     assert next(t for t in tabs if t["targetId"] == target1)["current"] is True
 
     closed = await trainman_mirage.mirage_tab_close(tab2["targetId"])
-    if _sidecar_no_result(closed):
-        pytest.skip(_SIDECAR_MSG)
     assert _loads(closed).get("closed") == tab2["targetId"], closed
     await asyncio.sleep(0.3)  # detachedFromTarget event lands
 
@@ -181,8 +163,8 @@ async def test_multi_tab_lifecycle(mirage_tools: None) -> None:
 async def test_cookie_round_trip(mirage_tools: None) -> None:
     """set -> get matches -> clear -> get empty.
 
-    getCookies is real (verified: the buggy set DOES write the cookie into
-    the browser); set/clear hit the sidecar bug.
+    set/clear are no-return Juggler commands (empty-result replies); the
+    getCookies assertions prove they actually took effect.
     """
     cookies = _loads(await storage_mirage.mirage_cookie_get())["cookies"]
     assert cookies == [], cookies
@@ -190,8 +172,6 @@ async def test_cookie_round_trip(mirage_tools: None) -> None:
     result = await storage_mirage.mirage_cookie_set(cookies=[
         {"name": "kahin_e2e", "value": "cookie-value", "url": "http://example.com/"},
     ])
-    if _sidecar_no_result(result):
-        pytest.skip(_SIDECAR_MSG)
     assert _loads(result) == {}, result
 
     cookies = _loads(await storage_mirage.mirage_cookie_get())["cookies"]
@@ -200,8 +180,6 @@ async def test_cookie_round_trip(mirage_tools: None) -> None:
     assert match[0]["value"] == "cookie-value", match
 
     cleared = await storage_mirage.mirage_cookie_clear()
-    if _sidecar_no_result(cleared):
-        pytest.skip(_SIDECAR_MSG)
     assert _loads(cleared) == {}, cleared
 
     cookies = _loads(await storage_mirage.mirage_cookie_get())["cookies"]
@@ -243,7 +221,8 @@ async def test_dialog_accept(mirage_tools: None) -> None:
     """alert() -> dialog_list shows it -> accept resolves it (no hang).
 
     dialog_list (event buffer) is real and verified; accept
-    (Page.handleDialog) hits the sidecar bug.
+    (Page.handleDialog) is a no-return command the sidecar answers with an
+    empty result.
     """
     html = """<html><body><script>
       setTimeout(() => alert('kahin-dialog'), 200);
@@ -257,8 +236,6 @@ async def test_dialog_accept(mirage_tools: None) -> None:
     dialog_id = dialogs[0]["dialogId"]
 
     accepted = await dialog_mirage.mirage_dialog_accept(dialog_id)
-    if _sidecar_no_result(accepted):
-        pytest.skip(_SIDECAR_MSG)
     assert _loads(accepted) == {}, accepted
     await asyncio.sleep(0.5)  # dialogClosed event lands
 
@@ -309,12 +286,10 @@ async def test_local_storage_round_trip(mirage_tools: None, tmp_path: Any) -> No
 async def test_emulation_ua_round_trip(mirage_tools: None) -> None:
     """set_user_agent -> fresh document -> navigator.userAgent matches.
 
-    Browser.setUserAgentOverride hits the sidecar bug.
+    Browser.setUserAgentOverride is a no-return command (sidecar fix).
     """
     ua = "KahinE2E/9.9"
     result = await emulation_mirage.mirage_set_user_agent(ua)
-    if _sidecar_no_result(result):
-        pytest.skip(_SIDECAR_MSG)
     assert _loads(result) == {}, result
 
     await _navigate(_doc("<html><body>ua</body></html>"))

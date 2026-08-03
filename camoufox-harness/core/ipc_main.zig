@@ -494,8 +494,17 @@ fn respondFromRaw(a: Allocator, out: *std.array_list.Aligned(u8, null), id: u32,
         try respondErr(a, out, id, code32, msg);
         return;
     }
+    // No-return Juggler commands (Browser.setCookies, Browser.clearCookies,
+    // Browser.setUserAgentOverride, Browser.setDefaultViewport,
+    // Browser.clearCache, Page.close, Page.insertText,
+    // Page.dispatchMouseEvent, Page.handleDialog, ...) reply with just
+    // {"id":N} — neither `result` nor `error` (Playwright tolerates this;
+    // a real failure always carries `error`). A well-formed reply with
+    // neither key is therefore SUCCESS with an empty result — never -32603.
+    // The -32603 path above is reserved for genuinely malformed frames
+    // (unparseable JSON, non-object roots).
     const result = root.object.get("result") orelse {
-        try respondErr(a, out, id, -32603, "Juggler response has no result");
+        try respondOk(a, out, id, "{}");
         return;
     };
     const json = try std.json.Stringify.valueAlloc(a, result, .{});
@@ -996,6 +1005,31 @@ test "router: Browser.* methods go to the root session" {
     const line = try runRequest(&d, "{\"id\":8,\"method\":\"Browser.createBrowserContext\",\"params\":{}}");
     defer testing.allocator.free(line);
     try testing.expectEqualStrings("{\"id\":8,\"result\":{\"browserContextId\":\"ctx-1\"}}\n", line);
+}
+
+test "router: result-less Juggler reply (no-return command) resolves as empty result" {
+    const rig = try testRig();
+    defer {
+        _ = std.os.linux.close(rig.cmd[0]);
+        _ = std.os.linux.close(rig.cmd[1]);
+        _ = std.os.linux.close(rig.resp[0]);
+        _ = std.os.linux.close(rig.resp[1]);
+    }
+    var d = rig.d;
+    defer d.deinit();
+
+    // Browser.setCookies is a no-return Juggler command: the browser
+    // replies {"id":N} with NO result key (and no error). Playwright
+    // treats that as success — the sidecar must answer the caller with an
+    // empty result instead of -32603 "Juggler response has no result".
+    const expected = [_][]const u8{"{\"id\":1,\"method\":\"Browser.setCookies\",\"params\":{\"cookies\":[]}}"};
+    const reply = [_][]const u8{"{\"id\":1}"};
+    const thread = try std.Thread.spawn(.{}, FakePeer.thread, .{ rig.cmd[0], rig.resp[1], &expected, &reply, &[_][]const u8{} });
+    defer thread.join();
+
+    const line = try runRequest(&d, "{\"id\":12,\"method\":\"Browser.setCookies\",\"params\":{\"cookies\":[]}}");
+    defer testing.allocator.free(line);
+    try testing.expectEqualStrings("{\"id\":12,\"result\":{}}\n", line);
 }
 
 test "router: Runtime.evaluate keeps the evaluateWithRetry path" {
