@@ -44,7 +44,31 @@ def test_server_initialize_and_list_tools() -> None:
     assert "kahin_pattern_suggest" in tool_names
     assert "kahin_pattern_forget" in tool_names
     assert "kahin_pattern_stats" in tool_names
-    assert len(tools) == 32
+    # Faz 9 Task 3: 32 existing + 65 new Juggler-native tools = 97.
+    assert len(tools) == 97
+    for name in [
+        "kahin_mirage_query",
+        "kahin_mirage_click",
+        "kahin_mirage_type",
+        "kahin_mirage_key_press",
+        "kahin_mirage_reload",
+        "kahin_mirage_tab_new",
+        "kahin_mirage_tab_list",
+        "kahin_mirage_network_requests",
+        "kahin_mirage_get_response_body",
+        "kahin_mirage_console_log",
+        "kahin_mirage_errors_list",
+        "kahin_mirage_cookie_get",
+        "kahin_mirage_storage_local_get",
+        "kahin_mirage_set_user_agent",
+        "kahin_mirage_set_viewport",
+        "kahin_mirage_dialog_accept",
+        "kahin_mirage_download_list",
+        "kahin_mirage_worker_list",
+        "kahin_mirage_websocket_list",
+        "kahin_engine_health",
+    ]:
+        assert name in tool_names, f"missing tool {name}"
     proc.terminate()
 
 

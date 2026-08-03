@@ -59,3 +59,25 @@ class Obscura(BrowserEngine):
                     ) from None
                 await asyncio.sleep(delay)
                 delay = min(delay * 1.5, 1.0)
+
+    async def call(
+        self, method: str, params: dict[str, Any] | None = None, session_id: str | None = None
+    ) -> dict[str, Any]:
+        """Obscura is CDP: fold the Juggler-native ``Domain.method`` token back
+        into the domain/command pair. session_id is owned by the CDP session
+        model (``self._session_id``), not the caller for this engine."""
+        del session_id
+        domain, _, command = method.partition(".")
+        return await self.send_cdp(domain, command, params)
+
+    def is_alive(self) -> bool:
+        """Process up + WebSocket attached + reader not marked dead."""
+        return (
+            not self._dead
+            and self._process is not None
+            and self._process.returncode is None
+            and self._ws is not None
+        )
+
+    def on_death(self, callback) -> None:
+        self._death_callbacks.append(callback)  # type: ignore[arg-type]

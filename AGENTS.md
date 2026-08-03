@@ -66,7 +66,7 @@ kahin_pattern_query(context="doggystyle")
 kahin_pattern_suggest(partial="navig")
 ```
 
-## Tool Listesi (32 adet)
+## Tool Listesi (97 adet)
 
 ### GRIMOIRE — CDP Bilgi (7)
 | Tool | Ne işe yarar? |
@@ -123,6 +123,100 @@ kahin_pattern_suggest(partial="navig")
 | `kahin_pattern_forget` | Pattern sil |
 | `kahin_pattern_stats` | Pattern istatistikleri |
 
+### MIRAGE — Juggler Native (65) — sadece `engine="mirage"` ile çalışır
+
+#### DOM (12)
+| Tool | Ne işe yarar? |
+|------|---------------|
+| `kahin_mirage_query` | CSS selector ile ilk elementi bul |
+| `kahin_mirage_query_all` | CSS selector ile tüm elementleri bul |
+| `kahin_mirage_click` | Elemente tıkla (gerçek fare olayı) |
+| `kahin_mirage_type` | Elemente metin yaz (Page.insertText) |
+| `kahin_mirage_get_text` | Elementin görünen metnini al |
+| `kahin_mirage_get_attribute` | Element attribute'ünü al |
+| `kahin_mirage_set_attribute` | Element attribute'ü set et |
+| `kahin_mirage_focus` | Elemente odaklan |
+| `kahin_mirage_hover` | Elementin üzerine gel |
+| `kahin_mirage_get_html` | Elementin outerHTML'ini al |
+| `kahin_mirage_wait_selector` | Seçici görünene kadar bekle (timeout) |
+| `kahin_mirage_get_value` | Input elementinin değerini al |
+
+#### Input (7)
+| Tool | Ne işe yarar? |
+|------|---------------|
+| `kahin_mirage_mouse_click` | Koordinatta fare tıklaması |
+| `kahin_mirage_mouse_move` | Fareyi koordinata taşı |
+| `kahin_mirage_mouse_down` / `kahin_mirage_mouse_up` | Fare butonu bas/bırak |
+| `kahin_mirage_key_press` | Tuş kombinasyonu gönder (keyDown+keyUp) |
+| `kahin_mirage_key_text` | Metni tuşlarla yaz |
+| `kahin_mirage_scroll` | Sayfayı kaydır (wheel) |
+
+#### PageEx (6)
+| Tool | Ne işe yarar? |
+|------|---------------|
+| `kahin_mirage_reload` | Sayfayı yenile |
+| `kahin_mirage_go_back` / `kahin_mirage_go_forward` | Geçmişte geri/ileri git |
+| `kahin_mirage_stop` | Sayfa yüklemeyi durdur (window.stop) |
+| `kahin_mirage_frame_tree` | Frame hiyerarşisini göster |
+| `kahin_mirage_page_content` | Tüm sayfa HTML'ini al |
+
+#### Tab/Session (6)
+| Tool | Ne işe yarar? |
+|------|---------------|
+| `kahin_mirage_tab_new` | Yeni sayfa/sekme aç |
+| `kahin_mirage_tab_switch` | Hedef sekmeye geç |
+| `kahin_mirage_tab_close` | Sekmeyi kapat |
+| `kahin_mirage_tab_list` | Açık sekmeleri listele |
+| `kahin_mirage_tab_bring_front` | Sekmeyi öne getir |
+| `kahin_mirage_context_new` | Yeni browser context oluştur |
+
+#### Network/Console (10)
+| Tool | Ne işe yarar? |
+|------|---------------|
+| `kahin_mirage_network_requests` | Network isteklerini listele (event buffer) |
+| `kahin_mirage_get_response_body` | Yanıt gövdesini al (base64 decode) |
+| `kahin_mirage_intercept_requests` / `kahin_mirage_unintercept_requests` | İstek yakalamayı aç/kapat |
+| `kahin_mirage_network_continue` | Yakalanan isteği sürdür (override) |
+| `kahin_mirage_network_abort` | Yakalanan isteği iptal et |
+| `kahin_mirage_cache_disable` | HTTP cache'i kapat/aç |
+| `kahin_mirage_clear_cache` | Tarayıcı cache'ini temizle |
+| `kahin_mirage_console_log` | Console mesajlarını göster (Runtime.console) |
+| `kahin_mirage_errors_list` | Yakalanmamış sayfa hatalarını göster |
+
+#### Storage (6)
+| Tool | Ne işe yarar? |
+|------|---------------|
+| `kahin_mirage_cookie_get` / `kahin_mirage_cookie_set` / `kahin_mirage_cookie_clear` | Çerez oku/yaz/temizle (Browser.*) |
+| `kahin_mirage_storage_local_get` / `kahin_mirage_storage_local_set` | localStorage oku/yaz |
+| `kahin_mirage_storage_session_get` | sessionStorage oku |
+
+#### Emulation (10)
+| Tool | Ne işe yarar? |
+|------|---------------|
+| `kahin_mirage_set_user_agent` | User-Agent override (Browser.setUserAgentOverride) |
+| `kahin_mirage_set_viewport` | Viewport boyutu (Browser.setDefaultViewport) |
+| `kahin_mirage_set_device_scale_factor` | devicePixelRatio override |
+| `kahin_mirage_set_media` | Medya tipi emule (screen/print) |
+| `kahin_mirage_set_touch` | Touch desteği emule |
+| `kahin_mirage_set_color_scheme` | prefers-color-scheme emule |
+| `kahin_mirage_set_reduced_motion` | prefers-reduced-motion emule |
+| `kahin_mirage_set_locale` / `kahin_mirage_set_timezone` | Locale/timezone override |
+| `kahin_mirage_set_geolocation` | Konum emule |
+
+#### Dialog/Download/Worker/WS (7)
+| Tool | Ne işe yarar? |
+|------|---------------|
+| `kahin_mirage_dialog_list` | Açık dialog'ları listele (event buffer) |
+| `kahin_mirage_dialog_accept` / `kahin_mirage_dialog_dismiss` | Dialog kabul et/reddet (Page.handleDialog) |
+| `kahin_mirage_download_list` / `kahin_mirage_download_save` | İndirmeleri listele / diske kaydet |
+| `kahin_mirage_worker_list` | Web worker'ları listele |
+| `kahin_mirage_websocket_list` | WebSocket'leri listele |
+
+#### Engine (1)
+| Tool | Ne işe yarar? |
+|------|---------------|
+| `kahin_engine_health` | Çalışan motor sağlığı (Mirage: Browser.health) |
+
 ## Örnek İş Akışları
 
 ### 1. CDP Komutu Araştırma + Doğrulama + Gönderme
@@ -172,6 +266,33 @@ kahin_kill_session          kahin_event_history         kahin_list_network_reque
 kahin_get_console           kahin_iframe_tree           kahin_pattern_learn
 kahin_pattern_query         kahin_pattern_suggest       kahin_pattern_forget
 kahin_pattern_stats         kahin_healer_stats
+```
+
+65 MIRAGE (Juggler native) tool Faz 9 Task 3'te eklendi (test_phantom +
+test_mirage_ipc ile doğrulandı):
+```
+kahin_mirage_query           kahin_mirage_query_all      kahin_mirage_click
+kahin_mirage_type            kahin_mirage_get_text       kahin_mirage_get_attribute
+kahin_mirage_set_attribute   kahin_mirage_focus          kahin_mirage_hover
+kahin_mirage_get_html        kahin_mirage_wait_selector  kahin_mirage_get_value
+kahin_mirage_mouse_click     kahin_mirage_mouse_move     kahin_mirage_mouse_down
+kahin_mirage_mouse_up        kahin_mirage_key_press      kahin_mirage_key_text
+kahin_mirage_scroll          kahin_mirage_reload         kahin_mirage_go_back
+kahin_mirage_go_forward      kahin_mirage_stop           kahin_mirage_frame_tree
+kahin_mirage_page_content    kahin_mirage_tab_new        kahin_mirage_tab_switch
+kahin_mirage_tab_close       kahin_mirage_tab_list       kahin_mirage_tab_bring_front
+kahin_mirage_context_new     kahin_mirage_network_requests kahin_mirage_get_response_body
+kahin_mirage_intercept_requests kahin_mirage_unintercept_requests kahin_mirage_network_continue
+kahin_mirage_network_abort   kahin_mirage_cache_disable  kahin_mirage_clear_cache
+kahin_mirage_console_log     kahin_mirage_errors_list    kahin_mirage_cookie_get
+kahin_mirage_cookie_set      kahin_mirage_cookie_clear   kahin_mirage_storage_local_get
+kahin_mirage_storage_local_set kahin_mirage_storage_session_get kahin_mirage_set_user_agent
+kahin_mirage_set_viewport    kahin_mirage_set_device_scale_factor kahin_mirage_set_media
+kahin_mirage_set_touch       kahin_mirage_set_color_scheme kahin_mirage_set_reduced_motion
+kahin_mirage_set_locale      kahin_mirage_set_timezone   kahin_mirage_set_geolocation
+kahin_mirage_dialog_list     kahin_mirage_dialog_accept  kahin_mirage_dialog_dismiss
+kahin_mirage_download_list   kahin_mirage_download_save  kahin_mirage_worker_list
+kahin_mirage_websocket_list  kahin_engine_health
 ```
 
 ## Önemli Notlar

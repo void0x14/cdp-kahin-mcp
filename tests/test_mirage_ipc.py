@@ -1,4 +1,8 @@
-"""Mirage engine tests: fake-sidecar unit tests + real Camoufox integration."""
+"""Mirage engine tests: fake-sidecar unit tests + real Camoufox integration.
+
+Faz 9 Task 3: the wire is the Juggler-native call schema
+``Mirage.call(method, params, session_id)`` — send_cdp is gone.
+"""
 
 import asyncio
 from pathlib import Path
@@ -19,9 +23,14 @@ for line in sys.stdin:
     if params.get("slow"):
         time.sleep(5)
         continue
+    if req["method"] == "Browser.health":
+        print(json.dumps({"id": rid, "result": {"alive": True, "pid": 1}}), flush=True)
+        continue
     if params.get("emit_event"):
-        print(json.dumps({"method": "Console.messageAdded",
-                          "params": {"message": {"type": "log", "args": ["hi"], "url": "", "line": 1, "column": 1}},
+        print(json.dumps({"method": "Runtime.console",
+                          "params": {"type": "log",
+                                     "args": [{"type": "string", "value": "hi"}],
+                                     "location": {"url": "", "lineNumber": 1, "columnNumber": 1}},
                           "sessionId": "sess-1"}), flush=True)
     print(json.dumps({"id": rid, "result": {"echo": req["method"]}}), flush=True)
 """
@@ -38,27 +47,27 @@ def fake_sidecar(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 @pytest.mark.asyncio
-async def test_send_cdp_id_matching(fake_sidecar: Path) -> None:
+async def test_call_id_matching(fake_sidecar: Path) -> None:
     engine = Mirage()
     await engine.start()
     assert engine._process is not None
     try:
-        result = await engine.send_cdp("Browser", "createBrowserContext")
+        result = await engine.call("Browser.createBrowserContext")
         assert result == {"echo": "Browser.createBrowserContext"}
-        result = await engine.send_cdp("Runtime", "evaluate", {"expression": "1+1"})
+        result = await engine.call("Runtime.evaluate", {"expression": "1+1"})
         assert result["echo"] == "Runtime.evaluate"
     finally:
         await engine.stop()
 
 
 @pytest.mark.asyncio
-async def test_send_cdp_timeout(fake_sidecar: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_call_timeout(fake_sidecar: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(mirage_mod, "_REQUEST_TIMEOUT", 0.3)
     engine = Mirage()
     await engine.start()
     try:
         with pytest.raises(RuntimeError, match="timeout"):
-            await engine.send_cdp("Runtime", "evaluate", {"slow": True})
+            await engine.call("Runtime.evaluate", {"slow": True})
     finally:
         await engine.stop()
 
@@ -70,10 +79,10 @@ async def test_event_dispatch(fake_sidecar: Path) -> None:
     await engine.on_event(lambda evt: received.append(evt))
     await engine.start()
     try:
-        await engine.send_cdp("Runtime", "evaluate", {"emit_event": True})
+        await engine.call("Runtime.evaluate", {"emit_event": True})
         await asyncio.sleep(0.2)
         assert len(received) == 1
-        assert received[0].method == "Console.messageAdded"
+        assert received[0].method == "Runtime.console"
         assert received[0].session_id == "sess-1"
     finally:
         await engine.stop()
@@ -108,18 +117,19 @@ async def test_mirage_full_flow_real_camoufox() -> None:
     await engine.on_event(lambda evt: events.append(evt))
 
     try:
-        ctx_id = (await engine.send_cdp("Browser", "createBrowserContext"))["browserContextId"]
+        ctx_id = (await engine.call("Browser.createBrowserContext"))["browserContextId"]
         assert ctx_id
 
-        page = await engine.send_cdp("Browser", "newPage", {"browserContextId": ctx_id})
+        page = await engine.create_page("about:blank", browser_context_id=ctx_id)
         target_id = page["targetId"]
         assert target_id
+        assert page["sessionId"]
         await asyncio.sleep(0.5)  # idle gap: attachedToTarget/frame/context events flow upward
 
-        nav = await engine.send_cdp("Page", "navigate", {"url": "about:blank"})
+        nav = await engine.call("Page.navigate", {"url": "about:blank"})
         assert nav.get("frameId")
 
-        result = await engine.send_cdp("Runtime", "evaluate", {"expression": "1+1"})
+        result = await engine.call("Runtime.evaluate", {"expression": "1+1"})
         assert result["result"]["value"] == 2
 
         shot = await engine.screenshot(format="png")

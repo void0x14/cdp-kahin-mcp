@@ -1,14 +1,50 @@
-"""engine.py — engine health registry (Mirage/Camoufox side).
+"""engine.py — engine health tool.
 
-Task 3 registers ``kahin_engine_health`` here once Mirage.is_alive /
-on_death liveness lands; until then this module is an empty stub.
+Faz 9 Task 3: ``kahin_engine_health`` probes the running engine directly.
+Mirage answers with the sidecar-local ``Browser.health`` (never forwarded to
+Camoufox); shadow/CDP engines get a lightweight liveness answer from the
+engine's own ``is_alive()`` plus connection metadata.
 """
 
-# Registration stub (filled in Task 3):
-#
-# from kahin.oracle import mcp
-# from kahin.tools._common import _RO
-#
-# @mcp.tool(name="kahin_engine_health", annotations=_RO)
-# async def engine_health() -> str:
-#     """..."""
+from __future__ import annotations
+
+import orjson
+
+from kahin import _state as state
+from kahin.oracle import mcp
+from kahin.tools._common import _RO, _healer_ref
+from kahin.the_twins.mirage import Mirage
+
+
+@mcp.tool(name="kahin_engine_health", annotations=_RO)
+async def engine_health() -> str:
+    """Health of the running browser engine. Mirage: Browser.health (sidecar).
+    Returns engine type, alive flag and (for mirage) the health payload."""
+    async with _healer_ref.safe("kahin_engine_health"):
+        engine = state._current_engine
+        if engine is None:
+            return _dump({"engine": None, "error": "No browser engine running."})
+        if isinstance(engine, Mirage):
+            try:
+                result = await engine.call("Browser.health")
+            except Exception as e:  # noqa: BLE001
+                return _dump({
+                    "engine": "mirage",
+                    "alive": engine.is_alive(),
+                    "error": f"Browser.health failed: {e}",
+                })
+            return _dump({"engine": "mirage", "alive": engine.is_alive(), "health": result})
+        try:
+            proc = engine._proc  # type: ignore[attr-defined]
+            pid = proc.pid if proc and proc.poll() is None else None
+        except Exception:  # noqa: BLE001
+            pid = None
+        return _dump({
+            "engine": type(engine).__name__.lower(),
+            "alive": engine.is_alive(),
+            "pid": pid,
+        })
+
+
+def _dump(payload: dict) -> str:
+    return orjson.dumps(payload, option=orjson.OPT_INDENT_2).decode()

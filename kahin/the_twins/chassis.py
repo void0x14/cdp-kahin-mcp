@@ -36,7 +36,13 @@ class EventData:
 
 
 class BrowserEngine(ABC):
-    """Shared CDP engine base. Subclasses only override start()."""
+    """Shared browser engine base. Subclasses implement start() and the
+    liveness trio call()/is_alive()/on_death().
+
+    Faz 9 Task 3: ``_dead`` (reader EOF / WS close) and death callbacks live
+    here so both engines report liveness the same way; ``_mark_dead()`` is
+    invoked from the shared background reader.
+    """
 
     def __init__(self) -> None:
         self._process: asyncio.subprocess.Process | None = None
@@ -47,10 +53,37 @@ class BrowserEngine(ABC):
         self._http: httpx.AsyncClient | None = None
         self._pending: dict[int, asyncio.Future[dict[str, Any]]] = {}
         self._reader: asyncio.Task[None] | None = None
+        self._dead: bool = False
+        self._death_callbacks: list[Callable[[], Awaitable[None] | None]] = []
 
     @abstractmethod
     async def start(self, headless: bool = True, port: int = 0, **kwargs: Any) -> EngineContext:
         ...
+
+    @abstractmethod
+    async def call(self, method: str, params: dict[str, Any] | None = None, session_id: str | None = None) -> dict[str, Any]:
+        """Run one protocol method (Juggler-native ``Domain.method`` token)."""
+
+    @abstractmethod
+    def is_alive(self) -> bool:
+        """True while the engine process is up and the transport is healthy."""
+
+    @abstractmethod
+    def on_death(self, callback: Callable[[], Awaitable[None] | None]) -> None:
+        """Register a callback fired when the transport dies (reader EOF)."""
+
+    def _mark_dead(self) -> None:
+        """Reader EOF / WS close: record death and fire death callbacks once."""
+        if self._dead:
+            return
+        self._dead = True
+        for cb in self._death_callbacks:
+            try:
+                result = cb()
+                if asyncio.iscoroutine(result):
+                    asyncio.get_running_loop().create_task(result)
+            except Exception:  # noqa: BLE001
+                logger.exception("death callback failed")
 
     async def _connect_ws(self, ws_url: str) -> ClientConnection:
         """Connect to a CDP WebSocket and start the background reader task."""
@@ -94,6 +127,8 @@ class BrowserEngine(ABC):
             except Exception:  # noqa: BLE001
                 # WS closed or the engine was stopped; the connection is dead.
                 logger.debug("CDP reader stopped: %s", type(self).__name__)
+            finally:
+                self._mark_dead()
 
         self._reader = asyncio.create_task(reader())
 

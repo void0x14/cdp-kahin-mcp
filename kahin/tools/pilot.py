@@ -16,7 +16,7 @@ from typing import Any
 import orjson
 
 from kahin import _state as state
-from kahin.oracle import mcp, _on_cdp_event, _on_console_event, _on_network_event
+from kahin.oracle import mcp, _on_cdp_event, _on_console_event, _on_engine_death, _on_network_event
 from kahin.the_twins.mirage import Mirage
 from kahin.the_twins.shadow import Obscura
 from kahin.tools._common import (
@@ -43,7 +43,16 @@ async def browser_start(engine: str = "shadow", headless: bool = True, port: int
         return f"Unknown engine: {engine}. Use 'shadow', 'mirage' or 'camoufox'."
 
     if state._current_engine is not None:
-        return "Engine already running. Stop it first with kahin_browser_stop."
+        if state._current_engine.is_alive():
+            return "Engine already running. Stop it first with kahin_browser_stop."
+        # Dead engine (crash / reader EOF): replace it instead of refusing.
+        logger.warning("replacing dead engine: %s", type(state._current_engine).__name__)
+        try:
+            await state._current_engine.stop()
+        except Exception:  # noqa: BLE001
+            pass
+        state._current_engine = None
+        state.clear_state()
 
     async with _healer_ref.safe("kahin_browser_start", engine=engine, headless=headless, port=port):
         if engine == "shadow":
@@ -68,16 +77,12 @@ async def browser_start(engine: str = "shadow", headless: bool = True, port: int
             state._current_engine = None
             raise RuntimeError(f"Unexpected error starting {engine}: {e}") from e
 
-        # Register event collectors
+        # Register event collectors + liveness hook (reader-death clears state)
         await state._current_engine.on_event(_on_cdp_event)
         await state._current_engine.on_event(_on_network_event)
         await state._current_engine.on_event(_on_console_event)
-
-        try:
-            await state._current_engine.send_cdp("Network", "enable")
-            await state._current_engine.send_cdp("Console", "enable")
-        except Exception as e:
-            logger.warning("Failed to enable domains: %s", e)
+        eng = state._current_engine
+        eng.on_death(lambda: _on_engine_death(eng))
 
         return orjson.dumps({"status": "started", "engine": engine, "port": actual_port}, option=orjson.OPT_INDENT_2).decode()
 

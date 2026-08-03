@@ -35,8 +35,22 @@ def _on_network_event(evt: EventData) -> None:
 
 
 def _on_console_event(evt: EventData) -> None:
-    if evt.method == "Console.messageAdded":
-        state._console_messages.append(evt.params.get("message", {}))
+    if evt.method == "Runtime.console":
+        args = [a.get("value") for a in evt.params.get("args", []) if isinstance(a, dict)]
+        state._console_messages.append({
+            "type": evt.params.get("type"),
+            "args": args,
+            "location": evt.params.get("location"),
+            "session_id": evt.session_id,
+        })
+
+
+def _on_engine_death(engine) -> None:
+    """Reader EOF: the engine's transport died. Clear it from global state so
+    tools report 'no engine' instead of calling into a corpse."""
+    if state._current_engine is engine:
+        state._current_engine = None
+        state.clear_state()
 
 
 def main() -> None:

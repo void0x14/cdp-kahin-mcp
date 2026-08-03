@@ -22,6 +22,7 @@ import orjson
 from kahin import _state as state
 from kahin._healer import get_healer
 from kahin.residual_self.fate import FateDB
+from kahin.the_twins.mirage import Mirage
 from kahin.the_source.architect import SchemaEngine
 
 logger = logging.getLogger(__name__)
@@ -67,13 +68,21 @@ _DW = {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, 
 
 
 async def _safe_cdp(domain: str, command: str, params: dict[str, Any] | None = None) -> str:
-    """Execute CDP with error handling + auto-education. Returns JSON string."""
+    """Execute CDP with error handling + auto-education. Returns JSON string.
+
+    Engine-agnostic: Mirage (Juggler) folds to ``call("Domain.command")``,
+    CDP engines keep ``send_cdp(domain, command)``.
+    """
     err = await _require_engine()
     if err:
         return err
     engine = state._current_engine
     try:
-        result = await engine.send_cdp(domain, command, params or {})  # type: ignore[union-attr]
+        method = f"{domain}.{command}"
+        if isinstance(engine, Mirage):
+            result = await engine.call(method, params or {})
+        else:
+            result = await engine.send_cdp(domain, command, params or {})  # type: ignore[union-attr]
         return orjson.dumps(result, option=orjson.OPT_INDENT_2).decode()
     except RuntimeError as e:
         msg = str(e)
@@ -91,7 +100,76 @@ async def _safe_cdp(domain: str, command: str, params: dict[str, Any] | None = N
 
 
 async def _require_engine() -> str | None:
-    """Ensure engine is running. Returns error message or None."""
-    if state._current_engine is None:
+    """Ensure engine is running and alive. Returns error message or None.
+
+    A dead engine is evicted from global state (buffers cleared) so the next
+    tool call reports 'no browser engine' and browser_start replaces it.
+    """
+    engine = state._current_engine
+    if engine is None:
         return "No browser engine running. Use kahin_browser_start first."
+    if not engine.is_alive():
+        state._current_engine = None
+        state.clear_state()
+        return "Browser engine is dead (crashed). Use kahin_browser_start to restart."
     return None
+
+
+# --- Mirage (Juggler) tool plumbing ---------------------------------------
+
+
+async def _require_mirage() -> str | None:
+    """Mirage engine required: returns an error string, or None when fine."""
+    err = await _require_engine()
+    if err:
+        return err
+    if not isinstance(state._current_engine, Mirage):
+        return (
+            "This tool requires the mirage/camoufox (Juggler) engine. "
+            "Start it with kahin_browser_start(engine='mirage')."
+        )
+    return None
+
+
+def _mirage_engine() -> Mirage:
+    """The running Mirage instance — caller must have checked _require_mirage."""
+    return state._current_engine  # type: ignore[return-value]
+
+
+async def _mirage_call(method: str, params: dict[str, Any] | None = None) -> str:
+    """Run one Juggler method through Mirage.call(); answer is pretty JSON."""
+    err = await _require_mirage()
+    if err:
+        return err
+    try:
+        result = await _mirage_engine().call(method, params or {})
+        return orjson.dumps(result, option=orjson.OPT_INDENT_2).decode()
+    except RuntimeError as e:
+        return orjson.dumps({
+            "error": f"Juggler call failed: {e}",
+            "hint": "Check the engine with kahin_engine_health.",
+        }, option=orjson.OPT_INDENT_2).decode()
+    except Exception as e:
+        return orjson.dumps({
+            "error": f"Connection lost: {e}",
+            "hint": "Browser engine may have crashed. Use kahin_browser_stop then kahin_browser_start.",
+        }).decode()
+
+
+async def _mirage_evaluate(expression: str) -> str:
+    """Runtime.evaluate via Mirage; returns result.value as pretty JSON."""
+    err = await _require_mirage()
+    if err:
+        return err
+    try:
+        result = await _mirage_engine().call("Runtime.evaluate", {"expression": expression})
+    except RuntimeError as e:
+        return orjson.dumps({"error": f"Juggler evaluate failed: {e}"}, option=orjson.OPT_INDENT_2).decode()
+    except Exception as e:
+        return orjson.dumps({"error": f"Connection lost: {e}"}).decode()
+    if result.get("exceptionDetails"):
+        return orjson.dumps({
+            "error": "evaluate threw",
+            "exception": result["exceptionDetails"],
+        }, option=orjson.OPT_INDENT_2).decode()
+    return orjson.dumps((result.get("result") or {}).get("value"), option=orjson.OPT_INDENT_2).decode()
