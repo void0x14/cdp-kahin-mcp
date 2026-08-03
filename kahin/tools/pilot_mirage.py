@@ -35,8 +35,6 @@ from kahin.tools._common import (
     _require_mirage,
 )
 
-_PAGE_DOMAINS = ("Page.", "Runtime.", "Network.", "Heap.")
-
 
 def _q(selector: str) -> str:
     """Python string -> JS string literal (quotes/unicode safe)."""

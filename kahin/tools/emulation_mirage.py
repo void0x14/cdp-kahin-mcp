@@ -4,7 +4,7 @@ Faz 9 Task 3: every emulation override maps 1:1 to a real Juggler method
 (verified against Protocol.js):
 
 - set_user_agent            -> Browser.setUserAgentOverride
-- set_viewport / dsf        -> Browser.setDefaultViewport / Page.setViewportSize
+- set_viewport / dsf        -> Browser.setDefaultViewport
 - set_media / color / motion-> Page.setEmulatedMedia / Browser.setColorScheme
                                / Browser.setReducedMotion
 - set_touch                 -> Browser.setTouchOverride
@@ -26,7 +26,31 @@ from kahin.tools._common import (
     _RW,
     _healer_ref,
     _mirage_call,
+    _mirage_engine,
+    _require_mirage,
 )
+
+# Last viewportSize sent by mirage_set_viewport — lets
+# mirage_set_device_scale_factor rebuild a full viewport without needing a
+# loaded document (Runtime.evaluate requires a page).
+_last_viewport_size: dict[str, Any] | None = None
+
+
+async def _read_viewport_size() -> dict[str, Any] | None:
+    """Current viewport size via Runtime.evaluate (innerWidth/innerHeight)."""
+    err = await _require_mirage()
+    if err:
+        return None
+    try:
+        raw = await _mirage_engine().call("Runtime.evaluate", {
+            "expression": "(() => ({width: window.innerWidth, height: window.innerHeight}))()",
+        })
+    except RuntimeError:
+        return None
+    size = (raw.get("result") or {}).get("value")
+    if not isinstance(size, dict) or not size.get("width") or not size.get("height"):
+        return None
+    return {"width": int(size["width"]), "height": int(size["height"])}
 
 
 @mcp.tool(name="kahin_mirage_set_user_agent", annotations=_RW)
@@ -39,24 +63,28 @@ async def mirage_set_user_agent(user_agent: str) -> str:
 
 @mcp.tool(name="kahin_mirage_set_viewport", annotations=_RW)
 async def mirage_set_viewport(
-    width: int, height: int, device_scale_factor: float | None = None, is_mobile: bool | None = None,
+    width: int, height: int, device_scale_factor: float | None = None,
 ) -> str:
     """Mirage: set the default viewport size (Browser.setDefaultViewport)."""
     async with _healer_ref.safe("kahin_mirage_set_viewport", width=width, height=height):
-        viewport: dict[str, Any] = {"viewportSize": {"width": width, "height": height}}
+        global _last_viewport_size
+        _last_viewport_size = {"width": width, "height": height}
+        viewport: dict[str, Any] = {"viewportSize": _last_viewport_size}
         if device_scale_factor is not None:
             viewport["deviceScaleFactor"] = device_scale_factor
-        if is_mobile is not None:
-            viewport["isMobile"] = is_mobile
         return await _mirage_call("Browser.setDefaultViewport", {"viewport": viewport})
 
 
 @mcp.tool(name="kahin_mirage_set_device_scale_factor", annotations=_RW)
 async def mirage_set_device_scale_factor(device_scale_factor: float) -> str:
-    """Mirage: override devicePixelRatio (Page.setViewportSize with
-    deviceScaleFactor; viewportSize stays as-is since it is nullable)."""
+    """Mirage: override devicePixelRatio (Browser.setDefaultViewport with the
+    current viewportSize + the new deviceScaleFactor)."""
     async with _healer_ref.safe("kahin_mirage_set_device_scale_factor", device_scale_factor=device_scale_factor):
-        return await _mirage_call("Page.setViewportSize", {"deviceScaleFactor": device_scale_factor})
+        size = _last_viewport_size or await _read_viewport_size()
+        viewport: dict[str, Any] = {"deviceScaleFactor": float(device_scale_factor)}
+        if size:
+            viewport["viewportSize"] = size
+        return await _mirage_call("Browser.setDefaultViewport", {"viewport": viewport})
 
 
 @mcp.tool(name="kahin_mirage_set_media", annotations=_RW)

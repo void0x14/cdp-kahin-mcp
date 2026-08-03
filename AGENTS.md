@@ -194,8 +194,8 @@ kahin_pattern_suggest(partial="navig")
 | Tool | Ne işe yarar? |
 |------|---------------|
 | `kahin_mirage_set_user_agent` | User-Agent override (Browser.setUserAgentOverride) |
-| `kahin_mirage_set_viewport` | Viewport boyutu (Browser.setDefaultViewport) |
-| `kahin_mirage_set_device_scale_factor` | devicePixelRatio override |
+| `kahin_mirage_set_viewport` | Viewport boyutu + opsiyonel devicePixelRatio (Browser.setDefaultViewport; isMobile Juggler'da yok, kaldırıldı) |
+| `kahin_mirage_set_device_scale_factor` | devicePixelRatio override (Browser.setDefaultViewport, mevcut viewport korunur) |
 | `kahin_mirage_set_media` | Medya tipi emule (screen/print) |
 | `kahin_mirage_set_touch` | Touch desteği emule |
 | `kahin_mirage_set_color_scheme` | prefers-color-scheme emule |

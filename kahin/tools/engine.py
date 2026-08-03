@@ -34,11 +34,8 @@ async def engine_health() -> str:
                     "error": f"Browser.health failed: {e}",
                 })
             return _dump({"engine": "mirage", "alive": engine.is_alive(), "health": result})
-        try:
-            proc = engine._proc  # type: ignore[attr-defined]
-            pid = proc.pid if proc and proc.poll() is None else None
-        except Exception:  # noqa: BLE001
-            pid = None
+        proc = engine._process  # BrowserEngine declares _process on the base class
+        pid = proc.pid if proc is not None and proc.poll() is None else None
         return _dump({
             "engine": type(engine).__name__.lower(),
             "alive": engine.is_alive(),
