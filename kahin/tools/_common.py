@@ -5,7 +5,7 @@ modules only carry their own ``@mcp.tool`` registrations.
 
 NOTES
 - The ``mcp`` instance does NOT live here — it lives in ``kahin/oracle.py``;
-  tool modules do ``from kahin.oracle import mcp``.
+  tool modules do ``from kahin._mcp import mcp``.
 - Mutable runtime state (``_current_engine``, event/network/console buffers)
   lives in ``kahin._state``; tools reach it through the ``state`` module
   reference so assignments and appends share one object set across modules.

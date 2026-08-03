@@ -28,7 +28,7 @@ import os
 
 import orjson
 
-from kahin.oracle import mcp
+from kahin._mcp import mcp
 from kahin.tools._common import (
     _RW,
     _healer_ref,

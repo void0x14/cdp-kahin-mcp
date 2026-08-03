@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import orjson
 
-from kahin.oracle import mcp
+from kahin._mcp import mcp
 from kahin.tools._common import _RO, _get_schema
 
 

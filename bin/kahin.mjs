@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// kahin global launcher — kod tabanındaki kahin MCP server'ı çalıştırır.
-// Kurulum: pnpm add -g @kahinmcp/kahin
+// kahin global launcher — gömülü wheel'den kahin MCP server'ı çalıştırır.
+// Kurulum: pnpm add -g @kahinmcp/kahin  (postinstall venv + wheel kurar)
 
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -20,6 +20,13 @@ function sh(cmd, args, opts = {}) {
 }
 
 async function setup() {
+  // venv yoksa gömülü wheel'den kur (postinstall atlanmışsa / bozuksa)
+  const { installPython } = await import("./setup.mjs");
+  const res = await installPython();
+  if (res && res.error) {
+    process.stderr.write(`[kahin] python kurulumu başarısız (çıkış ${res.error})\n`);
+    process.exit(1);
+  }
   const python = existsSync(PY) ? PY : (process.env.KAHIN_PY || "python3");
   const check = await sh(python, ["-c", "import kahin"], { stdio: ["ignore", "pipe", "pipe"] });
   if (check !== 0) {
@@ -32,8 +39,8 @@ async function setup() {
 const args = process.argv.slice(2);
 
 if (args[0] === "setup") {
-  const { setup } = await import("./setup.mjs");
-  setup();
+  const { setup: registerClients } = await import("./setup.mjs");
+  registerClients();
   process.exit(0);
 }
 

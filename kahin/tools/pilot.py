@@ -16,7 +16,8 @@ from typing import Any
 import orjson
 
 from kahin import _state as state
-from kahin.oracle import mcp, _on_cdp_event, _on_console_event, _on_engine_death, _on_network_event
+from kahin._mcp import mcp
+from kahin.oracle import _on_cdp_event, _on_console_event, _on_engine_death, _on_network_event
 from kahin.the_twins.mirage import Mirage
 from kahin.the_twins.shadow import Obscura
 from kahin.tools._common import (

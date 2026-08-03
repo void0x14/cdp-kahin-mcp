@@ -10,15 +10,9 @@ from __future__ import annotations
 
 import time
 
-from mcp.server.fastmcp import FastMCP
-
 from kahin import _state as state
+from kahin._mcp import mcp  # noqa: F401  (re-exported for the old import path)
 from kahin.the_twins.chassis import EventData
-
-mcp = FastMCP(
-    name="kahin",
-    instructions="I am the Oracle. Always validate CDP commands before sending. Ports 9222 and 9240 are RESERVED.",
-)
 
 
 def _on_cdp_event(evt: EventData) -> None:

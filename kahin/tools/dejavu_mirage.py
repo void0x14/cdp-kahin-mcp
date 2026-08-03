@@ -19,7 +19,7 @@ from typing import Any
 import orjson
 
 from kahin import _state as state
-from kahin.oracle import mcp
+from kahin._mcp import mcp
 from kahin.tools._common import (
     _DW,
     _RO,

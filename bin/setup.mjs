@@ -10,6 +10,8 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 const HOME = homedir();
 const isWin = process.platform === "win32";
@@ -319,6 +321,56 @@ export function setup() {
   return { installed };
 }
 
+const KAHIN_HOME = process.env.KAHIN_HOME || join(homedir(), ".local", "share", "kahin");
+const KAHIN_VENV = join(KAHIN_HOME, "venv");
+const KAHIN_PY = process.platform === "win32" ? join(KAHIN_VENV, "Scripts", "python.exe") : join(KAHIN_VENV, "bin", "python");
+const KAHIN_WHEEL = join(dirname(fileURLToPath(import.meta.url)), "..", "lib", "kahin-0.3.1-py3-none-any.whl");
+
+// Gömülü wheel'i venv'e kurar. Postinstall'da ve `kahin setup`'ta çalışır.
+// PyPI'a bağımlı DEĞİL — wheel paketle birlikte gelir.
+export async function installPython() {
+  if (process.env.KAHIN_SKIP_PYTHON) {
+    log("python kurulumu atlandı (KAHIN_SKIP_PYTHON)");
+    return { skipped: true };
+  }
+  if (!existsSync(KAHIN_WHEEL)) {
+    log(`wheel bulunamadı: ${KAHIN_WHEEL} — kurulum atlandı (geliştirme ortamı?)`);
+    return { skipped: true };
+  }
+  const python3 = process.env.KAHIN_PYTHON || "python3";
+  const args = ["-m", "venv", KAHIN_VENV];
+  if (!existsSync(join(KAHIN_VENV, "pyvenv.cfg"))) {
+    log(`venv oluşturuluyor: ${KAHIN_VENV}`);
+    const code = await run(python3, args);
+    if (code !== 0) {
+      log(`venv oluşturulamadı (${python3} ${args.join(" ")} — çıkış ${code})`);
+      return { error: code };
+    }
+  }
+  const check = await run(KAHIN_PY, ["-c", "import kahin; print(kahin.__version__)"]);
+  if (check === 0) {
+    log("kahin zaten kurulu, atlandı");
+    return { installed: true };
+  }
+  log(`wheel kuruluyor: ${KAHIN_WHEEL}`);
+  const code = await run(KAHIN_PY, ["-m", "pip", "install", "--upgrade", KAHIN_WHEEL]);
+  if (code !== 0) {
+    log(`wheel kurulamadı (çıkış ${code})`);
+    return { error: code };
+  }
+  log("kahin python paketi kuruldu");
+  return { installed: true };
+}
+
+function run(cmd, args) {
+  return new Promise((resolve) => {
+    const c = spawn(cmd, args, { stdio: ["ignore", "ignore", "pipe"] });
+    c.stderr.on("data", (d) => process.stderr.write(`[kahin] ${d}`));
+    c.on("close", (code) => resolve(code));
+  });
+}
+
 if (process.argv[1] && process.argv[1].endsWith("setup.mjs")) {
   setup();
+  installPython();
 }

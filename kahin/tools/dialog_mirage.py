@@ -25,7 +25,7 @@ from typing import Any
 import orjson
 
 from kahin import _state as state
-from kahin.oracle import mcp
+from kahin._mcp import mcp
 from kahin.tools._common import _RO, _RW, _healer_ref, _mirage_call
 
 
