@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.3.4] — 2026-08-05
+
+### Eklenen
+- Mirage/Juggler için gerçek-zamanlı DOM stream: bounded semantic snapshot,
+  cursor tabanlı MutationObserver + input/focus/click/change event delta'ları,
+  reset/dropped sinyalleri ve canlı nodeId action yüzeyi.
+- `kahin_mirage_dom_start`, `kahin_mirage_dom_snapshot`,
+  `kahin_mirage_dom_events`, `kahin_mirage_dom_action`,
+  `kahin_mirage_dom_stop` olmak üzere 5 yeni tool.
+- Ajanların source okumadan kullanacağı [AI-native Juggler kılavuzu](docs/juggler-ai-native.md).
+
+### Değişen
+- MCP server instructions artık adaptive Mirage DOM akışını, cursor/reset ve
+  canlı nodeId kurallarını doğrudan ajana bildiriyor.
+
+### Testler
+- Gerçek Camoufox e2e: DOM snapshot + delta + canlı type/click action ve
+  navigation sonrası stream reset regresyonları.
+
 Tüm önemli değişiklikler bu dosyada tutulur. Format: [Keep a Changelog](https://keepachangelog.com/tr/1.1.0/) — [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.3.3] — 2026-08-05
@@ -103,6 +122,7 @@ Tüm önemli değişiklikler bu dosyada tutulur. Format: [Keep a Changelog](http
 - Zig Juggler harness: pipe transport, Browser/Page/Runtime/Network/Input/Emulation adapters, interception, process manager, perf + crash-recovery
 - CDP ansiklopedisi: 56 domain, 667 komut, 237 event, 609 type (Chrome 148)
 
+[0.3.4]: https://gitlab.com/void0x14/kahin-mcp/-/compare/v0.3.3...v0.3.4
 [0.3.3]: https://gitlab.com/void0x14/kahin-mcp/-/compare/v0.3.2...v0.3.3
 [0.3.2]: https://gitlab.com/void0x14/kahin-mcp/-/compare/v0.3.1...v0.3.2
 [0.2.0]: https://gitlab.com/void0x14/kahin-mcp/-/compare/v0.1.8...v0.2.0

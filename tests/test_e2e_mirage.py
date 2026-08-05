@@ -41,7 +41,7 @@ from pytest_asyncio import fixture as async_fixture
 
 from kahin import _state as state
 from kahin.the_twins import mirage as mirage_mod
-from kahin.tools import dialog_mirage, emulation_mirage, engine, pilot
+from kahin.tools import dialog_mirage, dom_stream_mirage, emulation_mirage, engine, pilot
 from kahin.tools import pilot_mirage, storage_mirage, trainman_mirage
 
 
@@ -278,3 +278,76 @@ async def test_engine_health_live(mirage_tools: None) -> None:
     assert health["engine"] == "mirage", health
     assert health["alive"] is True, health
     assert health["health"]["alive"] is True, health
+
+
+@pytest.mark.asyncio
+async def test_dom_stream_snapshot_delta_and_live_action(mirage_tools: None) -> None:
+    """MutationObserver deltas and node actions stay tied to live DOM nodes."""
+    await _navigate(_doc("""<html><body>
+      <input id="name" placeholder="Name">
+      <div id="out">initial</div>
+      <script>setTimeout(() => {
+        document.querySelector('#out').textContent = 'loaded';
+        const button = document.createElement('button');
+        button.id = 'later'; button.textContent = 'Later';
+        button.onclick = () => { window.kahinClicked = true; };
+        document.body.append(button);
+      }, 120);</script>
+    </body></html>"""))
+    started = _loads(await dom_stream_mirage.mirage_dom_start(max_events=128))
+    snap = _loads(await dom_stream_mirage.mirage_dom_snapshot(max_nodes=100, include_hidden=True))
+
+    def find(node: dict[str, Any], tag: str) -> dict[str, Any] | None:
+        if node.get("tag") == tag:
+            return node
+        for child in node.get("children") or []:
+            found = find(child, tag)
+            if found:
+                return found
+        return None
+
+    input_node = find(snap["root"], "input")
+    assert input_node and input_node["actions"] == ["focus", "type"], snap
+    await asyncio.sleep(0.4)
+    events = _loads(await dom_stream_mirage.mirage_dom_events(
+        after_seq=snap["cursor"], stream_id=started["stream"]["streamId"], wait_ms=1000, limit=20,
+    ))
+    assert events["reset"] is False, events
+    assert events["events"], events
+    assert any(event["type"] == "childList" for event in events["events"]), events
+
+    acted = _loads(await dom_stream_mirage.mirage_dom_action(input_node["nodeId"], "type", text="Ada"))
+    assert acted["target"]["nodeId"] == input_node["nodeId"], acted
+    value = _loads(await pilot.evaluate(expression="document.querySelector('#name').value"))
+    assert value["result"]["value"] == "Ada", value
+    input_events = _loads(await dom_stream_mirage.mirage_dom_events(
+        after_seq=events["cursor"],
+        stream_id=started["stream"]["streamId"],
+        wait_ms=1000,
+        limit=20,
+    ))
+    assert any(
+        event.get("type") == "event" and event.get("event") == "input"
+        for event in input_events["events"]
+    ), input_events
+
+    later = _loads(await dom_stream_mirage.mirage_dom_snapshot(selector="#later"))
+    clicked = _loads(await dom_stream_mirage.mirage_dom_action(later["root"]["nodeId"], "click"))
+    assert clicked["target"]["action"] == "click", clicked
+    result = _loads(await pilot.evaluate(expression="window.kahinClicked === true"))
+    assert result["result"]["value"] is True, result
+
+
+@pytest.mark.asyncio
+async def test_dom_stream_cursor_resets_after_navigation(mirage_tools: None) -> None:
+    """A document navigation invalidates old node/cursor truth explicitly."""
+    await _navigate(_doc("<html><body><p>first</p></body></html>"))
+    started = _loads(await dom_stream_mirage.mirage_dom_start())
+    snap = _loads(await dom_stream_mirage.mirage_dom_snapshot(max_nodes=50, include_hidden=True))
+    await _navigate(_doc("<html><body><p>second</p></body></html>"))
+    events = _loads(await dom_stream_mirage.mirage_dom_events(
+        after_seq=snap["cursor"], stream_id=started["stream"]["streamId"], wait_ms=500,
+    ))
+    assert events["reset"] is True, events
+    assert events["dropped"] is True, events
+    assert events["streamId"] != started["stream"]["streamId"], events

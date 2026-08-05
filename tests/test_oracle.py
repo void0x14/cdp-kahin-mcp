@@ -48,7 +48,13 @@ def test_server_initialize_and_list_tools() -> None:
     # Gap C: +2 upload tools (set_file_chooser_intercept, upload_files) = 99.
     # Gap D: +4 screencast tools (start, frame, stop, pending) = 103.
     # Gap E: +1 accessibility tool (kahin_mirage_accessibility_tree) = 104.
-    assert len(tools) == 104
+    # Faz 11: +5 adaptive DOM stream tools = 109.
+    assert len(tools) == 109
+    assert "kahin_mirage_dom_start" in tool_names
+    assert "kahin_mirage_dom_snapshot" in tool_names
+    assert "kahin_mirage_dom_events" in tool_names
+    assert "kahin_mirage_dom_action" in tool_names
+    assert "kahin_mirage_dom_stop" in tool_names
     for name in [
         "kahin_mirage_query",
         "kahin_mirage_click",

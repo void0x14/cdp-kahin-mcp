@@ -66,7 +66,10 @@ kahin_pattern_query(context="doggystyle")
 kahin_pattern_suggest(partial="navig")
 ```
 
-## Tool Listesi (104 adet)
+## Tool Listesi (109 adet)
+
+Juggler/Mirage yüzeyinin ajana dönük, uçtan uca sözleşmesi:
+[docs/juggler-ai-native.md](docs/juggler-ai-native.md)
 
 ### GRIMOIRE — CDP Bilgi (7)
 | Tool | Ne işe yarar? |
@@ -123,7 +126,16 @@ kahin_pattern_suggest(partial="navig")
 | `kahin_pattern_forget` | Pattern sil |
 | `kahin_pattern_stats` | Pattern istatistikleri |
 
-### MIRAGE — Juggler Native (72) — sadece `engine="mirage"` ile çalışır
+### MIRAGE — Juggler Native (77) — sadece `engine="mirage"` ile çalışır
+
+#### DOM Stream (5) — gerçek MutationObserver + Juggler binding
+| Tool | Ne işe yarar? |
+|------|---------------|
+| `kahin_mirage_dom_start` | Gerçek-zamanlı DOM observer'ı mevcut ve sonraki document'lara kurar |
+| `kahin_mirage_dom_snapshot` | Bounded, anlamsal, action ipuçlu canlı DOM ağacı döndürür |
+| `kahin_mirage_dom_events` | Cursor/streamId ile mutation ve input/focus/click event delta'larını okur; long-poll destekler |
+| `kahin_mirage_dom_action` | Snapshot'tan alınan canlı nodeId üzerinde click/hover/focus/type/scroll yapar |
+| `kahin_mirage_dom_stop` | Mevcut frame observer'ını durdurur ve ring'i temizler |
 
 #### DOM (12) — hepsinde opsiyonel `frame_id` parametresi (iframe içi erişim; listeleme: `kahin_mirage_frame_tree`)
 | Tool | Ne işe yarar? |
@@ -321,6 +333,11 @@ kahin_mirage_screencast_start   kahin_mirage_screencast_frame
 kahin_mirage_screencast_stop    kahin_mirage_screencast_pending
 kahin_mirage_accessibility_tree
 ```
+
+Gerçek-zamanlı DOM stream Faz 11'de eklendi. `dom_snapshot` cursor'u ile
+`dom_events` çağrısı yapılır; `reset`/`dropped`/`requiresSnapshot` durumlarında
+ajan yeni snapshot almak zorundadır. NodeId document/frame ömrüyle sınırlıdır;
+CSS selector yerine canlı nodeId ile action yapılır.
 
 ## Önemli Notlar
 1. CDP **case-sensitive**: `Page.navigate` ✓, `page.navigate` ✗

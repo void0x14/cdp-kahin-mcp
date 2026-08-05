@@ -15,6 +15,7 @@ from kahin.tools import dejavu  # noqa: F401
 from kahin.tools import dejavu_mirage  # noqa: F401
 from kahin.tools import dejavu_obscura  # noqa: F401
 from kahin.tools import dialog_mirage  # noqa: F401
+from kahin.tools import dom_stream_mirage  # noqa: F401
 from kahin.tools import emulation_mirage  # noqa: F401
 from kahin.tools import engine  # noqa: F401
 from kahin.tools import grimoire  # noqa: F401
@@ -37,6 +38,7 @@ __all__ = [
     "dejavu_mirage",
     "dejavu_obscura",
     "dialog_mirage",
+    "dom_stream_mirage",
     "emulation_mirage",
     "engine",
     "grimoire",

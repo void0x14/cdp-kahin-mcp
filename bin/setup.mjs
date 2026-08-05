@@ -324,7 +324,7 @@ export function setup() {
 const KAHIN_HOME = process.env.KAHIN_HOME || join(homedir(), ".local", "share", "kahin");
 const KAHIN_VENV = join(KAHIN_HOME, "venv");
 const KAHIN_PY = process.platform === "win32" ? join(KAHIN_VENV, "Scripts", "python.exe") : join(KAHIN_VENV, "bin", "python");
-const KAHIN_WHEEL = join(dirname(fileURLToPath(import.meta.url)), "..", "lib", "kahin-0.3.3-py3-none-any.whl");
+const KAHIN_WHEEL = join(dirname(fileURLToPath(import.meta.url)), "..", "lib", "kahin-0.3.4-py3-none-any.whl");
 
 // Gömülü wheel'i venv'e kurar. Postinstall'da ve `kahin setup`'ta çalışır.
 // PyPI'a bağımlı DEĞİL — wheel paketle birlikte gelir.

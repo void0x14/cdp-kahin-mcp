@@ -145,6 +145,22 @@ async def _start() -> dict[str, Any]:
     return resp
 
 
+async def _paint_distinct_canvas() -> None:
+    """Make the next capture visibly different without relying on timer jitter."""
+    result = _loads(await pilot.evaluate(expression="""(() => {
+      const c = document.querySelector('#c');
+      const ctx = c && c.getContext('2d');
+      if (!ctx) return false;
+      ctx.fillStyle = '#00e676';
+      ctx.fillRect(0, 0, c.width, c.height);
+      ctx.fillStyle = '#111';
+      ctx.fillRect(80, 80, 240, 160);
+      return true;
+    })()"""))
+    assert result["result"]["value"] is True, result
+    await asyncio.sleep(0.2)
+
+
 def _assert_jpeg(frame: dict[str, Any]) -> None:
     """frame must be a real base64 JPEG with non-empty dimensions."""
     assert "data" in frame and frame["data"], frame
@@ -215,6 +231,7 @@ async def test_screencast_frames_flow_and_ack(mirage_tools: None, http_server: s
     assert f1["ack"]["screencastId"] == started["screencastId"], f1["ack"]
     _assert_jpeg(f1)
 
+    await _paint_distinct_canvas()
     f2 = _loads(await screencast_mirage.mirage_screencast_frame(timeout=10.0))
     assert "data" in f2, f2
     assert f2["ack"]["sent"] is True, f2["ack"]
@@ -253,6 +270,7 @@ async def test_screencast_pending_queues_unacked_frames(
     _assert_jpeg(f1)
 
     # Stream resumes after the ack: a fresh frame arrives.
+    await _paint_distinct_canvas()
     f2 = _loads(await screencast_mirage.mirage_screencast_frame(timeout=10.0))
     assert "data" in f2 and f2["ack"]["sent"] is True, f2
     assert f1["data"] != f2["data"], f1

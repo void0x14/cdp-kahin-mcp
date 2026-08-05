@@ -28,6 +28,7 @@ from collections import deque
 from pathlib import Path
 from typing import Any, Callable
 
+from kahin.dom_stream import DOM_STREAM_BINDING_NAME
 from kahin.the_twins.chassis import BrowserEngine, EngineContext, EventData
 
 try:
@@ -110,6 +111,12 @@ class Mirage(BrowserEngine):
         self._screencast_frames: deque[dict[str, Any]] = deque(maxlen=64)
         self._screencast_event = asyncio.Event()
         self._screencast_id: str | None = None
+        # Real-time DOM observation uses the browser's native binding/event
+        # bridge. The page owns the bounded mutation ring; this signal only
+        # wakes a waiting tool so the reader never carries DOM payloads.
+        self._dom_binding_installed = False
+        self._dom_init_script_installed = False
+        self._dom_signal = asyncio.Event()
 
     async def start(self, headless: bool = True, port: int = 0, **kwargs: Any) -> EngineContext:
         del port  # Juggler pipe: no port.
@@ -122,6 +129,9 @@ class Mirage(BrowserEngine):
         self._target_infos.clear()
         self._frame_contexts.clear()
         self._current_target = None
+        self._dom_binding_installed = False
+        self._dom_init_script_installed = False
+        self._dom_signal.clear()
         # BrowserForge fingerprint -> CAMOU_CONFIG_* env (master plan §2.1.5).
         # Every start() draws a fresh identity; the sidecar passes our
         # environment through to the Camoufox child verbatim (pipe.zig
@@ -207,6 +217,7 @@ class Mirage(BrowserEngine):
                         self._track_context(data)
                         self._track_chooser(data)
                         self._track_screencast(data)
+                        self._track_dom_binding(data)
                         evt = EventData(
                             method=data["method"],
                             params=data.get("params", {}),
@@ -271,6 +282,44 @@ class Mirage(BrowserEngine):
         if not sid:
             return None
         return self._frame_contexts.get(sid, {}).get(frame_id)
+
+    async def install_dom_stream(self, init_script: str) -> None:
+        """Install the browser-native binding and init script once.
+
+        Browser-level Juggler methods are used so the observer follows newly
+        created tabs and navigated frames. The caller still evaluates the
+        script in the current frame because init scripts only affect future
+        documents.
+        """
+        if not self._dom_binding_installed:
+            await self.call("Browser.addBinding", {
+                "name": DOM_STREAM_BINDING_NAME,
+                "script": "function() {}",
+            })
+            self._dom_binding_installed = True
+        if not self._dom_init_script_installed:
+            await self.call("Browser.setInitScripts", {
+                "scripts": [{"script": init_script}],
+            })
+            self._dom_init_script_installed = True
+
+    async def wait_for_dom_signal(self, timeout: float) -> bool:
+        """Wait until the page reports a DOM mutation through the binding."""
+        try:
+            await asyncio.wait_for(self._dom_signal.wait(), timeout=timeout)
+            return True
+        except asyncio.TimeoutError:
+            return False
+        finally:
+            self._dom_signal.clear()
+
+    def _track_dom_binding(self, data: dict[str, Any]) -> None:
+        """Wake DOM stream consumers without copying page payloads."""
+        if data.get("method") != "Page.bindingCalled":
+            return
+        params = data.get("params", {}) or {}
+        if params.get("name") == DOM_STREAM_BINDING_NAME:
+            self._dom_signal.set()
 
     def _track_chooser(self, data: dict[str, Any]) -> None:
         """Record Page.fileChooserOpened (file input clicked while
@@ -796,6 +845,7 @@ class Mirage(BrowserEngine):
         return base64.b64decode(data)
 
     async def stop(self) -> None:
+        self._dom_signal.set()
         if self._reader is not None:
             self._reader.cancel()
             self._reader = None

@@ -20,6 +20,10 @@ mcp = FastMCP(
         "kahin_mirage_tab_new/switch/close) for separate pages instead of "
         "starting another browser. CDP commands are automatically routed to "
         "their Mirage equivalent when Camoufox is active. Ports 9222 and "
-        "9240 are RESERVED."
+        "9240 are RESERVED. For adaptive Mirage automation, start "
+        "kahin_mirage_dom_start, read kahin_mirage_dom_snapshot, then consume "
+        "kahin_mirage_dom_events with its streamId/cursor; on reset or dropped "
+        "take a fresh snapshot, and use kahin_mirage_dom_action only with a "
+        "live nodeId."
     ),
 )
