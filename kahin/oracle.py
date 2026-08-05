@@ -40,10 +40,15 @@ def _on_console_event(evt: EventData) -> None:
 
 
 def _on_engine_death(engine) -> None:
-    """Reader EOF: the engine's transport died. Clear it from global state so
-    tools report 'no engine' instead of calling into a corpse."""
+    """Reader EOF: mark the engine dead but keep it reachable for cleanup.
+
+    ``browser_stop`` must still be able to reap a sidecar whose Firefox child
+    disappeared first. Dropping the reference here made the next stop call
+    return ``No engine running`` and left lifecycle cleanup with no owner.
+    ``_require_engine`` and ``browser_start`` already reject/reap dead engines;
+    keeping the reference lets those paths, or an explicit stop, do so.
+    """
     if state._current_engine is engine:
-        state._current_engine = None
         state.clear_state()
 
 

@@ -30,6 +30,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import signal
 from collections.abc import AsyncGenerator
 from typing import Any
 from urllib.parse import quote
@@ -210,22 +212,26 @@ async def test_dialog_accept(mirage_tools: None) -> None:
 
 @pytest.mark.asyncio
 async def test_kill_detection_clean_tool_error(mirage_tools: None) -> None:
-    """Engine death -> is_alive False -> tools answer clean errors, no hang."""
+    """Firefox death -> clean tool errors, then explicit stop still reaps."""
     eng = state._current_engine
     assert eng is not None and eng.is_alive() is True
-    proc = eng._process
-    assert proc is not None
-    proc.terminate()
-    await asyncio.sleep(0.8)  # reader hits EOF -> on_death evicts the engine
+    before = _loads(await engine.engine_health())
+    browser_pid = before["health"]["pid"]
+    os.kill(browser_pid, signal.SIGKILL)
+    await asyncio.sleep(0.8)  # reader hits EOF -> on_death retains it for stop
 
     assert eng.is_alive() is False
 
     health = _loads(await engine.engine_health())
-    assert health["engine"] is None, health  # evicted via _on_engine_death
-    assert "No browser engine" in health["error"], health
+    assert health["engine"] == "mirage", health
+    assert health["alive"] is False, health
 
     out = await pilot_mirage.mirage_query("#anything")
-    assert "No browser engine" in out, out  # clean error string, no crash
+    assert "Browser engine is dead" in out, out  # clean error string, no crash
+
+    stopped = await pilot.browser_stop()
+    assert stopped == '{"status": "stopped"}'
+    assert state._current_engine is None
 
 
 @pytest.mark.asyncio

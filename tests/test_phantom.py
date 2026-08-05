@@ -16,8 +16,12 @@ from pathlib import Path
 
 import pytest
 
+from kahin import _state as state
+from kahin.oracle import _on_engine_death
 from kahin.the_twins import mirage as mirage_mod
 from kahin.the_twins.mirage import Mirage
+from kahin.tools import pilot
+from kahin.tools._common import _require_engine
 
 FAKE_SIDECAR = """\
 #!/usr/bin/env python3
@@ -150,6 +154,32 @@ async def test_is_alive_and_on_death(fake_sidecar: Path) -> None:
     assert engine.is_alive() is False
     assert deaths == ["died"]
     await engine.stop()
+
+
+@pytest.mark.asyncio
+async def test_dead_engine_remains_reachable_for_stop(fake_sidecar: Path) -> None:
+    """A dead transport remains in state until explicit cleanup reaps it."""
+    engine = Mirage()
+    await engine.start()
+    previous = state._current_engine
+    state._current_engine = engine
+    engine.on_death(lambda: _on_engine_death(engine))
+    try:
+        proc = engine._process
+        assert proc is not None
+        proc.terminate()
+        await asyncio.sleep(0.4)
+
+        assert engine.is_alive() is False
+        assert state._current_engine is engine
+        error = await _require_engine()
+        assert error is not None and "kahin_browser_stop" in error
+        assert await pilot.browser_stop() == '{"status": "stopped"}'
+        assert state._current_engine is None
+    finally:
+        state._current_engine = previous
+        state.clear_state()
+        await engine.stop()
 
 
 @pytest.mark.asyncio

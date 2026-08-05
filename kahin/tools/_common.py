@@ -116,8 +116,9 @@ async def _safe_cdp(domain: str, command: str, params: dict[str, Any] | None = N
 async def _require_engine() -> str | None:
     """Ensure engine is running and alive. Returns error message or None.
 
-    A dead engine is evicted from global state (buffers cleared) so the next
-    tool call reports 'no browser engine' and browser_start replaces it.
+    A dead engine stays reachable until ``browser_stop`` or ``browser_start``
+    reaps it. The transport is unusable, but discarding the object here would
+    make explicit cleanup impossible when Firefox dies before its sidecar.
     """
     engine = state._current_engine
     if engine is None:
@@ -127,18 +128,15 @@ async def _require_engine() -> str | None:
             health = await asyncio.wait_for(engine.health(), timeout=_MIRAGE_HEALTH_TIMEOUT)
         except asyncio.TimeoutError:
             engine._mark_dead()
-            state._current_engine = None
             state.clear_state()
-            return "Browser engine health check timed out. Use kahin_browser_start to restart."
+            return "Browser engine health check timed out. Use kahin_browser_stop, then kahin_browser_start to restart."
         if not health.get("alive"):
-            state._current_engine = None
             state.clear_state()
-            return "Browser engine is dead (crashed). Use kahin_browser_start to restart."
+            return "Browser engine is dead (crashed). Use kahin_browser_stop, then kahin_browser_start to restart."
         return None
     if not engine.is_alive():
-        state._current_engine = None
         state.clear_state()
-        return "Browser engine is dead (crashed). Use kahin_browser_start to restart."
+        return "Browser engine is dead (crashed). Use kahin_browser_stop, then kahin_browser_start to restart."
     return None
 
 
