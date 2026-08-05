@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "kahin"
-version = "0.3.1"
+version = "0.3.2"
 description = "Kahin, hibrit bir CDP ansiklopedisi, anti-detect browser otomasyon MCP sidir. Yerleşik olarak obscura ve camoufox kullanır, dinamik olarak göreve göre seçer. Seçimi ajanınız yapar."
 license = { text = "AGPL-3.0-or-later" }
 license-files = ["LICENSE"]

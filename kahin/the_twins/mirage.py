@@ -22,6 +22,7 @@ import base64
 import json
 import logging
 import os
+import shutil
 import tempfile
 from collections import deque
 from pathlib import Path
@@ -85,8 +86,12 @@ class Mirage(BrowserEngine):
         super().__init__()
         self._engine_name = engine_name
         self._stderr_file = None
+        self._profile_dir: Path | None = None
+        self._write_lock = asyncio.Lock()
+        self._page_lock = asyncio.Lock()
         # targetId -> Juggler sessionId, learned from attachedToTarget events.
         self._sessions: dict[str, str] = {}
+        self._target_infos: dict[str, dict[str, Any]] = {}
         self._current_target: str | None = None
         # sessionId -> {frameId -> executionContextId} (main world only),
         # fed by Runtime.executionContextCreated/Destroyed/ContextsCleared
@@ -108,6 +113,15 @@ class Mirage(BrowserEngine):
 
     async def start(self, headless: bool = True, port: int = 0, **kwargs: Any) -> EngineContext:
         del port  # Juggler pipe: no port.
+        # A Mirage object is normally single-use, but resetting these fields
+        # makes a stop/start cycle deterministic and prevents stale tab or
+        # liveness state from leaking into a replacement browser.
+        self._dead = False
+        self._msg_id = 0
+        self._sessions.clear()
+        self._target_infos.clear()
+        self._frame_contexts.clear()
+        self._current_target = None
         # BrowserForge fingerprint -> CAMOU_CONFIG_* env (master plan §2.1.5).
         # Every start() draws a fresh identity; the sidecar passes our
         # environment through to the Camoufox child verbatim (pipe.zig
@@ -118,44 +132,51 @@ class Mirage(BrowserEngine):
         # firefox_user_prefs -> <profile>/user.js (webgl etc. must be set
         # before the browser boots; the sidecar only mkdirs the profile).
         profile_dir = Path(tempfile.mkdtemp(prefix="kahin-fp-"))
-        prefs = opts.get("firefox_user_prefs") or {}
-        if prefs:
-            lines = ["user_pref({!r}, {!r});".format(k, v) for k, v in prefs.items()]
-            (profile_dir / "user.js").write_text("\n".join(lines) + "\n")
+        self._profile_dir = profile_dir
+        try:
+            prefs = opts.get("firefox_user_prefs") or {}
+            if prefs:
+                lines = ["user_pref({!r}, {!r});".format(k, v) for k, v in prefs.items()]
+                (profile_dir / "user.js").write_text("\n".join(lines) + "\n")
 
-        args = [str(_sidecar_bin()), str(_camoufox_bin())]
-        if not headless:
-            args.append("--visible")  # visible window (stealth vs anti-bot)
-        args.append(str(profile_dir))
-        log_dir = Path(__file__).resolve().parents[2] / "logs"
-        log_dir.mkdir(parents=True, exist_ok=True)
-        # File lives as long as the child process, not a with-block.
-        self._stderr_file = await asyncio.to_thread(open, log_dir / "kahin-sidecar.err", "ab")
-        self._process = await asyncio.create_subprocess_exec(
-            *args,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=self._stderr_file,
-            env=env,
-        )
-        self._start_reader()
-        # Boot validation: the sidecar must report a live browser. A dead
-        # sidecar (or browser that never came up) fails the start.
-        health = await self.call("Browser.health")
-        if not health.get("alive"):
-            await self.stop()
-            raise RuntimeError(
-                "Mirage boot validation failed: Browser.health reports a dead browser"
+            args = [str(_sidecar_bin()), str(_camoufox_bin())]
+            if not headless:
+                args.append("--visible")  # visible window (stealth vs anti-bot)
+            args.append(str(profile_dir))
+            log_dir = Path(__file__).resolve().parents[2] / "logs"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            # File lives as long as the child process, not a with-block.
+            self._stderr_file = await asyncio.to_thread(open, log_dir / "kahin-sidecar.err", "ab")
+            self._process = await asyncio.create_subprocess_exec(
+                *args,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=self._stderr_file,
+                env=env,
             )
-        return EngineContext(
-            engine_name=self._engine_name,
-            ws_url="",  # IPC over stdio, not WebSocket
-            meta={
-                "sidecar": str(_sidecar_bin()),
-                "camoufox": str(_camoufox_bin()),
-                "transport": "stdio-jsonl",
-            },
-        )
+            self._start_reader()
+            # Boot validation: the sidecar must report a live browser. A dead
+            # sidecar (or browser that never came up) fails the start.
+            health = await self.call("Browser.health")
+            if not health.get("alive"):
+                raise RuntimeError(
+                    "Mirage boot validation failed: Browser.health reports a dead browser"
+                )
+            return EngineContext(
+                engine_name=self._engine_name,
+                ws_url="",  # IPC over stdio, not WebSocket
+                meta={
+                    "sidecar": str(_sidecar_bin()),
+                    "camoufox": str(_camoufox_bin()),
+                    "transport": "stdio-jsonl",
+                },
+            )
+        except BaseException:
+            # asyncio.wait_for(browser_start) cancels start() on a slow boot.
+            # Always reap the sidecar in that path; otherwise a retry creates
+            # a second Camoufox while the first orphan keeps running.
+            await self.stop()
+            raise
 
     def _start_reader(self) -> None:
         """Background task: resolve pending responses, track Juggler sessions
@@ -182,6 +203,7 @@ class Mirage(BrowserEngine):
                                 fut.set_result(data.get("result", {}))
                     elif "method" in data:
                         self._track_session(data)
+                        self._track_target_url(data)
                         self._track_context(data)
                         self._track_chooser(data)
                         self._track_screencast(data)
@@ -355,12 +377,29 @@ class Mirage(BrowserEngine):
             session_id = params.get("sessionId") or data.get("sessionId")
             if target_id and session_id:
                 self._sessions[target_id] = session_id
+                self._target_infos[target_id] = dict(target_info)
         elif method == "Browser.detachedFromTarget":
             target_id = params.get("targetId")
             if target_id:
                 self._sessions.pop(target_id, None)
+                self._target_infos.pop(target_id, None)
                 if self._current_target == target_id:
                     self._current_target = next(iter(self._sessions), None)
+
+    def _track_target_url(self, data: dict[str, Any]) -> None:
+        """Keep CDP-shaped Target.getTargets URL data current."""
+        if data.get("method") != "Page.navigationCommitted":
+            return
+        session_id = data.get("sessionId")
+        url = (data.get("params") or {}).get("url")
+        if not isinstance(session_id, str) or not isinstance(url, str):
+            return
+        target_id = next(
+            (tid for tid, sid in self._sessions.items() if sid == session_id),
+            None,
+        )
+        if target_id is not None:
+            self._target_infos.setdefault(target_id, {}).update({"url": url})
 
     async def call(
         self, method: str, params: dict[str, Any] | None = None, session_id: str | None = None
@@ -379,18 +418,31 @@ class Mirage(BrowserEngine):
         if sid is None and not method.startswith("Browser."):
             sid = self._sessions.get(self._current_target or "")
         self._msg_id += 1
-        msg: dict[str, Any] = {"id": self._msg_id, "method": method, "params": params or {}}
+        request_id = self._msg_id
+        msg: dict[str, Any] = {"id": request_id, "method": method, "params": params or {}}
         if sid:
             msg["sessionId"] = sid
         fut: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
-        self._pending[self._msg_id] = fut
-        self._process.stdin.write((json.dumps(msg) + "\n").encode())
-        await self._process.stdin.drain()
+        self._pending[request_id] = fut
         try:
+            # Keep JSONL records intact when several MCP calls arrive at once;
+            # pending replies remain fully concurrent behind this tiny write
+            # critical section.
+            async with self._write_lock:
+                if self._process is None or self._process.stdin is None:
+                    raise RuntimeError("Mirage not started")
+                self._process.stdin.write((json.dumps(msg) + "\n").encode())
+                await self._process.stdin.drain()
             return await asyncio.wait_for(fut, timeout=_REQUEST_TIMEOUT)
         except TimeoutError:
-            self._pending.pop(self._msg_id, None)
+            self._pending.pop(request_id, None)
             raise RuntimeError(f"Mirage: response timeout ({_REQUEST_TIMEOUT:.0f}s) for {method}")
+        except asyncio.CancelledError:
+            self._pending.pop(request_id, None)
+            raise
+        except Exception:
+            self._pending.pop(request_id, None)
+            raise
 
     # --- session management (Juggler target model) ---
 
@@ -408,13 +460,33 @@ class Mirage(BrowserEngine):
         if not target_id:
             raise RuntimeError(f"Browser.newPage returned no targetId: {result}")
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + 5.0
+        deadline = loop.time() + min(_REQUEST_TIMEOUT, 10.0)
         while target_id not in self._sessions:
             if loop.time() > deadline:
                 raise RuntimeError(f"session for target {target_id} never attached")
             await asyncio.sleep(0.05)
         self._current_target = target_id
         return {"targetId": target_id, "sessionId": self._sessions[target_id]}
+
+    async def ensure_page(self) -> dict[str, Any]:
+        """Return the current tab, creating one lazily inside this browser.
+
+        Browser startup intentionally does not create a second process or an
+        eager throw-away page. The first page-oriented operation gets one
+        about:blank tab, and subsequent operations reuse it until the caller
+        explicitly asks for another tab.
+        """
+        async with self._page_lock:
+            if self._current_target in self._sessions:
+                return {
+                    "targetId": self._current_target,
+                    "sessionId": self._sessions[self._current_target],
+                }
+            if self._sessions:
+                self._current_target = next(iter(self._sessions))
+                target_id = self._current_target
+                return {"targetId": target_id, "sessionId": self._sessions[target_id]}
+            return await self.create_page("about:blank")
 
     async def close_page(self, target_id: str) -> dict[str, Any]:
         """Close a tab (Page.close) and forget its Juggler session."""
@@ -447,6 +519,233 @@ class Mirage(BrowserEngine):
             for tid, sid in self._sessions.items()
         ]
 
+    async def execute_cdp(
+        self, domain: str, command: str, params: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """Execute a CDP-shaped request through the Mirage equivalent.
+
+        Agents often know the Chrome/CDP surface better than the Juggler
+        tool names. Keep that request surface working on Camoufox while
+        routing the operation to the real Juggler method or tab primitive.
+        The returned object stays CDP-shaped, so callers do not need to know
+        that the implementation used Mirage.
+        """
+        p = dict(params or {})
+        method = f"{domain}.{command}"
+
+        # These domains are event-driven in Juggler and do not need an
+        # enable/disable handshake. Treat the CDP setup calls as successful
+        # no-ops so a raw CDP client can keep its normal bootstrap sequence.
+        if method in {
+            "Page.enable",
+            "Page.disable",
+            "Runtime.enable",
+            "Runtime.disable",
+            "Network.enable",
+            "Network.disable",
+            "DOM.enable",
+            "DOM.disable",
+            "Accessibility.enable",
+            "Accessibility.disable",
+        }:
+            return {}
+
+        if domain == "Target":
+            return await self._execute_cdp_target(command, p)
+        if domain == "Input":
+            return await self._execute_cdp_input(command, p)
+        if domain == "Emulation":
+            return await self._execute_cdp_emulation(command, p)
+        if domain == "Network":
+            return await self._execute_cdp_network(command, p)
+        if domain == "Browser" and command == "getVersion":
+            result = await self.call("Browser.getInfo", p)
+            return {
+                "protocolVersion": result.get("protocolVersion", ""),
+                "product": result.get("product", result.get("userAgent", "")),
+                "revision": result.get("revision", ""),
+                "userAgent": result.get("userAgent", ""),
+                "jsVersion": result.get("jsVersion", ""),
+            }
+
+        if domain == "Page" and command == "captureScreenshot":
+            await self.ensure_page()
+            result = await self.call("Page.captureScreenshot", p)
+            return {"data": result.get("data", "")}
+        if domain == "Page" and command == "close":
+            target_id = self._current_target
+            if target_id is None:
+                raise RuntimeError("no current tab")
+            await self.close_page(target_id)
+            return {}
+
+        # Page.navigate, Runtime.evaluate, frame tree, and the other
+        # already CDP-shaped sidecar handlers remain direct Juggler calls.
+        return await self.call(method, p)
+
+    async def _execute_cdp_target(self, command: str, params: dict[str, Any]) -> dict[str, Any]:
+        if command == "getTargets":
+            infos: list[dict[str, Any]] = []
+            for target_id in self._sessions:
+                info = dict(self._target_infos.get(target_id, {}))
+                info.update({
+                    "targetId": target_id,
+                    "type": info.get("type", "page"),
+                    "url": info.get("url", ""),
+                })
+                infos.append({
+                    key: info[key]
+                    for key in ("targetId", "type", "browserContextId", "url")
+                    if key in info and info[key] is not None
+                })
+            return {"targetInfos": infos}
+        if command == "createTarget":
+            page = await self.create_page(
+                url=str(params.get("url", "about:blank")),
+                browser_context_id=params.get("browserContextId"),
+            )
+            return {"targetId": page["targetId"]}
+        if command == "closeTarget":
+            target_id = params.get("targetId")
+            if not isinstance(target_id, str) or not target_id:
+                raise RuntimeError("Target.closeTarget requires targetId")
+            await self.close_page(target_id)
+            return {}
+        if command == "activateTarget":
+            target_id = params.get("targetId")
+            if not isinstance(target_id, str):
+                raise RuntimeError("Target.activateTarget requires targetId")
+            await self.switch_page(target_id)
+            await self.call("Page.bringToFront")
+            return {}
+        if command == "attachToTarget":
+            target_id = params.get("targetId")
+            if not isinstance(target_id, str):
+                raise RuntimeError("Target.attachToTarget requires targetId")
+            await self.switch_page(target_id)
+            return {"sessionId": self._sessions[target_id]}
+        if command == "detachFromTarget":
+            return {}
+        if command == "disposeBrowserContext":
+            context_id = params.get("browserContextId")
+            if not isinstance(context_id, str):
+                raise RuntimeError("Target.disposeBrowserContext requires browserContextId")
+            return await self.call("Browser.removeBrowserContext", {"browserContextId": context_id})
+        if command == "setAutoAttach":
+            return {}
+        return await self.call(f"Target.{command}", params)
+
+    async def _execute_cdp_input(self, command: str, params: dict[str, Any]) -> dict[str, Any]:
+        if command == "insertText":
+            await self.call("Page.insertText", {"text": str(params.get("text", ""))})
+            return {}
+        if command == "dispatchKeyEvent":
+            type_map = {
+                "keyDown": "keydown",
+                "keyUp": "keyup",
+                "rawKeyDown": "rawkeydown",
+                "char": "char",
+            }
+            key_type = type_map.get(params.get("type"))
+            if key_type is None:
+                raise RuntimeError(f"unknown Input.dispatchKeyEvent type: {params.get('type')}")
+            mapped: dict[str, Any] = {
+                "type": key_type,
+                "key": str(params.get("key", "")),
+                "keyCode": int(params.get("windowsVirtualKeyCode", params.get("keyCode", 0)) or 0),
+                "location": int(params.get("location", 0) or 0),
+                "code": str(params.get("code", "Unidentified")),
+                "repeat": bool(params.get("autoRepeat", params.get("repeat", False))),
+            }
+            if params.get("text") is not None:
+                mapped["text"] = params["text"]
+            await self.call("Page.dispatchKeyEvent", mapped)
+            return {}
+        if command == "dispatchMouseEvent":
+            event_type = params.get("type")
+            x = float(params.get("x", 0) or 0)
+            y = float(params.get("y", 0) or 0)
+            modifiers = int(params.get("modifiers", 0) or 0)
+            if event_type == "mouseWheel":
+                await self.call("Page.dispatchWheelEvent", {
+                    "x": x,
+                    "y": y,
+                    "deltaX": float(params.get("deltaX", 0) or 0),
+                    "deltaY": float(params.get("deltaY", 0) or 0),
+                    "deltaZ": 0.0,
+                    "modifiers": modifiers,
+                })
+                return {}
+            type_map = {"mousePressed": "mousedown", "mouseReleased": "mouseup", "mouseMoved": "mousemove"}
+            juggler_type = type_map.get(event_type)
+            if juggler_type is None:
+                raise RuntimeError(f"unknown Input.dispatchMouseEvent type: {event_type}")
+            button_name = str(params.get("button", "none"))
+            button_number = {"left": 0, "middle": 1, "right": 2, "back": 3, "forward": 4, "none": 0}.get(button_name)
+            if button_number is None:
+                raise RuntimeError(f"unknown mouse button: {button_name}")
+            buttons = params.get("buttons")
+            if buttons is None:
+                buttons = {"left": 1, "right": 2, "middle": 4, "back": 8, "forward": 16}.get(button_name, 0)
+                if juggler_type != "mousedown":
+                    buttons = 0
+            await self.call("Page.dispatchMouseEvent", {
+                "type": juggler_type,
+                "button": button_number,
+                "x": x,
+                "y": y,
+                "modifiers": modifiers,
+                "clickCount": int(params.get("clickCount", 1) or 1),
+                "buttons": int(buttons),
+            })
+            return {}
+        return await self.call(f"Input.{command}", params)
+
+    async def _execute_cdp_emulation(self, command: str, params: dict[str, Any]) -> dict[str, Any]:
+        if command == "setDeviceMetricsOverride":
+            width = params.get("width")
+            height = params.get("height")
+            if width is None or height is None:
+                raise RuntimeError("Emulation.setDeviceMetricsOverride requires width and height")
+            viewport: dict[str, Any] = {
+                "viewportSize": {"width": width, "height": height},
+            }
+            if params.get("deviceScaleFactor") is not None:
+                viewport["deviceScaleFactor"] = params["deviceScaleFactor"]
+            await self.call("Browser.setDefaultViewport", {"viewport": viewport})
+            return {}
+        if command == "setUserAgentOverride":
+            return await self.call("Browser.setUserAgentOverride", {"userAgent": params.get("userAgent", "")})
+        if command == "setTouchEmulationEnabled":
+            return await self.call("Browser.setTouchOverride", {"hasTouch": bool(params.get("enabled", False))})
+        if command == "setEmulatedMedia":
+            return await self.call("Page.setEmulatedMedia", {"type": params.get("media", "screen")})
+        if command == "setLocaleOverride":
+            return await self.call("Browser.setLocaleOverride", {"locale": params.get("locale", "")})
+        if command == "setTimezoneOverride":
+            return await self.call("Browser.setTimezoneOverride", {"timezoneId": params.get("timezoneId", "")})
+        if command == "setGeolocationOverride":
+            geo = {k: params[k] for k in ("latitude", "longitude", "accuracy") if k in params}
+            return await self.call("Browser.setGeolocationOverride", {"geolocation": geo or None})
+        return await self.call(f"Emulation.{command}", params)
+
+    async def _execute_cdp_network(self, command: str, params: dict[str, Any]) -> dict[str, Any]:
+        if command == "continueInterceptedRequest":
+            mapped = {k: params[k] for k in ("requestId", "url", "method", "headers", "postData") if k in params}
+            return await self.call("Network.resumeInterceptedRequest", mapped)
+        if command == "setRequestInterception":
+            return await self.call(
+                "Network.setRequestInterception",
+                {"enabled": bool(params.get("enabled", True))},
+            )
+        if command == "clearBrowserCookies":
+            return await self.call("Browser.clearCookies", {})
+        if command == "clearBrowserCache":
+            return await self.call("Browser.clearCache", {})
+        if command == "setCacheDisabled":
+            return await self.call("Page.setCacheDisabled", {"cacheDisabled": bool(params.get("cacheDisabled", False))})
+        return await self.call(f"Network.{command}", params)
+
     # --- liveness ---
 
     async def send_cdp(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
@@ -454,6 +753,25 @@ class Mirage(BrowserEngine):
         raise RuntimeError(
             "Mirage.send_cdp was removed; use Mirage.call(method, params, session_id)"
         )
+
+    async def health(self) -> dict[str, Any]:
+        """Probe both the sidecar and its Camoufox child.
+
+        ``is_alive()`` can only see the sidecar process.  Browser.health is
+        answered by the sidecar's process manager and catches the stale-state
+        case where Firefox has exited but the Python process has not reaped
+        the sidecar yet.
+        """
+        if not self.is_alive():
+            return {"alive": False, "state": "dead"}
+        try:
+            result = await self.call("Browser.health")
+        except Exception as exc:  # noqa: BLE001
+            self._mark_dead()
+            return {"alive": False, "state": "dead", "error": str(exc)}
+        if not result.get("alive"):
+            self._mark_dead()
+        return result
 
     def is_alive(self) -> bool:
         """Process up and the reader healthy (reader EOF marks death)."""
@@ -470,6 +788,7 @@ class Mirage(BrowserEngine):
         """Page.captureScreenshot passthrough. The sidecar translates
         full_page into a full-content clip (size measured via evaluate);
         otherwise the real viewport is captured."""
+        await self.ensure_page()
         result = await self.call("Page.captureScreenshot", {"format": format, "fullPage": full_page})
         data = result.get("data")
         if data is None:
@@ -486,9 +805,20 @@ class Mirage(BrowserEngine):
         self._pending.clear()
         proc, self._process = self._process, None
         if proc is None:
+            self._sessions.clear()
+            self._target_infos.clear()
+            self._frame_contexts.clear()
+            self._current_target = None
+            if self._stderr_file is not None:
+                self._stderr_file.close()
+                self._stderr_file = None
+            self._remove_profile()
             return
         if proc.stdin:
-            proc.stdin.close()  # stdin EOF -> sidecar stops the browser
+            try:
+                proc.stdin.close()  # stdin EOF -> sidecar stops the browser
+            except Exception:  # noqa: BLE001
+                pass
         try:
             await asyncio.wait_for(proc.wait(), timeout=10)
         except TimeoutError:
@@ -500,3 +830,13 @@ class Mirage(BrowserEngine):
         if self._stderr_file is not None:
             self._stderr_file.close()
             self._stderr_file = None
+        self._sessions.clear()
+        self._target_infos.clear()
+        self._frame_contexts.clear()
+        self._current_target = None
+        self._remove_profile()
+
+    def _remove_profile(self) -> None:
+        profile, self._profile_dir = self._profile_dir, None
+        if profile is not None:
+            shutil.rmtree(profile, ignore_errors=True)

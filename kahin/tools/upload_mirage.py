@@ -48,8 +48,10 @@ async def mirage_set_file_chooser_intercept(enabled: bool) -> str:
         err = await _require_mirage()
         if err:
             return err
+        engine = _mirage_engine()
+        await engine.ensure_page()
         try:
-            result = await _mirage_engine().call(
+            result = await engine.call(
                 "Page.setInterceptFileChooserDialog", {"enabled": enabled}
             )
         except RuntimeError as e:
@@ -94,6 +96,7 @@ async def mirage_upload_files(files: list[str], timeout: float = 15.0) -> str:
         if err:
             return err
         engine = _mirage_engine()
+        await engine.ensure_page()
         try:
             chooser = await engine.wait_for_chooser(wait)
         except Exception as e:  # noqa: BLE001

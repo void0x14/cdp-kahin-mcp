@@ -63,6 +63,24 @@ FAKE_DEAD_SIDECAR = FAKE_SIDECAR.replace(
     '"alive": True', '"alive": False'
 )
 
+CONCURRENT_FAKE_SIDECAR = """\
+#!/usr/bin/env python3
+import json, sys, threading, time
+emit_lock = threading.Lock()
+def emit(obj):
+    with emit_lock:
+        print(json.dumps(obj), flush=True)
+def handle(req):
+    rid = req["id"]
+    if req["method"] == "Browser.health":
+        emit({"id": rid, "result": {"alive": True}})
+        return
+    time.sleep(0.4)
+    emit({"id": rid, "result": {"echo": req["method"]}})
+for line in sys.stdin:
+    threading.Thread(target=handle, args=(json.loads(line),), daemon=True).start()
+"""
+
 
 @pytest.fixture
 def fake_sidecar(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
@@ -78,6 +96,16 @@ def fake_sidecar(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def dead_sidecar(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     script = tmp_path / "fake_dead_sidecar.py"
     script.write_text(FAKE_DEAD_SIDECAR)
+    script.chmod(0o755)
+    monkeypatch.setattr(mirage_mod, "_sidecar_bin", lambda: script)
+    monkeypatch.setattr(mirage_mod, "_camoufox_bin", lambda: script)
+    return script
+
+
+@pytest.fixture
+def concurrent_sidecar(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    script = tmp_path / "concurrent_sidecar.py"
+    script.write_text(CONCURRENT_FAKE_SIDECAR)
     script.chmod(0o755)
     monkeypatch.setattr(mirage_mod, "_sidecar_bin", lambda: script)
     monkeypatch.setattr(mirage_mod, "_camoufox_bin", lambda: script)
@@ -158,6 +186,25 @@ async def test_call_timeout(fake_sidecar: Path, monkeypatch: pytest.MonkeyPatch)
 
 
 @pytest.mark.asyncio
+async def test_concurrent_timeout_removes_own_pending_request(
+    concurrent_sidecar: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A timed-out request must not remove a newer concurrent request."""
+    monkeypatch.setattr(mirage_mod, "_REQUEST_TIMEOUT", 0.2)
+    engine = Mirage()
+    await engine.start()
+    try:
+        slow = asyncio.create_task(engine.call("Runtime.evaluate", {"slow": True}))
+        await asyncio.sleep(0.05)
+        newer = asyncio.create_task(engine.call("Runtime.evaluate", {"slow": False}))
+        results = await asyncio.gather(slow, newer, return_exceptions=True)
+        assert all(isinstance(result, RuntimeError) for result in results)
+        assert engine._pending == {}
+    finally:
+        await engine.stop()
+
+
+@pytest.mark.asyncio
 async def test_call_after_death_raises(fake_sidecar: Path) -> None:
     """Calls against a dead engine must raise immediately, not hang."""
     engine = Mirage()
@@ -201,6 +248,40 @@ async def test_session_management(fake_sidecar: Path) -> None:
         await engine.close_page("target-1")
         assert await engine.list_pages() == []
         assert engine._current_target is None
+    finally:
+        await engine.stop()
+
+
+@pytest.mark.asyncio
+async def test_ensure_page_is_single_flight(fake_sidecar: Path) -> None:
+    """Concurrent first page operations create one tab, not one per call."""
+    engine = Mirage()
+    await engine.start()
+    try:
+        pages = await asyncio.gather(*(engine.ensure_page() for _ in range(8)))
+        assert {page["targetId"] for page in pages} == {"target-1"}
+        assert len(await engine.list_pages()) == 1
+    finally:
+        await engine.stop()
+
+
+@pytest.mark.asyncio
+async def test_cdp_equivalents_use_juggler_methods(fake_sidecar: Path) -> None:
+    """CDP-shaped Target/Input/Emulation calls route through Mirage."""
+    engine = Mirage()
+    await engine.start()
+    try:
+        assert await engine.execute_cdp("Target", "getTargets") == {"targetInfos": []}
+        created = await engine.execute_cdp(
+            "Target", "createTarget", {"url": "about:blank"}
+        )
+        assert created == {"targetId": "target-1"}
+        assert await engine.execute_cdp("Input", "insertText", {"text": "hello"}) == {}
+        assert await engine.execute_cdp(
+            "Emulation", "setDeviceMetricsOverride", {"width": 800, "height": 600}
+        ) == {}
+        targets = await engine.execute_cdp("Target", "getTargets")
+        assert targets["targetInfos"][0]["targetId"] == "target-1"
     finally:
         await engine.stop()
 

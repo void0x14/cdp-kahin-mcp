@@ -54,7 +54,9 @@ async def mirage_get_response_body(request_id: str) -> str:
         if err:
             return err
         try:
-            result = await _mirage_engine().call("Network.getResponseBody", {"requestId": request_id})
+            engine = _mirage_engine()
+            await engine.ensure_page()
+            result = await engine.call("Network.getResponseBody", {"requestId": request_id})
         except Exception as e:  # noqa: BLE001
             return orjson.dumps({"error": f"getResponseBody failed: {e}"}).decode()
         raw = result.get("base64body", "") or ""

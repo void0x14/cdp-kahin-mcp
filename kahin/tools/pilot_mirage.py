@@ -175,7 +175,9 @@ async def mirage_type(selector: str, text: str, frame_id: str | None = None) -> 
         if err:
             return err
         try:
-            result = await _mirage_engine().call("Page.insertText", {"text": text})
+            engine = _mirage_engine()
+            await engine.ensure_page()
+            result = await engine.call("Page.insertText", {"text": text})
         except RuntimeError as e:
             return orjson.dumps({"error": f"Juggler call failed: {e}"}).decode()
         return orjson.dumps({"typed": len(text), "selector": selector, "result": result}, option=orjson.OPT_INDENT_2).decode()
@@ -396,7 +398,9 @@ async def _main_frame_id() -> tuple[str | None, str | None]:
     if err:
         return None, err
     try:
-        result = await _mirage_engine().call("Page.getFrameTree")
+        engine = _mirage_engine()
+        await engine.ensure_page()
+        result = await engine.call("Page.getFrameTree")
     except RuntimeError as e:
         return None, orjson.dumps({"error": f"Juggler call failed: {e}"}).decode()
     frame = ((result.get("frameTree") or {}).get("frame") or {}).get("id")

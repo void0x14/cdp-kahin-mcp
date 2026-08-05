@@ -159,7 +159,7 @@ pub const Instance = struct {
         const deadline = nowMs() + timeout_ms;
         var signaled = false;
         while (true) {
-            const rc = linux.waitpid(self.child.pid, &status, linux.W.NOHANG);
+            const rc = linux.waitpid(self.child.pid, @ptrCast(&status), linux.W.NOHANG);
             switch (linux.errno(rc)) {
                 .SUCCESS => {},
                 .INTR => continue,
@@ -169,7 +169,7 @@ pub const Instance = struct {
                 if (nowMs() >= deadline) {
                     // Kill fallback: pipe EOF was ignored (wedged child).
                     _ = linux.kill(self.child.pid, .KILL);
-                    const rc2 = linux.waitpid(self.child.pid, &status, 0);
+                    const rc2 = linux.waitpid(self.child.pid, @ptrCast(&status), 0);
                     if (linux.errno(rc2) != .SUCCESS) return error.WaitFailed;
                     // (Faz 7 Minor a) The child may have exited cleanly in
                     // the window between the deadline poll and the SIGKILL

@@ -80,6 +80,7 @@ async def mirage_screencast_start(width: int = 1280, height: int = 720, quality:
         q = _clamp(quality, 1, 100)
         engine = _mirage_engine()
         try:
+            await engine.ensure_page()
             result = await engine.call("Page.startScreencast", {
                 "width": w,
                 "height": h,

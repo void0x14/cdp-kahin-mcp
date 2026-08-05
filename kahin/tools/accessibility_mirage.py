@@ -87,7 +87,9 @@ async def mirage_accessibility_tree(max_nodes: int = 200) -> str:
         if err:
             return err
         try:
-            result = await _mirage_engine().call("Accessibility.getFullAXTree", {})
+            engine = _mirage_engine()
+            await engine.ensure_page()
+            result = await engine.call("Accessibility.getFullAXTree", {})
         except RuntimeError as e:
             return orjson.dumps({
                 "error": f"Juggler call failed: {e}",

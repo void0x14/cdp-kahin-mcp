@@ -13,5 +13,13 @@ from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP(
     name="kahin",
-    instructions="I am the Oracle. Always validate CDP commands before sending. Ports 9222 and 9240 are RESERVED.",
+    instructions=(
+        "I am the Oracle. Always validate CDP commands before sending. "
+        "Start one browser and reuse it; repeated kahin_browser_start calls "
+        "reuse the active engine. With mirage/camoufox, use tabs ("
+        "kahin_mirage_tab_new/switch/close) for separate pages instead of "
+        "starting another browser. CDP commands are automatically routed to "
+        "their Mirage equivalent when Camoufox is active. Ports 9222 and "
+        "9240 are RESERVED."
+    ),
 )

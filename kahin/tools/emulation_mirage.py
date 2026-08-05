@@ -44,7 +44,9 @@ async def _read_viewport_size() -> dict[str, Any] | None:
     if err:
         return None
     try:
-        raw = await _mirage_engine().call("Runtime.evaluate", {
+        engine = _mirage_engine()
+        await engine.ensure_page()
+        raw = await engine.call("Runtime.evaluate", {
             "expression": "(() => ({width: window.innerWidth, height: window.innerHeight}))()",
         })
     except RuntimeError:

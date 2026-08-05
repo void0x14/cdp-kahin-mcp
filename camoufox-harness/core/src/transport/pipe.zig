@@ -116,7 +116,7 @@ pub fn spawn(allocator: Allocator, argv: []const []const u8) !Spawned {
     if (linux.errno(n) == .SUCCESS and n == 4) {
         // Child failed before/during exec; reap it and report the cause.
         var status: u32 = 0;
-        _ = linux.waitpid(pid, &status, 0);
+        _ = linux.waitpid(pid, @ptrCast(&status), 0);
         _ = linux.close(cmd[1]);
         _ = linux.close(resp[0]);
         return mapExecErrno(@enumFromInt(std.mem.readInt(u32, &errbuf, .little)));
@@ -309,7 +309,7 @@ pub fn closeFds(s: *Spawned) void {
 pub fn wait(s: *const Spawned) !u8 {
     var status: u32 = 0;
     while (true) {
-        const rc = linux.waitpid(s.pid, &status, 0);
+        const rc = linux.waitpid(s.pid, @ptrCast(&status), 0);
         switch (linux.errno(rc)) {
             .SUCCESS => break,
             .INTR => continue,

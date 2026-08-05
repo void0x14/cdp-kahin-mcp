@@ -8,6 +8,7 @@ engine's own ``is_alive()`` plus connection metadata.
 
 from __future__ import annotations
 
+import asyncio
 import orjson
 
 from kahin import _state as state
@@ -26,14 +27,16 @@ async def engine_health() -> str:
             return _dump({"engine": None, "error": "No browser engine running."})
         if isinstance(engine, Mirage):
             try:
-                result = await engine.call("Browser.health")
+                result = await asyncio.wait_for(engine.health(), timeout=5.0)
             except Exception as e:  # noqa: BLE001
+                engine._mark_dead()
                 return _dump({
                     "engine": "mirage",
-                    "alive": engine.is_alive(),
+                    "alive": False,
                     "error": f"Browser.health failed: {e}",
                 })
-            return _dump({"engine": "mirage", "alive": engine.is_alive(), "health": result})
+            alive = bool(result.get("alive"))
+            return _dump({"engine": "mirage", "alive": alive, "health": result})
         proc = engine._process  # BrowserEngine declares _process on the base class
         pid = proc.pid if proc is not None and proc.poll() is None else None
         return _dump({

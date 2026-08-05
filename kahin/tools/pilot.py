@@ -33,71 +33,131 @@ from kahin.tools._common import (
 
 logger = logging.getLogger(__name__)
 
+_ENGINE_START_TIMEOUT = 60.0
+_ENGINE_STOP_TIMEOUT = 15.0
+_ENGINE_HEALTH_TIMEOUT = 5.0
+
+
+async def _stop_engine(engine: Any) -> None:
+    """Best-effort bounded cleanup used on every failed lifecycle path."""
+    try:
+        await asyncio.wait_for(engine.stop(), timeout=_ENGINE_STOP_TIMEOUT)
+    except BaseException:  # noqa: BLE001 - cleanup must not mask the start error
+        logger.exception("browser cleanup failed for %s", type(engine).__name__)
+
+
+async def _engine_is_healthy(engine: Any) -> bool:
+    """Check the browser child, not only the Python/sidecar process."""
+    if isinstance(engine, Mirage):
+        try:
+            result = await asyncio.wait_for(engine.health(), timeout=_ENGINE_HEALTH_TIMEOUT)
+        except Exception:  # noqa: BLE001
+            engine._mark_dead()
+            return False
+        return bool(result.get("alive"))
+    return bool(engine.is_alive())
+
 
 @mcp.tool(name="kahin_browser_start", annotations=_RW)
 async def browser_start(engine: str = "shadow", headless: bool = True, port: int = 0) -> str:
-    """Start a browser engine. Choose shadow (fast Chrome) or mirage/camoufox (stealth Camoufox, Juggler pipe). Ports 9222/9240 are RESERVED."""
+    """Start or reuse one browser engine.
+
+    Mirage/camoufox tabs live inside this one process. Repeating a start for
+    the active engine is idempotent; use ``kahin_mirage_tab_new`` for another
+    task/page instead of booting another browser.
+    """
     if port in (9222, 9240):
         return orjson.dumps({"error": f"Port {port} is RESERVED. Use a different port."}).decode()
 
     if engine not in ("shadow", "mirage", "camoufox"):
         return f"Unknown engine: {engine}. Use 'shadow', 'mirage' or 'camoufox'."
 
-    if state._current_engine is not None:
-        if state._current_engine.is_alive():
-            return "Engine already running. Stop it first with kahin_browser_stop."
-        # Dead engine (crash / reader EOF): replace it instead of refusing.
-        logger.warning("replacing dead engine: %s", type(state._current_engine).__name__)
-        try:
-            await state._current_engine.stop()
-        except Exception:  # noqa: BLE001
-            pass
-        state._current_engine = None
-        state.clear_state()
+    async with state._lifecycle_lock:
+        async with _healer_ref.safe("kahin_browser_start", engine=engine, headless=headless, port=port):
+            current = state._current_engine
+            if current is not None:
+                if await _engine_is_healthy(current):
+                    current_kind = "shadow" if isinstance(current, Obscura) else "mirage"
+                    requested_kind = "shadow" if engine == "shadow" else "mirage"
+                    if current_kind == requested_kind:
+                        # Same browser, same process: callers may safely make
+                        # start part of their setup without leaking a child.
+                        return orjson.dumps({
+                            "status": "reused",
+                            "engine": current_kind,
+                            "message": "Engine already running; reusing the existing browser and tabs.",
+                            "port": port or (9241 if current_kind == "shadow" else 0),
+                        }, option=orjson.OPT_INDENT_2).decode()
+                    return orjson.dumps({
+                        "error": f"Engine {current_kind} already running. Stop it before switching to {engine}.",
+                        "hint": "Reuse the current engine or use its tab tools; no second browser was started.",
+                    }, option=orjson.OPT_INDENT_2).decode()
 
-    async with _healer_ref.safe("kahin_browser_start", engine=engine, headless=headless, port=port):
-        if engine == "shadow":
-            state._current_engine = Obscura()
-            actual_port = port or 9241
-        else:
-            state._current_engine = Mirage(engine_name=engine)
-            actual_port = 0  # Juggler pipe: no remote-debugging port (9222/9240 irrelevant)
+                # The sidecar can outlive its Firefox child briefly. Probe
+                # above catches that; now reap the stale process before any
+                # replacement is allowed to start.
+                logger.warning("replacing dead engine: %s", type(current).__name__)
+                await _stop_engine(current)
+                state._current_engine = None
+                state.clear_state()
 
-        try:
-            _ctx = await asyncio.wait_for(
-                state._current_engine.start(headless=headless, port=actual_port),
-                timeout=15.0,
-            )
-        except asyncio.TimeoutError:
-            state._current_engine = None
-            raise RuntimeError(f"Engine {engine} failed to start on port {actual_port} (timeout)")
-        except RuntimeError:
-            state._current_engine = None
-            raise
-        except Exception as e:
-            state._current_engine = None
-            raise RuntimeError(f"Unexpected error starting {engine}: {e}") from e
+            if engine == "shadow":
+                candidate: Any = Obscura()
+                actual_port = port or 9241
+            else:
+                candidate = Mirage(engine_name=engine)
+                actual_port = 0  # Juggler pipe: no remote-debugging port
 
-        # Register event collectors + liveness hook (reader-death clears state)
-        await state._current_engine.on_event(_on_cdp_event)
-        await state._current_engine.on_event(_on_network_event)
-        await state._current_engine.on_event(_on_console_event)
-        eng = state._current_engine
-        eng.on_death(lambda: _on_engine_death(eng))
+            try:
+                _ctx = await asyncio.wait_for(
+                    candidate.start(headless=headless, port=actual_port),
+                    timeout=_ENGINE_START_TIMEOUT,
+                )
+            except asyncio.TimeoutError as exc:
+                await _stop_engine(candidate)
+                raise RuntimeError(
+                    f"Engine {engine} failed to start on port {actual_port} (timeout after {_ENGINE_START_TIMEOUT:.0f}s)"
+                ) from exc
+            except BaseException:
+                await _stop_engine(candidate)
+                raise
 
-        return orjson.dumps({"status": "started", "engine": engine, "port": actual_port}, option=orjson.OPT_INDENT_2).decode()
+            # Publish only a fully booted engine. If registration or a later
+            # callback fails, the same cleanup rule prevents an orphan.
+            try:
+                state._current_engine = candidate
+                await candidate.on_event(_on_cdp_event)
+                await candidate.on_event(_on_network_event)
+                await candidate.on_event(_on_console_event)
+                eng = candidate
+                eng.on_death(lambda: _on_engine_death(eng))
+            except BaseException:
+                state._current_engine = None
+                await _stop_engine(candidate)
+                state.clear_state()
+                raise
+
+            return orjson.dumps({
+                "status": "started",
+                "engine": engine,
+                "port": actual_port,
+                "tabs": [],
+                "hint": "Reuse this browser; for separate work create/switch a Mirage tab.",
+            }, option=orjson.OPT_INDENT_2).decode()
 
 
 @mcp.tool(name="kahin_browser_stop", annotations=_RW)
 async def browser_stop() -> str:
     """Stop the active browser engine."""
-    if state._current_engine is None:
-        return "No engine running."
-    async with _healer_ref.safe("kahin_browser_stop"):
-        await state._current_engine.stop()
-        state._current_engine = None
-        state.clear_state()
-        return '{"status": "stopped"}'
+    async with state._lifecycle_lock:
+        if state._current_engine is None:
+            return "No engine running."
+        async with _healer_ref.safe("kahin_browser_stop"):
+            engine = state._current_engine
+            await _stop_engine(engine)
+            state._current_engine = None
+            state.clear_state()
+            return '{"status": "stopped"}'
 
 
 @mcp.tool(name="kahin_navigate", annotations=_RW)

@@ -101,6 +101,13 @@ Camoufox (Juggler native) ile, engine `mirage` seçilince:
 → kahin_mirage_accessibility_tree → kahin_engine_health
 ```
 
+`kahin_browser_start` tek bir Camoufox/sidecar süreci açar. İlk sayfa işlemi
+aynı süreç içinde varsayılan bir sekmeyi tembel olarak oluşturur; sonraki işler
+bu sekmeyi yeniden kullanır. Ayrı bir sayfa gerektiğinde yeni tarayıcı başlatmak
+yerine `kahin_mirage_tab_new` ve `kahin_mirage_tab_switch` kullanın. Camoufox
+aktifken `kahin_execute_cdp` ve diğer CDP araçları, eşdeğer Juggler/Mirage
+çağrısına otomatik yönlendirilir ve CDP biçimli sonuç döndürür.
+
 Tam liste için: [AGENTS.md](AGENTS.md)
 
 ## Proje Felsefesi

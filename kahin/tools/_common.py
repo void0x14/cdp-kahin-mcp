@@ -13,6 +13,7 @@ NOTES
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 from urllib.parse import urlparse
@@ -66,6 +67,18 @@ _RO = {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "
 _RW = {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
 _DW = {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": True}
 
+_MIRAGE_PAGE_DOMAINS = ("Page", "Runtime", "Network", "Input", "Accessibility", "Heap")
+_MIRAGE_HEALTH_TIMEOUT = 5.0
+
+
+def _needs_mirage_page(domain: str, command: str) -> bool:
+    """Whether a CDP-looking operation needs a current Mirage tab."""
+    if domain not in _MIRAGE_PAGE_DOMAINS:
+        return False
+    # Closing a tab must report the real missing-target error; it must not
+    # create a fresh tab just so it can immediately close it.
+    return not (domain == "Page" and command == "close")
+
 
 async def _safe_cdp(domain: str, command: str, params: dict[str, Any] | None = None) -> str:
     """Execute CDP with error handling + auto-education. Returns JSON string.
@@ -78,9 +91,10 @@ async def _safe_cdp(domain: str, command: str, params: dict[str, Any] | None = N
         return err
     engine = state._current_engine
     try:
-        method = f"{domain}.{command}"
         if isinstance(engine, Mirage):
-            result = await engine.call(method, params or {})
+            if _needs_mirage_page(domain, command):
+                await engine.ensure_page()
+            result = await engine.execute_cdp(domain, command, params or {})
         else:
             result = await engine.send_cdp(domain, command, params or {})  # type: ignore[union-attr]
         return orjson.dumps(result, option=orjson.OPT_INDENT_2).decode()
@@ -108,6 +122,19 @@ async def _require_engine() -> str | None:
     engine = state._current_engine
     if engine is None:
         return "No browser engine running. Use kahin_browser_start first."
+    if isinstance(engine, Mirage):
+        try:
+            health = await asyncio.wait_for(engine.health(), timeout=_MIRAGE_HEALTH_TIMEOUT)
+        except asyncio.TimeoutError:
+            engine._mark_dead()
+            state._current_engine = None
+            state.clear_state()
+            return "Browser engine health check timed out. Use kahin_browser_start to restart."
+        if not health.get("alive"):
+            state._current_engine = None
+            state.clear_state()
+            return "Browser engine is dead (crashed). Use kahin_browser_start to restart."
+        return None
     if not engine.is_alive():
         state._current_engine = None
         state.clear_state()
@@ -142,7 +169,11 @@ async def _mirage_call(method: str, params: dict[str, Any] | None = None) -> str
     if err:
         return err
     try:
-        result = await _mirage_engine().call(method, params or {})
+        domain, _, command = method.partition(".")
+        engine = _mirage_engine()
+        if _needs_mirage_page(domain, command):
+            await engine.ensure_page()
+        result = await engine.call(method, params or {})
         return orjson.dumps(result, option=orjson.OPT_INDENT_2).decode()
     except RuntimeError as e:
         return orjson.dumps({
@@ -171,6 +202,7 @@ async def _mirage_eval_result(expression: str, frame_id: str | None = None) -> d
     if err:
         return err
     engine = _mirage_engine()
+    await engine.ensure_page()
     method = "Runtime.evaluate"
     params: dict[str, Any] = {"expression": expression}
     if frame_id is not None:

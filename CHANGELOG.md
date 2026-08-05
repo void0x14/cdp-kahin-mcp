@@ -2,6 +2,19 @@
 
 Tüm önemli değişiklikler bu dosyada tutulur. Format: [Keep a Changelog](https://keepachangelog.com/tr/1.1.0/) — [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.2] — 2026-08-05
+
+### Düzeltilen
+- Camoufox/Mirage artık aynı browser sürecini ve sekmeleri yeniden kullanıyor; tekrar eden `browser_start` çağrıları ikinci browser açmıyor.
+- Başlangıç, sağlık kontrolü ve stop timeout'larında sidecar/Camoufox orphan süreçleri temizleniyor.
+- Mirage araçlarının ilk sekme yokken timeout olması düzeltildi; eşzamanlı ilk çağrılar tek sekmeye birleşiyor.
+- CDP çağrıları Target/Input/Emulation/Network eşdeğerlerine otomatik yönlendiriliyor ve CDP biçimli sonuç döndürüyor.
+- Eşzamanlı Juggler çağrılarında yanlış pending request silinmesi düzeltildi.
+
+### Testler
+- Python uygulama testleri: 106 passed
+- Zig sidecar testleri: passed
+
 ## [0.3.0] — 2026-08-03
 
 ### Eklenen
@@ -80,6 +93,7 @@ Tüm önemli değişiklikler bu dosyada tutulur. Format: [Keep a Changelog](http
 - Zig Juggler harness: pipe transport, Browser/Page/Runtime/Network/Input/Emulation adapters, interception, process manager, perf + crash-recovery
 - CDP ansiklopedisi: 56 domain, 667 komut, 237 event, 609 type (Chrome 148)
 
+[0.3.2]: https://gitlab.com/void0x14/kahin-mcp/-/compare/v0.3.1...v0.3.2
 [0.2.0]: https://gitlab.com/void0x14/kahin-mcp/-/compare/v0.1.8...v0.2.0
 [0.1.8]: https://gitlab.com/void0x14/kahin-mcp/-/compare/v0.1.7...v0.1.8
 [0.1.7]: https://gitlab.com/void0x14/kahin-mcp/-/compare/v0.1.6...v0.1.7
