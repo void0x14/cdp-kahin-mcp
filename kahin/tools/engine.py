@@ -26,7 +26,11 @@ async def engine_health() -> str:
     async with _healer_ref.safe("kahin_engine_health"):
         engine = state._current_engine
         if engine is None:
-            return _dump({"engine": None, "error": "No browser engine running."})
+            return _dump({
+                "engine": None,
+                "error": "No browser engine running.",
+                "code": "engine_unavailable",
+            })
         if isinstance(engine, Mirage):
             try:
                 result = await asyncio.wait_for(engine.health(), timeout=5.0)

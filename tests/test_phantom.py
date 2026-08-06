@@ -11,7 +11,6 @@ Covers the Faz 9 Task 3 liveness contract over a fake sidecar:
 """
 
 import asyncio
-import json
 from pathlib import Path
 
 import pytest

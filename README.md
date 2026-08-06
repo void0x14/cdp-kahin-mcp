@@ -16,7 +16,7 @@ AI modeller Chrome'un içine girip sayfa gezip kod çalıştırabilir ama CDP'yi
 
 56 domain, 667 komut, 237 event, 609 type — Chrome 148 protokolü gömülü.
 
-## 109 Tool · 4 Kategori Ailesi · 2 Engine
+## 110 Tool · 4 Kategori Ailesi · 2 Engine
 
 Tool'lar engine-ayrımlı kategori dosyalarında (`kahin/tools/`): paylaşılan çekirdek + Obscura + Camoufox aileleri.
 
@@ -32,7 +32,7 @@ Tool'lar engine-ayrımlı kategori dosyalarında (`kahin/tools/`): paylaşılan 
 |  MIRAGE — Camoufox Native (77) | Juggler protokolü üstünde gerçek-zamanlı DOM stream, DOM, Input, PageEx, Tab, Network, Storage, Emulation, Dialog/Download/Worker/WS, Upload, Screencast, Accessibility, Engine sağlığı | 77 |
 |  OBSCURA — Ayrı kategori | Obscura'ya özel tool'lar (hazırlanıyor) | 0 |
 
-**Toplam: 109 tool.**
+**Toplam: 110 tool.**
 
 ## Bir satırda özet
 
@@ -40,7 +40,9 @@ CDP'yi bilmeyen AI'a Chrome'u kontrol etmeyi öğreten, yanlış yapınca düzel
 
 ## Kurulum
 
-Zorunlu: Python 3.12+ · Chrome/Chromium · Node.js 18+ (npm launcher için)
+Zorunlu: Python 3.12+ · Node.js 18+ (npm launcher için). Kahin'in varsayılan
+Camoufox binary'si kurulum sırasında resmi `camoufox fetch` komutuyla hazır edilir;
+Chrome/Chromium kurulumu gerekmez.
 
 ### Otomatik kurulum — tek komut
 
@@ -156,14 +158,14 @@ Kahin'de hata loglama ve kendini onarma sistemi gömülüdür:
 
 ```
 oracle.py               → MCP server (bootstrap: mcp instance + engine lifecycle + main)
-  tools/                → 109 tool, engine-ayrımlı kategori dosyaları
+  tools/                → 110 tool, engine-ayrımlı kategori dosyaları
     _common.py          → capability routing, _safe_cdp, _require_engine, _auto_learn
     the_twins/capabilities → motor-yetenek sözleşmesi ve Mirage yükseltme matrisi
     grimoire/seraph/prophecy/healer → CDP bilgi + doğrulama + pattern (paylaşılan)
     pilot/trainman/dejavu           → browser/session/debug (paylaşılan)
     pilot_mirage/trainman_mirage/dejavu_mirage → Camoufox DOM+Input+PageEx / Tab / Network+Console
     storage_mirage/emulation_mirage/dialog_mirage → Storage / Emulation / Dialog+Download+Worker+WS
-    pilot_obscura/trainman_obscura/dejavu_obscura → Obscura ayrı kategoriler (hazırlanıyor)
+    pilot_obscura/trainman_obscura/dejavu_obscura → Shadow için ayrılmış paket sınırları; sahte tool kaydetmez
     engine.py           → engine_health
   _healer.py            → Hata yönetimi, loglama, kendini onarma
   the_source/architect  → CDP şema motoru (56 domain, 667 komut)
@@ -185,7 +187,7 @@ camoufox-harness/       → Zig sidecar (Juggler protocol, vendor binary gömül
 - [x] **Tek tık kurulum** — `pnpm add -g @kahinmcp/kahin`, sonra `kahin` (ilk çalıştırmada Python ortamını otomatik kurar)
 - [ ] **Zero-dependency** hedefi (Go/Rust portu)
 - [ ] **LSP modu** — kod içinde hata yakalama, AI'a yanlışını yüzüne vurma
-- [x] **Tool sayısı 109** — Camoufox Juggler-native 77 tool (gerçek-zamanlı DOM stream, DOM, Input, Network, Storage, Emulation, Dialog, Tab, Worker/WS, Upload, Screencast, Accessibility) + paylaşılan 32 çekirdek
+- [x] **Tool sayısı 110** — Camoufox Juggler-native 78 tool (gerçek-zamanlı DOM stream, DOM, Input, Network, Storage, Emulation, Dialog, Tab, Worker/WS, Upload, Screencast, Accessibility) + paylaşılan 32 çekirdek
 - [ ] **Obscura ayrı tool'ları** — CDP-yeteneklerine özel pilot_obscura/trainman_obscura/dejavu_obscura kategorilerini doldur
 
 - [ ] **Gerçek zamanlı izleme** — AI'ın Kahin'i nasıl kullandığını canlı gör
@@ -207,7 +209,7 @@ camoufox-harness/       → Zig sidecar (Juggler protocol, vendor binary gömül
 ## Geliştirme
 
 ```bash
-uv run pytest tests/          # 109 tests (all pass when Camoufox is available)
+uv run pytest -q tests/       # gerçek motor mevcutsa E2E dahil tam suite
 uv run ruff check kahin/      # lint
 uv run python -m kahin.oracle # manuel başlatma
 ```

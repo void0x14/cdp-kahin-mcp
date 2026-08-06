@@ -1,7 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PUBLISHED=$(npm view @kahinmcp/kahin version 2>/dev/null || echo none)
+query_err=$(mktemp)
+trap 'rm -f "$query_err"' EXIT
+set +e
+PUBLISHED=$(npm view @kahinmcp/kahin version 2>"$query_err")
+query_status=$?
+set -e
+if [ "$query_status" -ne 0 ]; then
+  # A first publication legitimately returns 404.  Authentication, registry,
+  # and network failures must stop the release; treating them as "unpublished"
+  # can turn a transient outage into a misleading publish attempt.
+  if grep -q "E404\|404 Not Found" "$query_err"; then
+    PUBLISHED=none
+  else
+    cat "$query_err" >&2
+    echo "npm registry query failed; release publication aborted" >&2
+    exit "$query_status"
+  fi
+fi
 LOCAL=$(node -p "require('./package.json').version")
 echo "npm: $PUBLISHED | local: $LOCAL"
 

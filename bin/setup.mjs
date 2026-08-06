@@ -324,10 +324,12 @@ export function setup() {
 const KAHIN_HOME = process.env.KAHIN_HOME || join(homedir(), ".local", "share", "kahin");
 const KAHIN_VENV = join(KAHIN_HOME, "venv");
 const KAHIN_PY = process.platform === "win32" ? join(KAHIN_VENV, "Scripts", "python.exe") : join(KAHIN_VENV, "bin", "python");
-const KAHIN_WHEEL = join(dirname(fileURLToPath(import.meta.url)), "..", "lib", "kahin-0.3.6-py3-none-any.whl");
+const KAHIN_WHEEL = join(dirname(fileURLToPath(import.meta.url)), "..", "lib", "kahin-0.3.7-py3-none-any.whl");
 
-// Gömülü wheel'i venv'e kurar. Postinstall'da ve `kahin setup`'ta çalışır.
-// PyPI'a bağımlı DEĞİL — wheel paketle birlikte gelir.
+// Gömülü wheel'i venv'e kurar ve varsayılan Camoufox binary'sini hazırlar.
+// PyPI'a bağımlı DEĞİL — wheel paketle birlikte gelir; wheel'in bağımlılıkları
+// (Camoufox dahil) pip tarafından kurulup resmi `camoufox fetch` ile tarayıcı
+// cache'i doldurulur.
 export async function installPython() {
   if (process.env.KAHIN_SKIP_PYTHON) {
     log("python kurulumu atlandı (KAHIN_SKIP_PYTHON)");
@@ -347,24 +349,35 @@ export async function installPython() {
       return { error: code };
     }
   }
-  const check = await run(KAHIN_PY, ["-c", "import kahin; print(kahin.__version__)"]);
-  if (check === 0) {
-    log("kahin zaten kurulu, atlandı");
-    return { installed: true };
-  }
   log(`wheel kuruluyor: ${KAHIN_WHEEL}`);
   const code = await run(KAHIN_PY, ["-m", "pip", "install", "--upgrade", KAHIN_WHEEL]);
   if (code !== 0) {
     log(`wheel kurulamadı (çıkış ${code})`);
     return { error: code };
   }
-  log("kahin python paketi kuruldu");
-  return { installed: true };
+  log("kahin python paketi kuruldu/güncellendi");
+
+  if (process.env.KAHIN_SKIP_CAMOUFOX_FETCH) {
+    log("Camoufox fetch atlandı (KAHIN_SKIP_CAMOUFOX_FETCH)");
+    return { installed: true, camoufox: "skipped" };
+  }
+  log("Camoufox browser hazırlanıyor (resmi camoufox fetch)...");
+  const browserCode = await run(KAHIN_PY, ["-m", "camoufox", "fetch"]);
+  if (browserCode !== 0) {
+    log(`Camoufox browser hazırlanamadı (çıkış ${browserCode}); kahin browser_start sırasında tekrar deneyecek`);
+    return { installed: true, camoufox: "error", error: browserCode };
+  }
+  log("Camoufox browser hazır");
+  return { installed: true, camoufox: "ready" };
 }
 
 function run(cmd, args) {
   return new Promise((resolve) => {
     const c = spawn(cmd, args, { stdio: ["ignore", "ignore", "pipe"] });
+    c.on("error", (err) => {
+      process.stderr.write(`[kahin] ${cmd} başlatılamadı: ${err.message}\n`);
+      resolve(1);
+    });
     c.stderr.on("data", (d) => process.stderr.write(`[kahin] ${d}`));
     c.on("close", (code) => resolve(code));
   });
@@ -372,5 +385,6 @@ function run(cmd, args) {
 
 if (process.argv[1] && process.argv[1].endsWith("setup.mjs")) {
   setup();
-  installPython();
+  const result = await installPython();
+  if (result?.error) process.exitCode = 1;
 }

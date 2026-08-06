@@ -35,10 +35,19 @@ import orjson
 from kahin._mcp import mcp
 from kahin.tools._common import _RO, _healer_ref, _mirage_engine, _require_mirage
 
+_MAX_AX_NODES = 5000
+_MAX_AX_RESPONSE_BYTES = 8 * 1024 * 1024
+
 
 def _count(tree: dict[str, Any]) -> int:
-    """Total node count of an AXTree (recursive)."""
-    return 1 + sum(_count(c) for c in tree.get("children") or [])
+    """Total node count of an AXTree without recursion depth risk."""
+    total = 0
+    stack: list[dict[str, Any]] = [tree]
+    while stack:
+        node = stack.pop()
+        total += 1
+        stack.extend(child for child in node.get("children") or [] if isinstance(child, dict))
+    return total
 
 
 def _trim(tree: dict[str, Any], budget: int) -> dict[str, Any]:
@@ -79,17 +88,25 @@ async def mirage_accessibility_tree(max_nodes: int = 200) -> str:
     count, truncated true when the returned tree was cut to max_nodes
     (keep it high for complete dumps)."""
     async with _healer_ref.safe("kahin_mirage_accessibility_tree", max_nodes=str(max_nodes)):
-        if max_nodes <= 0:
+        if isinstance(max_nodes, bool) or not isinstance(max_nodes, int) or max_nodes <= 0:
             return orjson.dumps({
                 "error": "max_nodes must be a positive integer",
+                "code": "invalid_argument",
+                "field": "max_nodes",
             }, option=orjson.OPT_INDENT_2).decode()
         err = await _require_mirage()
         if err:
             return err
         try:
             engine = _mirage_engine()
-            await engine.ensure_page()
-            result = await engine.call("Accessibility.getFullAXTree", {})
+            page = await engine.ensure_page()
+            session_id = page.get("sessionId") if isinstance(page, dict) else None
+            if not isinstance(session_id, str) or not session_id:
+                return orjson.dumps({
+                    "error": "selected page has no live session",
+                    "code": "session_unavailable",
+                }, option=orjson.OPT_INDENT_2).decode()
+            result = await engine.call("Accessibility.getFullAXTree", {}, session_id=session_id)
         except RuntimeError as e:
             return orjson.dumps({
                 "error": f"Juggler call failed: {e}",
@@ -105,11 +122,35 @@ async def mirage_accessibility_tree(max_nodes: int = 200) -> str:
             return orjson.dumps({
                 "error": f"getFullAXTree returned no tree: {result}",
             }, option=orjson.OPT_INDENT_2).decode()
+        # The current native protocol returns the complete tree before this
+        # tool can trim it. Refuse pathological responses before doing a
+        # second unbounded traversal and public serialization.
+        try:
+            response_bytes = len(orjson.dumps(result))
+        except (TypeError, ValueError) as exc:
+            return orjson.dumps({
+                "error": f"getFullAXTree returned an unserializable tree: {exc}",
+                "code": "invalid_native_response",
+            }, option=orjson.OPT_INDENT_2).decode()
+        if response_bytes > _MAX_AX_RESPONSE_BYTES:
+            return orjson.dumps({
+                "error": "accessibility tree exceeds Kahin's bounded response size",
+                "code": "result_too_large",
+                "payloadBytes": response_bytes,
+                "maxPayloadBytes": _MAX_AX_RESPONSE_BYTES,
+                "hint": "Reduce the page accessibility surface before requesting a full tree.",
+            }, option=orjson.OPT_INDENT_2).decode()
+        effective_max = min(max_nodes, _MAX_AX_NODES)
         total = _count(tree)
-        truncated = total > max_nodes
-        payload = _trim(tree, max_nodes) if truncated else tree
+        # Clamping the caller's budget is not itself evidence that the page
+        # tree was truncated. A 7-node page requested with max_nodes=100000
+        # still returns all 7 nodes even though the safe internal ceiling is
+        # 5000. Report truncation only when nodes were actually removed.
+        truncated = total > effective_max
+        payload = _trim(tree, effective_max) if truncated else tree
         return orjson.dumps({
             "tree": payload,
             "nodeCount": total,
             "truncated": truncated,
+            "maxNodes": effective_max,
         }, option=orjson.OPT_INDENT_2).decode()

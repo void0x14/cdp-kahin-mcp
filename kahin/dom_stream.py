@@ -21,7 +21,11 @@ DOM_STREAM_INIT_SCRIPT = r"""
 (() => {
   const KEY = "__kahin_dom_stream_v1";
   const BINDING = "__kahin_dom_notify_v1";
-  if (window[KEY] && window[KEY].version === 1) return;
+  if (window[KEY] && window[KEY].version === 1 && window[KEY].active) return;
+  if (window[KEY] && window[KEY].version === 1 && !window[KEY].active) {
+    try { window[KEY].stop?.(); } catch (_) {}
+    try { delete window[KEY]; } catch (_) { window[KEY] = null; }
+  }
 
   const clamp = (value, low, high, fallback) => {
     const n = Number(value);
@@ -225,14 +229,20 @@ DOM_STREAM_INIT_SCRIPT = r"""
       const limit = clamp(options.limit, 1, 500, 100);
       const first = events.length ? events[0].seq : nextSeq + 1;
       const dropped = reset || (events.length > 0 && after < first - 1);
+      const available = events.filter((event) => event.seq > after);
+      const selected = available.slice(0, limit);
+      const cursor = selected.length ? selected[selected.length - 1].seq : after;
       return {
         streamId,
-        cursor: nextSeq,
+        // Return the last sequence actually delivered. Returning nextSeq
+        // here would skip pending events when the caller uses a small limit.
+        cursor,
         revision,
         reset,
         dropped,
-        events: events.filter((event) => event.seq > after).slice(0, limit),
-        pending: events.filter((event) => event.seq > after).length,
+        events: selected,
+        pending: available.length,
+        hasMore: available.length > selected.length,
         url: location.href,
       };
     };
@@ -313,19 +323,37 @@ DOM_STREAM_INIT_SCRIPT = r"""
       if (!(el instanceof Element) || !el.isConnected) {
         return {error: "stale_node", nodeId, requiresSnapshot: true};
       }
-      const allowed = ["click", "focus", "hover", "type", "scroll"];
+      const allowed = ["click", "focus", "hover", "type", "scroll", "select"];
       if (!allowed.includes(action)) return {error: "unsupported_action", action, allowed};
       if (action === "type" && roleOf(el) !== "textbox") {
         return {error: "not_text_input", nodeId, role: roleOf(el)};
       }
       el.scrollIntoView({block: "center", inline: "center"});
+      if (action === "select") {
+        if (!(el instanceof HTMLSelectElement)) return {error: "not_select", nodeId};
+        const wanted = String(options.text ?? "");
+        const option = Array.from(el.options).find((candidate) =>
+          candidate.value === wanted || candidate.textContent?.trim() === wanted);
+        if (!option) return {error: "option_not_found", nodeId, value: wanted};
+        el.value = option.value;
+        el.dispatchEvent(new Event("input", {bubbles: true}));
+        el.dispatchEvent(new Event("change", {bubbles: true}));
+      }
       if (action === "focus" || action === "type") el.focus();
       const rect = el.getBoundingClientRect();
-      const frame = window.frameElement;
-      const frameRect = frame ? frame.getBoundingClientRect() : {x: 0, y: 0};
+      let x = rect.x + rect.width / 2;
+      let y = rect.y + rect.height / 2;
+      let owner = window;
+      while (owner !== owner.top) {
+        const frame = owner.frameElement;
+        if (!frame) break;
+        const frameRect = frame.getBoundingClientRect();
+        x += frameRect.x;
+        y += frameRect.y;
+        owner = owner.parent;
+      }
       return {ready: true, nodeId, action, tag: el.tagName.toLowerCase(),
-        role: roleOf(el), x: frameRect.x + rect.x + rect.width / 2,
-        y: frameRect.y + rect.y + rect.height / 2};
+        role: roleOf(el), x, y, scrolled: action === "scroll"};
     };
     state.stop = () => {
       state.active = false;

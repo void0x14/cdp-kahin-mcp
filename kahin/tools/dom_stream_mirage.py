@@ -37,6 +37,49 @@ def _dump(value: Any) -> str:
     return orjson.dumps(value, option=orjson.OPT_INDENT_2).decode()
 
 
+_MAX_SELECTOR = 16_384
+_MAX_FRAME_ID = 512
+_MAX_TEXT = 1_000_000
+_MAX_SAFE_INTEGER = 9_007_199_254_740_991
+
+
+def _argument_error(tool: str, field: str, message: str) -> str:
+    return _dump({"error": message, "code": "invalid_argument", "tool": tool, "field": field})
+
+
+def _optional_text(
+    value: Any,
+    field: str,
+    maximum: int,
+    tool: str = "kahin_mirage_dom",
+) -> tuple[str | None, str | None]:
+    if value is None:
+        return None, None
+    if not isinstance(value, str):
+        return None, _argument_error(tool, field, f"{field} must be a string")
+    if len(value) > maximum:
+        return None, _argument_error(
+            tool, field, f"{field} exceeds the {maximum}-character limit",
+        )
+    return value, None
+
+
+def _bounded_int(
+    value: Any,
+    field: str,
+    minimum: int,
+    maximum: int,
+    tool: str = "kahin_mirage_dom",
+) -> tuple[int, str | None]:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0, _argument_error(tool, field, f"{field} must be an integer")
+    if value < minimum:
+        return 0, _argument_error(tool, field, f"{field} must be at least {minimum}")
+    if value > _MAX_SAFE_INTEGER:
+        return 0, _argument_error(tool, field, f"{field} exceeds JavaScript's safe integer range")
+    return min(value, maximum), None
+
+
 def _unwrap(raw: dict[str, Any] | str) -> tuple[Any | None, str | None]:
     if isinstance(raw, str):
         return None, raw
@@ -48,32 +91,47 @@ def _unwrap(raw: dict[str, Any] | str) -> tuple[Any | None, str | None]:
     return result.get("value"), None
 
 
-async def _prepare(frame_id: str | None, max_events: int = 512) -> tuple[Any | None, str | None]:
+async def _prepare(
+    frame_id: str | None,
+    max_events: int | None = None,
+) -> tuple[Any | None, str | None, str | None]:
     err = await _require_mirage()
     if err:
-        return None, err
+        return None, None, err
     engine = _mirage_engine()
-    await engine.ensure_page()
+    try:
+        page = await engine.ensure_page()
+        session_id = page.get("sessionId")
+    except Exception as exc:  # noqa: BLE001 - tool returns structured failure
+        return None, None, _dump({"error": "DOM stream page setup failed", "detail": str(exc)})
+    if not isinstance(session_id, str) or not session_id:
+        return None, None, _dump({"error": "DOM stream has no live page session", "code": "session_unavailable"})
     try:
         await engine.install_dom_stream(DOM_STREAM_INIT_SCRIPT)
-        raw = await _mirage_eval_result(DOM_STREAM_INIT_SCRIPT, frame_id)
+        raw = await _mirage_eval_result(DOM_STREAM_INIT_SCRIPT, frame_id, session_id=session_id)
         if isinstance(raw, str):
-            return None, raw
+            return None, None, raw
         if raw.get("exceptionDetails"):
-            return None, _dump({"error": "DOM stream setup threw", "exception": raw["exceptionDetails"]})
-        configure = await _mirage_eval_result(
-            js_call("configure", {"maxEvents": max_events}), frame_id
-        )
-        _, error = _unwrap(configure)
-        if error:
-            return None, error
+            return None, None, _dump({"error": "DOM stream setup threw", "exception": raw["exceptionDetails"]})
+        if max_events is not None:
+            configure = await _mirage_eval_result(
+                js_call("configure", {"maxEvents": max_events}), frame_id, session_id=session_id
+            )
+            _, error = _unwrap(configure)
+            if error:
+                return None, None, error
     except Exception as exc:  # noqa: BLE001 - tool returns structured failure
-        return None, _dump({"error": "DOM stream setup failed", "detail": str(exc)})
-    return engine, None
+        return None, None, _dump({"error": "DOM stream setup failed", "detail": str(exc)})
+    return engine, session_id, None
 
 
-async def _call_page(method: str, params: dict[str, Any], frame_id: str | None) -> tuple[Any | None, str | None]:
-    raw = await _mirage_eval_result(js_call(method, params), frame_id)
+async def _call_page(
+    method: str,
+    params: dict[str, Any],
+    frame_id: str | None,
+    session_id: str,
+) -> tuple[Any | None, str | None]:
+    raw = await _mirage_eval_result(js_call(method, params), frame_id, session_id=session_id)
     return _unwrap(raw)
 
 
@@ -88,14 +146,21 @@ async def mirage_dom_start(
     ``frame_id`` targets an iframe for the immediate status; future frames are
     covered by the same browser-level init script.
     """
-    async with _healer_ref.safe("kahin_mirage_dom_start", frame_id=frame_id, max_events=max_events):
-        engine, error = await _prepare(frame_id, max_events=max_events)
+    checked_frame, error = _optional_text(frame_id, "frame_id", _MAX_FRAME_ID, "kahin_mirage_dom_start")
+    if error:
+        return error
+    checked_events, error = _bounded_int(max_events, "max_events", 32, 2000, "kahin_mirage_dom_start")
+    if error:
+        return error
+    async with _healer_ref.safe("kahin_mirage_dom_start", frame_id=checked_frame, max_events=checked_events):
+        engine, session_id, error = await _prepare(checked_frame, max_events=checked_events)
         if error:
             return error
-        value, error = await _call_page("status", {}, frame_id)
+        assert engine is not None and session_id is not None
+        value, error = await _call_page("status", {}, checked_frame, session_id)
         if error:
             return error
-        return _dump({"status": "started", "stream": value, "frame_id": frame_id})
+        return _dump({"status": "started", "stream": value, "frame_id": checked_frame})
 
 
 @mcp.tool(name="kahin_mirage_dom_snapshot", annotations=_RO)
@@ -114,19 +179,37 @@ async def mirage_dom_snapshot(
     ``truncated`` result is an instruction to narrow with ``selector`` or
     increase caps; it is never silently presented as a complete page.
     """
+    checked_selector, error = _optional_text(selector, "selector", _MAX_SELECTOR, "kahin_mirage_dom_snapshot")
+    if error:
+        return error
+    checked_frame, error = _optional_text(frame_id, "frame_id", _MAX_FRAME_ID, "kahin_mirage_dom_snapshot")
+    if error:
+        return error
+    checked_nodes, error = _bounded_int(max_nodes, "max_nodes", 1, 5000, "kahin_mirage_dom_snapshot")
+    if error:
+        return error
+    checked_depth, error = _bounded_int(max_depth, "max_depth", 1, 32, "kahin_mirage_dom_snapshot")
+    if error:
+        return error
+    checked_text, error = _bounded_int(text_limit, "text_limit", 20, 2000, "kahin_mirage_dom_snapshot")
+    if error:
+        return error
+    if not isinstance(include_hidden, bool):
+        return _argument_error("kahin_mirage_dom_snapshot", "include_hidden", "include_hidden must be a boolean")
     async with _healer_ref.safe(
-        "kahin_mirage_dom_snapshot", selector=selector or "", frame_id=frame_id
+        "kahin_mirage_dom_snapshot", selector=checked_selector or "", frame_id=checked_frame
     ):
-        _, error = await _prepare(frame_id)
+        _, session_id, error = await _prepare(checked_frame)
         if error:
             return error
+        assert session_id is not None
         value, error = await _call_page("snapshot", {
-            "selector": selector or "",
-            "maxNodes": max_nodes,
-            "maxDepth": max_depth,
+            "selector": checked_selector or "",
+            "maxNodes": checked_nodes,
+            "maxDepth": checked_depth,
             "includeHidden": include_hidden,
-            "textLimit": text_limit,
-        }, frame_id)
+            "textLimit": checked_text,
+        }, checked_frame, session_id)
         return error or _dump(value)
 
 
@@ -144,24 +227,44 @@ async def mirage_dom_events(
     ``reset``/``dropped`` tells the agent to request a fresh snapshot before
     continuing; stale deltas are never treated as current truth.
     """
+    checked_after, error = _bounded_int(
+        after_seq, "after_seq", 0, _MAX_SAFE_INTEGER, "kahin_mirage_dom_events",
+    )
+    if error:
+        return error
+    checked_stream, error = _optional_text(stream_id, "stream_id", _MAX_FRAME_ID, "kahin_mirage_dom_events")
+    if error:
+        return error
+    checked_limit, error = _bounded_int(limit, "limit", 1, 500, "kahin_mirage_dom_events")
+    if error:
+        return error
+    checked_wait, error = _bounded_int(wait_ms, "wait_ms", 0, 30_000, "kahin_mirage_dom_events")
+    if error:
+        return error
+    checked_frame, error = _optional_text(frame_id, "frame_id", _MAX_FRAME_ID, "kahin_mirage_dom_events")
+    if error:
+        return error
     async with _healer_ref.safe(
-        "kahin_mirage_dom_events", after_seq=after_seq, stream_id=stream_id or "", wait_ms=wait_ms
+        "kahin_mirage_dom_events", after_seq=checked_after, stream_id=checked_stream or "", wait_ms=checked_wait
     ):
-        engine, error = await _prepare(frame_id)
+        engine, session_id, error = await _prepare(checked_frame)
         if error:
             return error
-        deadline = asyncio.get_running_loop().time() + max(0, min(int(wait_ms), 30_000)) / 1000
+        assert engine is not None and session_id is not None
+        deadline = asyncio.get_running_loop().time() + checked_wait / 1000
         while True:
             value, error = await _call_page("drain", {
-                "after": after_seq,
-                "streamId": stream_id or "",
-                "limit": limit,
-            }, frame_id)
+                "after": checked_after,
+                "streamId": checked_stream or "",
+                "limit": checked_limit,
+            }, checked_frame, session_id)
             if error:
                 return error
+            if not isinstance(value, dict):
+                return _dump({"error": "DOM stream returned an invalid event payload"})
             if value.get("events") or value.get("reset") or value.get("dropped"):
                 return _dump(value)
-            if wait_ms <= 0:
+            if checked_wait <= 0:
                 return _dump(value)
             remaining = deadline - asyncio.get_running_loop().time()
             if remaining <= 0:
@@ -178,59 +281,91 @@ async def mirage_dom_action(
 ) -> str:
     """Act on a live snapshot node without trusting a stale selector.
 
-    Allowed actions are ``click``, ``hover``, ``focus``, ``type`` and
-    ``scroll``. Click/hover use real Juggler mouse dispatch; type focuses the
+    Allowed actions are ``click``, ``hover``, ``focus``, ``type``, ``scroll``
+    and ``select``. Click/hover use real Juggler mouse dispatch; type focuses the
     live element and uses the real Juggler ``Page.insertText`` command. A
     removed or navigated node returns ``requiresSnapshot`` instead of acting
     on an accidental replacement.
     """
+    checked_node, error = _optional_text(node_id, "node_id", _MAX_FRAME_ID, "kahin_mirage_dom_action")
+    if error:
+        return error
+    assert checked_node is not None
+    checked_action, error = _optional_text(action, "action", 32, "kahin_mirage_dom_action")
+    if error:
+        return error
+    assert checked_action is not None
+    if checked_action not in {"click", "hover", "focus", "type", "scroll", "select"}:
+        return _argument_error("kahin_mirage_dom_action", "action", "action is not allow-listed")
+    if text is not None and (not isinstance(text, str) or len(text) > _MAX_TEXT):
+        return _argument_error("kahin_mirage_dom_action", "text", "text must be a string of at most 1000000 characters")
+    if checked_action == "select" and text is None:
+        return _argument_error("kahin_mirage_dom_action", "text", "text is required for action=select")
+    checked_frame, error = _optional_text(frame_id, "frame_id", _MAX_FRAME_ID, "kahin_mirage_dom_action")
+    if error:
+        return error
     async with _healer_ref.safe(
-        "kahin_mirage_dom_action", node_id=node_id, action=action, frame_id=frame_id
+        "kahin_mirage_dom_action", node_id=checked_node, action=checked_action, frame_id=checked_frame
     ):
-        engine, error = await _prepare(frame_id)
+        engine, session_id, error = await _prepare(checked_frame)
         if error:
             return error
-        value, error = await _call_page("action", {"nodeId": node_id, "action": action}, frame_id)
+        assert engine is not None and session_id is not None
+        value, error = await _call_page(
+            "action", {"nodeId": checked_node, "action": checked_action, "text": text}, checked_frame, session_id
+        )
         if error:
             return error
+        if not isinstance(value, dict):
+            return _dump({"error": "DOM action returned an invalid target payload"})
         if value.get("error"):
             return _dump(value)
 
-        result: dict[str, Any] = {"target": value, "action": action}
-        if action in {"click", "hover"}:
-            event_type = "mousemove" if action == "hover" else "mousedown"
-            result["down"] = await engine.call("Page.dispatchMouseEvent", {
-                "type": event_type,
-                "button": 0,
-                "x": value["x"],
-                "y": value["y"],
-                "modifiers": 0,
-                "clickCount": 1,
-                "buttons": 1 if action == "click" else 0,
-            })
-            if action == "click":
-                result["up"] = await engine.call("Page.dispatchMouseEvent", {
-                    "type": "mouseup",
+        result: dict[str, Any] = {"target": value, "action": checked_action}
+        if checked_action in {"click", "hover"}:
+            try:
+                event_type = "mousemove" if checked_action == "hover" else "mousedown"
+                result["down"] = await engine.call("Page.dispatchMouseEvent", {
+                    "type": event_type,
                     "button": 0,
                     "x": value["x"],
                     "y": value["y"],
                     "modifiers": 0,
                     "clickCount": 1,
-                    "buttons": 0,
-                })
-        elif action == "type":
+                    "buttons": 1 if checked_action == "click" else 0,
+                }, session_id=session_id)
+                if checked_action == "click":
+                    result["up"] = await engine.call("Page.dispatchMouseEvent", {
+                        "type": "mouseup",
+                        "button": 0,
+                        "x": value["x"],
+                        "y": value["y"],
+                        "modifiers": 0,
+                        "clickCount": 1,
+                        "buttons": 0,
+                    }, session_id=session_id)
+            except Exception as exc:  # noqa: BLE001 - return tool-level error
+                return _dump({"error": "DOM action dispatch failed", "detail": str(exc)})
+        elif checked_action == "type":
             if text is None:
                 return _dump({"error": "text is required for action=type", "nodeId": node_id})
-            result["typed"] = await engine.call("Page.insertText", {"text": text})
+            try:
+                result["typed"] = await engine.call("Page.insertText", {"text": text}, session_id=session_id)
+            except Exception as exc:  # noqa: BLE001 - return tool-level error
+                return _dump({"error": "DOM action typing failed", "detail": str(exc)})
         return _dump(result)
 
 
 @mcp.tool(name="kahin_mirage_dom_stop", annotations=_RW)
 async def mirage_dom_stop(frame_id: str | None = None) -> str:
     """Disconnect the current document's observer and discard its page ring."""
-    async with _healer_ref.safe("kahin_mirage_dom_stop", frame_id=frame_id):
-        _, error = await _prepare(frame_id)
+    checked_frame, error = _optional_text(frame_id, "frame_id", _MAX_FRAME_ID, "kahin_mirage_dom_stop")
+    if error:
+        return error
+    async with _healer_ref.safe("kahin_mirage_dom_stop", frame_id=checked_frame):
+        _, session_id, error = await _prepare(checked_frame)
         if error:
             return error
-        value, error = await _call_page("stop", {}, frame_id)
-        return error or _dump({"status": "stopped", "stream": value, "frame_id": frame_id})
+        assert session_id is not None
+        value, error = await _call_page("stop", {}, checked_frame, session_id)
+        return error or _dump({"status": "stopped", "stream": value, "frame_id": checked_frame})

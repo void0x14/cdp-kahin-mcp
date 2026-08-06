@@ -53,6 +53,7 @@ const process_manager = @import("process-manager/lifecycle.zig");
 const max_line: usize = 16 * 1024 * 1024;
 const request_timeout_ms: i32 = 30_000;
 const chunk_size: usize = 64 * 1024;
+const max_sink_bytes: usize = 8 * 1024 * 1024;
 
 var line_buf: std.array_list.Aligned(u8, null) = .empty;
 /// Set by Browser.close; the sidecar shuts down with the browser.
@@ -63,6 +64,7 @@ var running: bool = true;
 /// the pump consumes such events into driver state and they never reach
 /// Python (Task 3 console collection data loss).
 var sink_buf: std.array_list.Aligned(u8, null) = .empty;
+var sink_dropped_events: usize = 0;
 /// targetId of the page the caller last created; page-scoped commands run on it.
 var current_target: ?[]u8 = null;
 
@@ -77,17 +79,26 @@ pub fn main(args: std.process.Init.Minimal) u8 {
 /// Own the sidecar shutdown sequence. The browser must be stopped before the
 /// Driver is deinitialized, and all process-global buffers must be released
 /// even when the loop exits through an I/O error (not only clean EOF).
-fn cleanupRun(d: *driver_mod.Driver, a: Allocator) void {
-    _ = d.stop() catch {};
+fn cleanupRun(d: *driver_mod.Driver, a: Allocator) !void {
+    var stop_error: ?anyerror = null;
+    if (d.stop()) |_| {} else |err| switch (err) {
+        // A second cleanup pass is safe after the first pass reaped the
+        // child.  All other stop errors remain visible to the caller.
+        error.AlreadyStopped => {},
+        else => stop_error = err,
+    }
 
     if (current_target) |t| a.free(t);
     current_target = null;
 
     sink_buf.deinit(a);
     sink_buf = .empty;
+    sink_dropped_events = 0;
     line_buf.deinit(a);
     line_buf = .empty;
     running = false;
+
+    if (stop_error) |err| return err;
 }
 
 fn run(args: std.process.Init.Minimal) !void {
@@ -127,8 +138,23 @@ fn run(args: std.process.Init.Minimal) !void {
     const a = gpa.allocator();
 
     var d = try driver_mod.Driver.start(a, exe, profile, verbose, visible);
+    var cleaned = false;
+    // Register Driver.deinit before the fallback cleanup: defers run in
+    // reverse order, so the process is stopped before Driver frees the
+    // Instance that owns it.  An unrecoverable cleanup failure is fatal;
+    // continuing would leave a browser process orphaned behind the sidecar.
     defer d.deinit();
-    defer cleanupRun(&d, a);
+    defer {
+        if (!cleaned) {
+            cleanupRun(&d, a) catch |err| switch (err) {
+                error.ChildSignaled, error.AlreadyStopped => {},
+                else => {
+                    std.debug.print("fatal: sidecar cleanup failed: {s}\n", .{@errorName(err)});
+                    @panic("sidecar cleanup failed");
+                },
+            };
+        }
+    }
 
     // Tee every event the driver's pump dispatches (calls in flight) into
     // sink_buf; flushed upward after each request completes.
@@ -145,7 +171,14 @@ fn run(args: std.process.Init.Minimal) !void {
     };
     while (running) {
         _ = arena.reset(.retain_capacity);
-        _ = linux.poll(&pollfds, pollfds.len, -1); // block until stdin or browser speaks
+        while (true) {
+            const rc = linux.poll(&pollfds, pollfds.len, -1); // block until stdin or browser speaks
+            switch (linux.errno(rc)) {
+                .SUCCESS => break,
+                .INTR => continue,
+                else => return error.PollFailed,
+            }
+        }
 
         // Responses/events accumulate in `out`; flushed once per iteration
         // (single write sequence per turn).
@@ -153,18 +186,18 @@ fn run(args: std.process.Init.Minimal) !void {
         defer out.deinit(a);
 
         // Idle events flow upward continuously (oracle collectors are async).
-        if (pollfds[1].revents & (linux.POLL.IN | linux.POLL.HUP | linux.POLL.ERR) != 0) {
-            drainEvents(&d, a, 0, &out) catch {};
+        if (pollfds[1].revents & (linux.POLL.IN | linux.POLL.HUP | linux.POLL.ERR | linux.POLL.NVAL) != 0) {
+            try drainEvents(&d, a, 0, &out);
             // Browser fd went away (HUP) or errored: the browser is gone —
             // the sidecar shuts down WITH the browser (defer d.stop() reaps).
-            if (pollfds[1].revents & (linux.POLL.HUP | linux.POLL.ERR) != 0) {
+            if (pollfds[1].revents & (linux.POLL.HUP | linux.POLL.ERR | linux.POLL.NVAL) != 0) {
                 running = false;
             }
         }
-        if (pollfds[0].revents & (linux.POLL.IN | linux.POLL.HUP) != 0) {
-            const maybe_line = readLine(a) catch {
+        if (pollfds[0].revents & (linux.POLL.IN | linux.POLL.HUP | linux.POLL.NVAL) != 0) {
+            const maybe_line = readLine(a) catch |err| {
                 running = false;
-                break;
+                return err;
             };
             const line = maybe_line orelse {
                 running = false; // client stdin EOF -> take the browser down
@@ -172,20 +205,22 @@ fn run(args: std.process.Init.Minimal) !void {
             };
             defer a.free(line);
 
-            drainEvents(&d, a, null, &out) catch {};
-            processRequest(&d, a, arena.allocator(), line, &out) catch {
-                // Response already attempted; keep serving. Handlers map
-                // their own errors to -32000 (browser-dead EPIPE included:
-                // d.send raises BrokenPipe only inside handlers that now
-                // wrap it), so nothing propagates out of processRequest.
-            };
-            drainEvents(&d, a, 2, &out) catch {};
+            try drainEvents(&d, a, null, &out);
+            try processRequest(&d, a, arena.allocator(), line, &out);
+            try drainEvents(&d, a, 2, &out);
         }
         writeAllStdout(out.items) catch |err| switch (err) {
             error.BrokenPipe => return, // client went away: shut down cleanly
             else => return err,
         };
     }
+
+    // Surface a failed reap/kill to main() after all process-global buffers
+    // have been released.  `cleaned` prevents the fallback defer from
+    // attempting to free those buffers a second time.
+    const cleanup_result = cleanupRun(&d, a);
+    cleaned = true;
+    try cleanup_result;
 }
 
 /// Route one method-based request. Responses are appended to `out` (the
@@ -227,8 +262,18 @@ fn processRequest(d: *driver_mod.Driver, a: Allocator, aa: Allocator, line: []co
     }
     const method = method_v.string;
     const params = if (obj.get("params")) |p| p else std.json.Value{ .object = .empty };
+    if (params != .object) {
+        try respondErr(a, out, id, -32602, "params must be an object");
+        return;
+    }
     const session_v = obj.get("sessionId");
-    const session_id: ?[]const u8 = if (session_v != null and session_v.? == .string and session_v.?.string.len > 0) session_v.?.string else null;
+    const session_id: ?[]const u8 = if (session_v) |sv| blk: {
+        if (sv != .string or sv.string.len == 0) {
+            try respondErr(a, out, id, -32600, "sessionId must be a non-empty string");
+            return;
+        }
+        break :blk sv.string;
+    } else null;
 
     // === Sidecar-local / driver-specialized methods (no raw wire) ===
     if (std.mem.eql(u8, method, "Browser.health")) return handleHealth(d, a, out, id);
@@ -300,7 +345,18 @@ fn handleClose(d: *driver_mod.Driver, a: Allocator, out: *std.array_list.Aligned
     // Browser.close is terminal: Juggler may tear down its pipe without
     // sending a response. The cleanup defer closes/reaps the child, so do
     // not hold the IPC loop for the normal request timeout here.
-    d.close(0) catch {};
+    d.close(0) catch |err| switch (err) {
+        // Browser.close is terminal: a normal Juggler implementation may
+        // close the pipe before its response reaches the sidecar. These are
+        // successful shutdown outcomes, not a reason to report a false MCP
+        // failure. Other transport errors remain visible.
+        error.WaitTimeout, error.BrowserClosed => {},
+        else => {
+            try respondErr(a, out, id, -32000, @errorName(err));
+            running = false;
+            return;
+        },
+    };
     try respondOk(a, out, id, "{}");
     running = false;
 }
@@ -379,12 +435,22 @@ fn handleScreenshot(d: *driver_mod.Driver, a: Allocator, out: *std.array_list.Al
         return;
     };
     const format = getStringParam(params, "format") orelse "png";
+    if (!std.mem.eql(u8, format, "png") and !std.mem.eql(u8, format, "jpeg")) {
+        try respondErr(a, out, id, -32602, "format must be png or jpeg");
+        return;
+    }
     const mime = if (std.mem.eql(u8, format, "jpeg")) "image/jpeg" else "image/png";
     const quality = getIntParam(params, "quality");
     const omit = getBoolParam(params, "omitDeviceScaleFactor");
     const full_page = getBoolParam(params, "fullPage") orelse false;
     const Clip = struct { x: f64, y: f64, width: f64, height: f64 };
     const clip_override = if (params == .object) params.object.get("clip") else null;
+    if (clip_override) |clip| {
+        if (validateScreenshotClip(clip)) |message| {
+            try respondErr(a, out, id, -32602, message);
+            return;
+        }
+    }
     const payload = if (clip_override != null and clip_override.? == .object)
         try std.json.Stringify.valueAlloc(
             a,
@@ -578,8 +644,17 @@ fn drainEvents(d: *driver_mod.Driver, a: Allocator, poll_ms: ?i32, out: *std.arr
     if (poll_ms) |t| {
         if (t > 0) {
             var pfd = [_]linux.pollfd{.{ .fd = d.reader.fd, .events = linux.POLL.IN, .revents = 0 }};
-            _ = linux.poll(&pfd, pfd.len, t);
-            if (pfd[0].revents != 0) try readChunk(d, a);
+            while (true) {
+                const rc = linux.poll(&pfd, pfd.len, t);
+                switch (linux.errno(rc)) {
+                    .SUCCESS => break,
+                    .INTR => continue,
+                    else => return error.PollFailed,
+                }
+            }
+            if (pfd[0].revents & (linux.POLL.IN | linux.POLL.HUP | linux.POLL.ERR | linux.POLL.NVAL) != 0) {
+                try readChunk(d, a);
+            }
         } else {
             try readChunk(d, a); // fd already readable (EAGAIN when drained)
         }
@@ -595,17 +670,26 @@ fn drainEvents(d: *driver_mod.Driver, a: Allocator, poll_ms: ?i32, out: *std.arr
 /// event can fall between two buffers.
 fn readChunk(d: *driver_mod.Driver, a: Allocator) !void {
     var chunk: [chunk_size]u8 = undefined;
-    const n = linux.read(d.reader.fd, &chunk, chunk.len);
-    switch (linux.errno(n)) {
-        .SUCCESS => if (n > 0) {
-            const slice = chunk[0..n];
-            try d.reader.buf.appendSlice(a, slice);
-        } else {
-            // Clean EOF (read 0): every browser-side write end is closed —
-            // the browser exited. Same shutdown signal as POLL.HUP.
-            running = false;
-        },
-        else => {},
+    while (true) {
+        const n = linux.read(d.reader.fd, &chunk, chunk.len);
+        switch (linux.errno(n)) {
+            .SUCCESS => if (n > 0) {
+                const slice = chunk[0..n];
+                try d.reader.buf.appendSlice(a, slice);
+            } else {
+                // Clean EOF (read 0): every browser-side write end is closed —
+                // the browser exited. Same shutdown signal as POLL.HUP.
+                running = false;
+            },
+            .INTR => continue,
+            // A nonblocking descriptor can lose its readiness race.  This is
+            // not a transport failure; the next drain can try again.
+            .AGAIN => {},
+            // EIO/EBADF/etc. mean the browser pipe is unusable.  Do not keep
+            // serving requests with a desynchronized driver state.
+            else => return error.ReadFailed,
+        }
+        return;
     }
 }
 
@@ -635,12 +719,26 @@ fn forwardFromBuf(d: *driver_mod.Driver) !void {
 /// Non-raising: OOM drops the event rather than failing the call.
 fn eventSink(raw: []const u8, ctx: ?*anyopaque) void {
     const a: *Allocator = @ptrCast(@alignCast(ctx orelse return));
+    if (raw.len > max_sink_bytes or sink_buf.items.len > max_sink_bytes -| (raw.len + 1)) {
+        sink_dropped_events += 1;
+        return;
+    }
     sink_buf.appendSlice(a.*, raw) catch return;
     sink_buf.append(a.*, 0) catch return;
 }
 
 /// Flush events the sink buffered during a driver call (see eventSink).
 fn flushSinkEvents(a: Allocator, out: *std.array_list.Aligned(u8, null)) !void {
+    if (sink_dropped_events > 0) {
+        const marker = try std.fmt.allocPrint(
+            a,
+            "{{\"method\":\"Kahin.eventDropped\",\"params\":{{\"count\":{d},\"reason\":\"sink_capacity\"}}}}",
+            .{sink_dropped_events},
+        );
+        defer a.free(marker);
+        try writeOut(a, out, marker);
+        sink_dropped_events = 0;
+    }
     while (std.mem.indexOfScalar(u8, sink_buf.items, 0)) |idx| {
         const msg = sink_buf.items[0..idx];
         try emitEvent(a, out, msg);
@@ -675,7 +773,7 @@ fn emitEvent(a: Allocator, out: *std.array_list.Aligned(u8, null), msg: []const 
     if (method_v != .string) return;
     const session_v = root.object.get("sessionId");
     const session: ?[]const u8 = if (session_v != null and session_v.? == .string) session_v.?.string else null;
-    const params = root.object.get("params") orelse return;
+    const params = root.object.get("params") orelse std.json.Value{ .object = .empty };
 
     const Evt = struct { method: []const u8, params: std.json.Value, sessionId: ?[]const u8 = null };
     const json = try std.json.Stringify.valueAlloc(a, Evt{ .method = method_v.string, .params = params, .sessionId = session }, .{ .emit_null_optional_fields = false });
@@ -727,6 +825,30 @@ fn getBoolParam(params: std.json.Value, name: []const u8) ?bool {
     const v = params.object.get(name) orelse return null;
     if (v != .bool) return null;
     return v.bool;
+}
+
+const max_screenshot_dimension: f64 = 32_768;
+
+/// Validate a caller-supplied clip before serializing it to the real
+/// browser. Automatically measured clips are bounded by Driver.pageClipSize;
+/// this path must enforce the same contract for user input.
+fn validateScreenshotClip(clip: std.json.Value) ?[]const u8 {
+    if (clip != .object) return "clip must be an object";
+
+    const x = getNumParam(clip, "x") orelse return "clip requires x, y, width, and height";
+    const y = getNumParam(clip, "y") orelse return "clip requires x, y, width, and height";
+    const width = getNumParam(clip, "width") orelse return "clip requires x, y, width, and height";
+    const height = getNumParam(clip, "height") orelse return "clip requires x, y, width, and height";
+
+    if (!std.math.isFinite(x) or !std.math.isFinite(y) or
+        !std.math.isFinite(width) or !std.math.isFinite(height)) {
+        return "clip values must be finite";
+    }
+    if (width <= 0 or height <= 0) return "clip width and height must be positive";
+    if (width > max_screenshot_dimension or height > max_screenshot_dimension) {
+        return "clip width and height exceed maximum 32768";
+    }
+    return null;
 }
 
 /// CDP-ish remote-object type from the serialized JSON value. ponytail:
@@ -865,7 +987,7 @@ test "shutdown: stdin EOF cleanup reaps child and releases sidecar state" {
     current_target = try testing.allocator.dupe(u8, "target-1");
     running = true;
 
-    cleanupRun(&d, testing.allocator);
+    try cleanupRun(&d, testing.allocator);
 
     try testing.expectEqual(@as(usize, 0), line_buf.items.len);
     try testing.expectEqual(@as(usize, 0), sink_buf.items.len);
@@ -1253,6 +1375,61 @@ test "router: id out of range errors -32600 instead of trapping" {
     const big = try runRequest(&d, "{\"id\":4294967296,\"method\":\"Browser.health\",\"params\":{}}");
     defer testing.allocator.free(big);
     try testing.expectEqualStrings("{\"id\":0,\"error\":{\"code\":-32600,\"message\":\"id out of range\"}}\n", big);
+}
+
+test "router: user screenshot clip is bounded before reaching the browser" {
+    const rig = try testRig();
+    defer {
+        _ = std.os.linux.close(rig.cmd[0]);
+        _ = std.os.linux.close(rig.cmd[1]);
+        _ = std.os.linux.close(rig.resp[0]);
+        _ = std.os.linux.close(rig.resp[1]);
+    }
+    var d = rig.d;
+    defer d.deinit();
+
+    try seedPage(&d, rig.resp, "t1", "s1", "f1");
+    try setCurrentTarget(testing.allocator, "t1");
+    defer {
+        if (current_target) |t| testing.allocator.free(t);
+        current_target = null;
+    }
+
+    const too_wide = try runRequest(
+        &d,
+        "{\"id\":2,\"method\":\"Page.captureScreenshot\",\"params\":{\"clip\":{\"x\":0,\"y\":0,\"width\":32769,\"height\":100}}}",
+    );
+    defer testing.allocator.free(too_wide);
+    try testing.expectEqualStrings(
+        "{\"id\":2,\"error\":{\"code\":-32602,\"message\":\"clip width and height exceed maximum 32768\"}}\n",
+        too_wide,
+    );
+
+    const malformed = try runRequest(
+        &d,
+        "{\"id\":3,\"method\":\"Page.captureScreenshot\",\"params\":{\"clip\":{\"x\":0,\"y\":0,\"width\":0,\"height\":100}}}",
+    );
+    defer testing.allocator.free(malformed);
+    try testing.expectEqualStrings(
+        "{\"id\":3,\"error\":{\"code\":-32602,\"message\":\"clip width and height must be positive\"}}\n",
+        malformed,
+    );
+}
+
+test "router: non-retryable browser pipe read errors surface" {
+    const rig = try testRig();
+    defer {
+        _ = std.os.linux.close(rig.cmd[0]);
+        _ = std.os.linux.close(rig.cmd[1]);
+        _ = std.os.linux.close(rig.resp[0]);
+        _ = std.os.linux.close(rig.resp[1]);
+    }
+    var d = rig.d;
+    defer d.deinit();
+
+    // EBADF must not be treated like an empty/nonblocking read.
+    d.reader.fd = -1;
+    try testing.expectError(error.ReadFailed, readChunk(&d, testing.allocator));
 }
 
 test "router: screenshot clip comes from the real viewport, not a guess" {

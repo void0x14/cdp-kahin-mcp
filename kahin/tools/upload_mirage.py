@@ -25,6 +25,7 @@ the real Page.fileChooserOpened event.
 from __future__ import annotations
 
 import os
+import math
 
 import orjson
 
@@ -35,7 +36,11 @@ from kahin.tools._common import (
     _mirage_engine,
     _require_mirage,
 )
-from kahin.tools.pilot_mirage import _main_frame_id
+
+_MAX_FILES = 100
+_MAX_PATH_LENGTH = 4096
+_MAX_FILE_PAYLOAD = 512 * 1024
+_MAX_TIMEOUT = 120.0
 
 
 @mcp.tool(name="kahin_mirage_set_file_chooser_intercept", annotations=_RW)
@@ -45,14 +50,19 @@ async def mirage_set_file_chooser_intercept(enabled: bool) -> str:
     input fires Page.fileChooserOpened instead of the native dialog; feed the
     chooser with kahin_mirage_upload_files."""
     async with _healer_ref.safe("kahin_mirage_set_file_chooser_intercept", enabled=enabled):
+        if not isinstance(enabled, bool):
+            return '{"error": "enabled must be a boolean", "code": "invalid_argument", "field": "enabled"}'
         err = await _require_mirage()
         if err:
             return err
         engine = _mirage_engine()
-        await engine.ensure_page()
+        page = await engine.ensure_page()
+        session_id = page.get("sessionId") if isinstance(page, dict) else None
+        if not isinstance(session_id, str) or not session_id:
+            return '{"error": "selected page has no live session", "code": "session_unavailable"}'
         try:
             result = await engine.call(
-                "Page.setInterceptFileChooserDialog", {"enabled": enabled}
+                "Page.setInterceptFileChooserDialog", {"enabled": enabled}, session_id=session_id,
             )
         except RuntimeError as e:
             return orjson.dumps({
@@ -71,27 +81,44 @@ async def mirage_upload_files(files: list[str], timeout: float = 15.0) -> str:
     is clicked after this call — then sets the files. ``files`` MUST be
     absolute paths and must exist; multiple files upload in one call. Returns
     an error when no chooser opens within ``timeout``."""
-    async with _healer_ref.safe("kahin_mirage_upload_files", files=files[:80], timeout=timeout):
-        if not files:
+    context_files = files[:10] if isinstance(files, list) else None
+    async with _healer_ref.safe("kahin_mirage_upload_files", files=context_files, timeout=timeout):
+        if not isinstance(files, list) or not files:
             return '{"error": "files must be a non-empty list of absolute paths"}'
-        bad = [f for f in files if not isinstance(f, str) or not os.path.isabs(f)]
+        if len(files) > _MAX_FILES:
+            return orjson.dumps({
+                "error": f"files cannot contain more than {_MAX_FILES} paths",
+                "code": "invalid_argument",
+                "field": "files",
+            }).decode()
+        bad = [
+            f for f in files
+            if not isinstance(f, str) or len(f) > _MAX_PATH_LENGTH or not os.path.isabs(f)
+        ]
         if bad:
             return orjson.dumps({
-                "error": "files must be absolute paths (relative paths are rejected)",
-                "relative": bad,
+                "error": "files must be absolute paths of bounded length",
+                "code": "invalid_argument",
+                "invalid": [str(f)[:200] for f in bad[:20]],
             }, option=orjson.OPT_INDENT_2).decode()
+        if sum(len(f.encode()) for f in files) > _MAX_FILE_PAYLOAD:
+            return '{"error": "file path payload exceeds the 512 KiB limit", "code": "argument_too_large"}'
         missing = [f for f in files if not os.path.isfile(f)]
         if missing:
             return orjson.dumps({
                 "error": "file not found on disk",
-                "missing": missing,
+                "missing": missing[:20],
+                "missingCount": len(missing),
             }, option=orjson.OPT_INDENT_2).decode()
+        if isinstance(timeout, bool):
+            return '{"error": "timeout must be a finite number of seconds", "code": "invalid_argument"}'
         try:
             wait = float(timeout)
-        except (TypeError, ValueError):
-            return '{"error": "timeout must be a number of seconds"}'
-        if wait <= 0:
-            return '{"error": "timeout must be positive"}'
+        except (TypeError, ValueError, OverflowError):
+            return '{"error": "timeout must be a finite number of seconds", "code": "invalid_argument"}'
+        if not math.isfinite(wait) or wait <= 0:
+            return '{"error": "timeout must be positive and finite", "code": "invalid_argument"}'
+        wait = min(wait, _MAX_TIMEOUT)
         err = await _require_mirage()
         if err:
             return err
@@ -116,17 +143,55 @@ async def mirage_upload_files(files: list[str], timeout: float = 15.0) -> str:
                 "error": "fileChooserOpened element carries no objectId",
                 "chooser": chooser,
             }, option=orjson.OPT_INDENT_2).decode()
-        frame_id, frame_err = await _main_frame_id()
-        if frame_err:
-            return frame_err
-        if not frame_id:
-            return '{"error": "no main frame available"}'
+        session_id = chooser.get("_kahinSessionId")
+        if not isinstance(session_id, str) or not session_id:
+            return orjson.dumps({
+                "error": "file chooser has no owning Juggler session",
+                "code": "chooser_owner_unknown",
+                "hint": "The chooser event is stale or came from an old sidecar; click the file input again.",
+            }, option=orjson.OPT_INDENT_2).decode()
+        if session_id not in engine._sessions.values():
+            return orjson.dumps({
+                "error": "file chooser session is no longer attached",
+                "code": "stale_chooser",
+                "sessionId": session_id,
+            }, option=orjson.OPT_INDENT_2).decode()
+
+        execution_context_id = chooser.get("executionContextId")
+        frame_id = None
+        if execution_context_id is not None:
+            frame_id = engine.frame_id_for_execution_context(session_id, execution_context_id)
+            if frame_id is None:
+                return orjson.dumps({
+                    "error": "file chooser execution context is stale or not mapped to a live frame",
+                    "code": "stale_chooser_context",
+                    "executionContextId": execution_context_id,
+                    "sessionId": session_id,
+                    "hint": "Refresh the frame tree and click the file input again.",
+                }, option=orjson.OPT_INDENT_2).decode()
+        else:
+            # A legacy event may omit executionContextId. Resolve the root
+            # frame on the chooser's own session; never read the mutable
+            # current tab here.
+            try:
+                frame_tree = await engine.call("Page.getFrameTree", session_id=session_id)
+            except Exception as e:  # noqa: BLE001
+                return orjson.dumps({"error": f"could not resolve chooser frame: {e}"}).decode()
+            root = frame_tree.get("frameTree") if isinstance(frame_tree, dict) else None
+            root_frame = root.get("frame") if isinstance(root, dict) else None
+            frame_id = root_frame.get("id") if isinstance(root_frame, dict) else None
+        if not isinstance(frame_id, str) or not frame_id:
+            return orjson.dumps({
+                "error": "no live frame for the file chooser",
+                "code": "frame_unavailable",
+                "sessionId": session_id,
+            }, option=orjson.OPT_INDENT_2).decode()
         try:
             result = await engine.call("Page.setFileInputFiles", {
                 "frameId": frame_id,
                 "objectId": object_id,
                 "files": files,
-            })
+            }, session_id=session_id)
         except RuntimeError as e:
             return orjson.dumps({
                 "error": f"Juggler call failed: {e}",
@@ -135,12 +200,14 @@ async def mirage_upload_files(files: list[str], timeout: float = 15.0) -> str:
         return orjson.dumps({
             "uploaded": True,
             "files": len(files),
-            "names": [os.path.basename(f) for f in files],
+            "names": [os.path.basename(f)[:512] for f in files],
             "chooser": {
-                "executionContextId": chooser.get("executionContextId"),
-                "objectId": object_id,
-                "elementType": element.get("type"),
-                "elementSubtype": element.get("subtype"),
+                "executionContextId": execution_context_id,
+                "sessionId": session_id,
+                "frameId": frame_id,
+                "objectId": str(object_id)[:1024],
+                "elementType": str(element.get("type", ""))[:128],
+                "elementSubtype": str(element.get("subtype", ""))[:128],
             },
             "result": result,
         }, option=orjson.OPT_INDENT_2).decode()

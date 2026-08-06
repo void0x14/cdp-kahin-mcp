@@ -1,7 +1,7 @@
 """oracle.py — MCP Server (Kahin'in Sesi).
 
 Bootstrap only: the FastMCP instance, engine lifecycle glue (event
-collectors) and ``main()``. All 32 tools live in engine-separated category
+collectors) and ``main()``. All public tools live in engine-separated category
 modules under :mod:`kahin.tools`, imported below for side-effect
 ``@mcp.tool`` registration.
 """
@@ -9,32 +9,75 @@ modules under :mod:`kahin.tools`, imported below for side-effect
 from __future__ import annotations
 
 import time
+from typing import Any
 
 from kahin import _state as state
 from kahin._mcp import mcp  # noqa: F401  (re-exported for the old import path)
 from kahin.the_twins.chassis import EventData
 
 
+_MAX_EVENT_DEPTH = 8
+_MAX_EVENT_ITEMS = 100
+_MAX_EVENT_STRING = 4096
+
+
+def _bound_event(value: Any, depth: int = 0) -> Any:
+    """Keep debug buffers useful without allowing page data to become a RAM sink."""
+    if depth >= _MAX_EVENT_DEPTH:
+        return "[event depth truncated]"
+    if isinstance(value, str):
+        if len(value) <= _MAX_EVENT_STRING:
+            return value
+        return value[:_MAX_EVENT_STRING] + f"…[truncated {len(value) - _MAX_EVENT_STRING} chars]"
+    if isinstance(value, dict):
+        items = list(value.items())[:_MAX_EVENT_ITEMS]
+        result = {str(key): _bound_event(item, depth + 1) for key, item in items}
+        if len(value) > len(items):
+            result["__truncated_items__"] = len(value) - len(items)
+        return result
+    if isinstance(value, (list, tuple)):
+        result = [_bound_event(item, depth + 1) for item in value[:_MAX_EVENT_ITEMS]]
+        if len(value) > len(result):
+            result.append(f"[truncated {len(value) - len(result)} items]")
+        return result
+    return value
+
+
 def _on_cdp_event(evt: EventData) -> None:
-    state._current_event_log.append({"event": evt.method, "params": evt.params, "session_id": evt.session_id})
+    params = _bound_event(evt.params)
+    if evt.method == "Page.screencastFrame" and isinstance(params, dict):
+        data = params.get("data")
+        if isinstance(data, str):
+            params["dataLength"] = len(data)
+            params["data"] = "[screencast frame omitted from event history]"
+    state._current_event_log.append({
+        "event": evt.method,
+        "params": params,
+        "session_id": evt.session_id,
+    })
 
 
 def _on_network_event(evt: EventData) -> None:
     if evt.method.startswith("Network."):
         state._network_requests.append({
             "event": evt.method.replace("Network.", ""),
-            "params": evt.params,
+            "params": _bound_event(evt.params),
             "timestamp": time.time(),
+            "session_id": evt.session_id,
         })
 
 
 def _on_console_event(evt: EventData) -> None:
     if evt.method == "Runtime.console":
-        args = [a.get("value") for a in evt.params.get("args", []) if isinstance(a, dict)]
+        args = [
+            _bound_event(a.get("value"))
+            for a in evt.params.get("args", [])
+            if isinstance(a, dict)
+        ]
         state._console_messages.append({
             "type": evt.params.get("type"),
             "args": args,
-            "location": evt.params.get("location"),
+            "location": _bound_event(evt.params.get("location")),
             "session_id": evt.session_id,
         })
 

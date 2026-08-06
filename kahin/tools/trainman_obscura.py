@@ -1,5 +1,6 @@
-"""trainman_obscura.py — Obscura (Chrome/CDP) specific TRAINMAN tools.
+"""Obscura-specific TRAINMAN extensions.
 
-Placeholder: session-management capabilities unique to the CDP target model
-(attach/flattened sessions). Not yet implemented.
+The shared TRAINMAN module owns the target lifecycle. No CDP session helper
+is registered here until its target/session semantics are implemented and
+verified against a live Obscura connection.
 """

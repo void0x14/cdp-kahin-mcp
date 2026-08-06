@@ -1,6 +1,6 @@
-"""pilot_obscura.py — Obscura (Chrome/CDP) specific PILOT tools.
+"""Obscura-specific PILOT extensions.
 
-Placeholder: Obscura-only browsing capabilities that cannot be expressed
-through the engine-agnostic PILOT layer (e.g. CDP-specific page management
-and raw protocol access beyond kahin_execute_cdp). Not yet implemented.
+Navigation, extraction and raw CDP execution are registered by the shared
+PILOT module. This module deliberately adds no pretend tool for a capability
+that has not been implemented and tested on the real CDP engine.
 """

@@ -96,12 +96,7 @@ pub const Instance = struct {
         // distrust the -headless flag). Unset/other => headless (default).
         if (headless) try argv_list.append(allocator, "-headless");
         inst.child = try pipe.spawn(allocator, argv_list.items);
-        errdefer {
-            // Spawn-error path: closing the fds makes the browser exit, then
-            // reap it (pipe EOF exit rule).
-            pipe.closeFds(&inst.child);
-            if (inst.child.pid > 0) _ = pipe.wait(&inst.child) catch {};
-        }
+        errdefer if (inst.child.pid > 0) inst.ensureStopped();
 
         if (verbose) {
             std.debug.print("process-manager: spawned pid={d} exe={s} profile={s}\n", .{ inst.child.pid, bin, profile_path });
@@ -128,23 +123,39 @@ pub const Instance = struct {
             .verbose = verbose,
         };
         inst.child = try pipe.spawn(allocator, argv);
-        errdefer {
-            pipe.closeFds(&inst.child);
-            if (inst.child.pid > 0) _ = pipe.wait(&inst.child) catch {};
-        }
+        errdefer if (inst.child.pid > 0) inst.ensureStopped();
         if (verbose) {
             std.debug.print("process-manager: spawned pid={d} argv[0]={s} profile={s}\n", .{ inst.child.pid, argv[0], profile_owned });
         }
         return inst;
     }
 
-    /// Free owned memory only. Does NOT close fds / reap — stop() owns the
-    /// child (contract: call stop() first, or leak the child).
+    /// Stop/reap a still-running child before freeing owned memory. Cleanup
+    /// is deliberately fail-closed: an unrecoverable kill/reap failure
+    /// aborts instead of freeing the Instance while its child is orphaned.
     pub fn deinit(self: *Instance, allocator: Allocator) void {
+        self.ensureStopped();
         allocator.free(self.profile_path);
         if (self.owned_bin) |b| allocator.free(b);
         if (self.warning) |w| allocator.free(w);
         allocator.destroy(self);
+    }
+
+    /// Cleanup path used by all error/deinit paths. ChildSignaled means the
+    /// child was successfully reaped (it is a useful status for stop(), but
+    /// not a cleanup failure), while every other error remains fatal.
+    fn ensureStopped(self: *Instance) void {
+        if (self.state != .running) return;
+        if (self.stop(stop_timeout_ms)) |_| {} else |err| switch (err) {
+            error.ChildSignaled => {},
+            else => {
+                std.debug.print(
+                    "process-manager: fatal cleanup failure pid={d}: {s}\n",
+                    .{self.child.pid, @errorName(err)},
+                );
+                @panic("process cleanup failed");
+            },
+        }
     }
 
     /// Close the pipes (browser exits 0 on EOF), reap with a deadline, and
@@ -156,35 +167,55 @@ pub const Instance = struct {
         if (self.state != .running) return error.AlreadyStopped;
         pipe.closeFds(&self.child);
         var status: u32 = 0;
-        const deadline = nowMs() + timeout_ms;
-        var signaled = false;
+        const deadline = nowMs() + @as(i64, @intCast(@max(timeout_ms, 0)));
+        var reaped = false;
         while (true) {
             const rc = linux.waitpid(self.child.pid, @ptrCast(&status), linux.W.NOHANG);
             switch (linux.errno(rc)) {
-                .SUCCESS => {},
+                .SUCCESS => {
+                    if (rc != 0) {
+                        reaped = true;
+                        break;
+                    }
+                },
                 .INTR => continue,
                 else => return error.WaitFailed,
             }
             if (rc == 0) {
                 if (nowMs() >= deadline) {
                     // Kill fallback: pipe EOF was ignored (wedged child).
-                    _ = linux.kill(self.child.pid, .KILL);
-                    const rc2 = linux.waitpid(self.child.pid, @ptrCast(&status), 0);
-                    if (linux.errno(rc2) != .SUCCESS) return error.WaitFailed;
-                    // (Faz 7 Minor a) The child may have exited cleanly in
-                    // the window between the deadline poll and the SIGKILL
-                    // delivery — report its real exit code then instead of
-                    // a misleading ChildSignaled.
-                    if (!linux.W.IFEXITED(status)) signaled = true;
+                    // ESRCH is a race with a natural child exit; still wait
+                    // below so the child is reaped and the race is visible.
+                    const kill_rc = linux.kill(self.child.pid, .KILL);
+                    switch (linux.errno(kill_rc)) {
+                        .SUCCESS, .SRCH => {},
+                        else => return error.KillFailed,
+                    }
+
+                    while (true) {
+                        const rc2 = linux.waitpid(self.child.pid, @ptrCast(&status), 0);
+                        switch (linux.errno(rc2)) {
+                            .SUCCESS => {
+                                if (rc2 == self.child.pid) {
+                                    reaped = true;
+                                    break;
+                                }
+                                return error.WaitFailed;
+                            },
+                            .INTR => continue,
+                            else => return error.WaitFailed,
+                        }
+                    }
+                    break;
                 } else {
                     sleepMs(reap_poll_ms);
                     continue;
                 }
             }
-            break;
         }
+        if (!reaped) return error.WaitFailed;
         self.state = .dead;
-        if (!signaled and linux.W.IFEXITED(status)) return linux.W.EXITSTATUS(status);
+        if (linux.W.IFEXITED(status)) return linux.W.EXITSTATUS(status);
         return error.ChildSignaled;
     }
 
@@ -209,9 +240,8 @@ pub const Instance = struct {
     }
 };
 
-/// Registry with a resource limit and a double-instance guard. Owns nothing
-/// beyond the registry: instances must be stop()'d by the caller before
-/// deinit (deinit frees the structs; running children would leak).
+/// Registry with a resource limit and a double-instance guard. Deinitializing
+/// the registry also stops/reaps any still-running registered instances.
 pub const Manager = struct {
     allocator: Allocator,
     max_instances: usize,
@@ -228,17 +258,17 @@ pub const Manager = struct {
         if (self.instances.items.len >= self.max_instances) return error.LimitReached;
         const inst = try Instance.spawn(self.allocator, exe, profile, verbose, true);
         errdefer {
-            // (Faz 7 Minor b) append OOM must not leak the running child:
-            // stop (close fds -> browser exits, reap) before freeing the
-            // struct. deinit alone would orphan the process.
-            _ = inst.stop(stop_timeout_ms) catch {};
+            // Append OOM must not leak the running child: stop (including
+            // SIGKILL fallback) before freeing the struct.
+            inst.ensureStopped();
             inst.deinit(self.allocator);
         }
         try self.instances.append(self.allocator, inst);
         return inst;
     }
 
-    /// Drop a (stopped) instance from the registry and free it.
+    /// Drop an instance from the registry and free it. A running instance is
+    /// stopped/reaped by deinit() before its memory is released.
     pub fn remove(self: *Manager, inst: *Instance) void {
         for (self.instances.items, 0..) |it, i| {
             if (it == inst) {
@@ -261,8 +291,8 @@ pub const Manager = struct {
         if (first_err) |e| return e;
     }
 
-    /// Free the registry and any still-registered instance structs. Does NOT
-    /// stop children (caller owns stop()).
+    /// Free the registry and stop/reap any still-registered children before
+    /// releasing their instance structs.
     pub fn deinit(self: *Manager) void {
         for (self.instances.items) |inst| inst.deinit(self.allocator);
         self.instances.deinit(self.allocator);
@@ -399,6 +429,22 @@ test "lifecycle: stop falls back to SIGKILL for a wedged child" {
     try testing.expectError(error.ChildSignaled, inst.stop(300));
     try testing.expectEqual(Health.dead, inst.health());
     try testing.expectError(error.AlreadyStopped, inst.stop(10_000));
+}
+
+test "lifecycle: deinit stops and reaps a child still waiting on its pipe" {
+    // This child remains alive until fd 3 (the command pipe) is closed. The
+    // deinit contract must close/reap it instead of freeing the Instance and
+    // leaving an orphan behind.
+    const inst = try Instance.spawnArgv(
+        testing.allocator,
+        &.{ "/bin/sh", "-c", "read ignored <&3" },
+        null,
+        false,
+    );
+    const pid = inst.child.pid;
+    sleepMs(10);
+    inst.deinit(testing.allocator);
+    try testing.expect(procState(pid) == null);
 }
 
 test "lifecycle: manager limit violation (max 2, third spawn rejected)" {

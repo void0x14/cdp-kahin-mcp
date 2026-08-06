@@ -128,6 +128,15 @@ class BrowserEngine(ABC):
                 # WS closed or the engine was stopped; the connection is dead.
                 logger.debug("CDP reader stopped: %s", type(self).__name__)
             finally:
+                # A transport can disappear without a response for every
+                # in-flight request.  Leaving those futures pending makes
+                # callers hang until their unrelated 30s timeout and keeps
+                # stale request entries alive.
+                error = RuntimeError(f"{type(self).__name__} transport closed")
+                for fut in self._pending.values():
+                    if not fut.done():
+                        fut.set_exception(error)
+                self._pending.clear()
                 self._mark_dead()
 
         self._reader = asyncio.create_task(reader())
@@ -167,9 +176,10 @@ class BrowserEngine(ABC):
         return target_id
 
     async def stop(self) -> None:
-        if self._reader is not None:
-            self._reader.cancel()
-            self._reader = None
+        reader, self._reader = self._reader, None
+        if reader is not None:
+            reader.cancel()
+            await asyncio.gather(reader, return_exceptions=True)
         for fut in self._pending.values():
             if not fut.done():
                 fut.cancel()
@@ -180,19 +190,20 @@ class BrowserEngine(ABC):
         if self._http:
             await self._http.aclose()
             self._http = None
-        if self._process:
+        process, self._process = self._process, None
+        if process:
             try:
-                self._process.terminate()
+                process.terminate()
             except ProcessLookupError:
                 pass
             try:
-                await asyncio.wait_for(self._process.wait(), timeout=5)
+                await asyncio.wait_for(process.wait(), timeout=5)
             except TimeoutError:
                 try:
-                    self._process.kill()
+                    process.kill()
                 except ProcessLookupError:
                     pass
-            self._process = None
+                await process.wait()
 
     async def send_cdp(self, domain: str, command: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         if not self._ws:
@@ -205,14 +216,21 @@ class BrowserEngine(ABC):
         }
         if self._session_id:
             msg["sessionId"] = self._session_id
+        request_id = self._msg_id
         fut: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
-        self._pending[self._msg_id] = fut
-        await self._ws.send(json.dumps(msg))
+        self._pending[request_id] = fut
         try:
+            await self._ws.send(json.dumps(msg))
             return await asyncio.wait_for(fut, timeout=30)
         except TimeoutError:
-            self._pending.pop(self._msg_id, None)
+            self._pending.pop(request_id, None)
             raise RuntimeError(f"{type(self).__name__}: CDP response timeout (30s) for {domain}.{command}")
+        except asyncio.CancelledError:
+            self._pending.pop(request_id, None)
+            raise
+        except Exception:
+            self._pending.pop(request_id, None)
+            raise
 
     async def screenshot(self, format: str = "png", full_page: bool = False) -> bytes:
         params = {"format": format}

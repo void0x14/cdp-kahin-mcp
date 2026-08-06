@@ -33,6 +33,7 @@ the real Page.screencastFrame event.
 from __future__ import annotations
 
 import orjson
+from numbers import Integral
 
 from kahin._mcp import mcp
 from kahin.tools._common import (
@@ -64,6 +65,16 @@ def _normalize_dim(value: int) -> int:
     return v
 
 
+def _checked_int(value: object, field: str, minimum: int, maximum: int) -> tuple[int | None, str | None]:
+    if isinstance(value, bool) or not isinstance(value, Integral):
+        return None, orjson.dumps({
+            "error": f"{field} must be an integer",
+            "code": "invalid_argument",
+            "field": field,
+        }).decode()
+    return max(minimum, min(maximum, int(value))), None
+
+
 @mcp.tool(name="kahin_mirage_screencast_start", annotations=_RW)
 async def mirage_screencast_start(width: int = 1280, height: int = 720, quality: int = 90) -> str:
     """Mirage: start a live JPEG screencast (Page.startScreencast). Streams
@@ -77,31 +88,53 @@ async def mirage_screencast_start(width: int = 1280, height: int = 720, quality:
         err = await _require_mirage()
         if err:
             return err
-        w = _normalize_dim(width)
-        h = _normalize_dim(height)
-        q = _clamp(quality, 1, 100)
+        checked_width, validation_error = _checked_int(width, "width", _MIN_SIZE, _MAX_SIZE)
+        if validation_error:
+            return validation_error
+        checked_height, validation_error = _checked_int(height, "height", _MIN_SIZE, _MAX_SIZE)
+        if validation_error:
+            return validation_error
+        checked_quality, validation_error = _checked_int(quality, "quality", 1, 100)
+        if validation_error:
+            return validation_error
+        assert checked_width is not None and checked_height is not None and checked_quality is not None
+        w = _normalize_dim(checked_width)
+        h = _normalize_dim(checked_height)
+        q = checked_quality
         engine = _mirage_engine()
-        try:
-            await engine.ensure_page()
-            result = await engine.call("Page.startScreencast", {
-                "width": w,
-                "height": h,
-                "quality": q,
-            })
-        except RuntimeError as e:
-            return orjson.dumps({
-                "error": f"Juggler call failed: {e}",
-                "hint": "Check the engine with kahin_engine_health.",
-            }, option=orjson.OPT_INDENT_2).decode()
-        except Exception as e:
-            return orjson.dumps({"error": f"Connection lost: {e}"}).decode()
-        screencast_id = result.get("screencastId")
-        if not screencast_id:
-            return orjson.dumps({
-                "error": "Page.startScreencast returned no screencastId",
-                "result": result,
-            }, option=orjson.OPT_INDENT_2).decode()
-        engine.set_screencast_id(screencast_id)
+        async with engine._screencast_lock:
+            try:
+                await engine.ensure_page()
+                # A page has one screencast stream.  Starting another stream
+                # without stopping the first one silently replaces the id while
+                # old frames remain queued and can never be acknowledged.
+                if engine._screencast_id is not None:
+                    await engine.call(
+                        "Page.stopScreencast", session_id=engine.screencast_session_id,
+                    )
+                    engine.clear_screencast(wake_waiters=True)
+                result = await engine.call("Page.startScreencast", {
+                    "width": w,
+                    "height": h,
+                    "quality": q,
+                })
+            except RuntimeError as e:
+                engine.clear_screencast(wake_waiters=True)
+                return orjson.dumps({
+                    "error": f"Juggler call failed: {e}",
+                    "hint": "Check the engine with kahin_engine_health.",
+                }, option=orjson.OPT_INDENT_2).decode()
+            except Exception as e:
+                engine.clear_screencast(wake_waiters=True)
+                return orjson.dumps({"error": f"Connection lost: {e}"}).decode()
+            screencast_id = result.get("screencastId")
+            if not screencast_id:
+                engine.clear_screencast(wake_waiters=True)
+                return orjson.dumps({
+                    "error": "Page.startScreencast returned no screencastId",
+                    "result": result,
+                }, option=orjson.OPT_INDENT_2).decode()
+            engine.set_screencast_id(screencast_id)
         return orjson.dumps({
             "screencastId": screencast_id,
             "width": w,
@@ -133,32 +166,52 @@ async def mirage_screencast_frame(
         timeout=timeout,
         fresh=fresh,
     ):
+        if isinstance(timeout, bool):
+            return '{"error": "timeout must be a finite number of seconds", "code": "invalid_argument"}'
         try:
             wait = float(timeout)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             return '{"error": "timeout must be a number of seconds"}'
-        if wait <= 0:
+        if not isinstance(wait, float) or not wait == wait or wait in (float("inf"), float("-inf")) or wait <= 0:
             return '{"error": "timeout must be positive"}'
+        wait = min(wait, 120.0)
+        if not isinstance(fresh, bool):
+            return '{"error": "fresh must be a boolean", "code": "invalid_argument"}'
         err = await _require_mirage()
         if err:
             return err
         engine = _mirage_engine()
         dropped = 0
-        sid = screencast_id or engine._screencast_id
+        async with engine._screencast_lock:
+            sid = screencast_id or engine._screencast_id
+            active_sid = engine._screencast_id
+            owner_session = engine.screencast_session_id
+            generation = engine.screencast_generation
+        if screencast_id is not None and active_sid is not None and screencast_id != active_sid:
+            return orjson.dumps({
+                "error": "screencastId does not match the active stream",
+                "activeScreencastId": active_sid,
+            }, option=orjson.OPT_INDENT_2).decode()
+        if sid is None and engine.screencast_pending()["pending"]:
+            return '{"error": "queued screencast frames have no active screencastId"}'
         if fresh:
-            dropped = engine.drain_screencast_frames()
+            async with engine._screencast_lock:
+                dropped = engine.drain_screencast_frames()
             if dropped and not sid:
                 return '{"error": "cannot ACK fresh screencast frames without a screencastId"}'
             try:
                 for _ in range(dropped):
-                    await engine.call("Page.screencastFrameAck", {"screencastId": sid})
+                    await engine.call(
+                        "Page.screencastFrameAck", {"screencastId": sid},
+                        session_id=owner_session,
+                    )
             except Exception as e:  # noqa: BLE001
                 return orjson.dumps({
                     "error": f"could not ACK discarded screencast frames: {e}",
                     "droppedFrames": dropped,
                 }).decode()
         try:
-            frame = await engine.wait_for_screencast_frame(wait)
+            frame = await engine.wait_for_screencast_frame(wait, generation=generation)
         except Exception as e:  # noqa: BLE001
             return orjson.dumps({"error": f"Connection lost: {e}"}).decode()
         if frame is None:
@@ -172,12 +225,22 @@ async def mirage_screencast_frame(
         ack = {"sent": False, "screencastId": sid, "error": None}
         if sid:
             try:
-                await engine.call("Page.screencastFrameAck", {"screencastId": sid})
+                await engine.call(
+                    "Page.screencastFrameAck", {"screencastId": sid},
+                    session_id=owner_session,
+                )
                 ack["sent"] = True
             except RuntimeError as e:
                 ack["error"] = str(e)
             except Exception as e:
                 ack["error"] = str(e)
+            if ack["error"]:
+                # Keep the frame available for a retry.  Camoufox also keeps
+                # its corresponding frame in-flight until a valid ACK.
+                async with engine._screencast_lock:
+                    if engine.screencast_generation == generation:
+                        engine._screencast_frames.appendleft(frame)
+                        engine._screencast_event.set()
         data = frame.get("data", "")
         return orjson.dumps({
             "data": data,
@@ -201,16 +264,22 @@ async def mirage_screencast_stop() -> str:
         if err:
             return err
         engine = _mirage_engine()
-        try:
-            result = await engine.call("Page.stopScreencast")
-        except RuntimeError as e:
-            return orjson.dumps({
-                "error": f"Juggler call failed: {e}",
-                "hint": "Check the engine with kahin_engine_health.",
-            }, option=orjson.OPT_INDENT_2).decode()
-        except Exception as e:
-            return orjson.dumps({"error": f"Connection lost: {e}"}).decode()
-        discarded = engine.clear_screencast()
+        async with engine._screencast_lock:
+            owner_session = engine.screencast_session_id
+            try:
+                result = await engine.call(
+                    "Page.stopScreencast", session_id=owner_session,
+                )
+            except RuntimeError as e:
+                engine.clear_screencast(wake_waiters=True)
+                return orjson.dumps({
+                    "error": f"Juggler call failed: {e}",
+                    "hint": "Check the engine with kahin_engine_health.",
+                }, option=orjson.OPT_INDENT_2).decode()
+            except Exception as e:
+                engine.clear_screencast(wake_waiters=True)
+                return orjson.dumps({"error": f"Connection lost: {e}"}).decode()
+            discarded = engine.clear_screencast(wake_waiters=True)
         return orjson.dumps({
             "stopped": True,
             "discardedFrames": discarded,

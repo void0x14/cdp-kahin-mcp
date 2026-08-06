@@ -548,9 +548,10 @@ wheels = [
 
 [[package]]
 name = "kahin"
-version = "0.3.6"
+version = "0.3.7"
 source = { editable = "." }
 dependencies = [
+    { name = "camoufox" },
     { name = "httpx" },
     { name = "levenshtein" },
     { name = "mcp" },
@@ -560,11 +561,6 @@ dependencies = [
     { name = "websockets" },
 ]
 
-[package.optional-dependencies]
-stealth = [
-    { name = "camoufox" },
-]
-
 [package.dev-dependencies]
 dev = [
     { name = "pytest-asyncio" },
@@ -572,7 +568,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "camoufox", marker = "extra == 'stealth'", specifier = ">=0.1" },
+    { name = "camoufox", specifier = ">=0.1" },
     { name = "httpx", specifier = ">=0.28" },
     { name = "levenshtein", specifier = ">=0.26" },
     { name = "mcp", specifier = ">=1.0.0,<2" },
@@ -581,7 +577,6 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.0" },
     { name = "websockets", specifier = ">=14.0" },
 ]
-provides-extras = ["stealth"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "pytest-asyncio", specifier = ">=1.4.0" }]

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "kahin"
-version = "0.3.6"
+version = "0.3.7"
 description = "Kahin, Camoufox varsayılanlı hibrit bir CDP ansiklopedisi ve anti-detect browser otomasyon MCP'sidir. Obscura hızlı CDP işleri için opt-in'dir; görsel capability'ler Kahin içinde Camoufox'a yönlendirilir."
 license = { text = "AGPL-3.0-or-later" }
 license-files = ["LICENSE"]
@@ -18,10 +18,10 @@ dependencies = [
     "websockets>=14.0",
     "httpx>=0.28",
     "Pillow>=11.0",
+    # Mirage/Camoufox is the default engine and therefore a core runtime
+    # dependency; a fresh install must be able to start the declared engine.
+    "camoufox>=0.1",
 ]
-
-[project.optional-dependencies]
-stealth = ["camoufox>=0.1"]
 
 [project.scripts]
 kahin = "kahin.oracle:main"

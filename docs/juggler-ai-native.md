@@ -141,8 +141,8 @@ Snapshot alanlarının anlamı:
 - `value`: input/textarea/select/contenteditable için gelir; password input
   değeri `[redacted]` olur.
 - `actions`: node'un doğrudan desteklediği `click`, `focus`, `type`, `select`
-  ipuçlarını gösterir. `select` bu ilk action yüzeyinde uygulanmaz; select
-  için mevcut DOM/evaluate veya daha özel tool sözleşmesini kullan.
+  ipuçlarını gösterir. `select` için `kahin_mirage_dom_action(action="select", text=...)`
+  option value veya görünen metinle gerçek input/change event'lerini gönderir.
 - `cursor`: o snapshot anındaki son sequence numarasıdır. Delta okumaya bu
   cursor'dan devam edilir.
 
@@ -276,7 +276,7 @@ script'i ayrıca evaluate eder. Observer sayfa tarafında bounded olduğu için
 
 ## 6. Juggler tool kataloğu (A-Z)
 
-Aşağıdaki liste Mirage'ın 77 Juggler-native tool'unun tamamıdır. `MIRAGE`
+Aşağıdaki liste Mirage'ın 78 Juggler-native tool'unun tamamıdır. `MIRAGE`
 tool'ları `engine="mirage"` aktifken kullanılır.
 
 ### DOM gözlem ve adaptif action (5)
@@ -308,11 +308,11 @@ tool'ları `engine="mirage"` aktifken kullanılır.
 - `kahin_mirage_reload`, `kahin_mirage_go_back`, `kahin_mirage_go_forward`
 - `kahin_mirage_stop`, `kahin_mirage_frame_tree`, `kahin_mirage_page_content`
 
-### Tab/session (6)
+### Tab/session (7)
 
 - `kahin_mirage_tab_new`, `kahin_mirage_tab_switch`, `kahin_mirage_tab_close`
 - `kahin_mirage_tab_list`, `kahin_mirage_tab_bring_front`
-- `kahin_mirage_context_new`
+- `kahin_mirage_context_new`, `kahin_mirage_context_close`
 
 ### Network/console (10)
 

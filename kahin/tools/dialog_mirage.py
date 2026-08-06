@@ -26,7 +26,20 @@ import orjson
 
 from kahin import _state as state
 from kahin._mcp import mcp
-from kahin.tools._common import _RO, _RW, _healer_ref, _mirage_call, _require_mirage
+from kahin.tools._common import _RO, _RW, _healer_ref, _mirage_call, _mirage_engine, _require_mirage
+
+
+def _dialog_owner_session(dialog_id: str) -> str | None:
+    """Find the session that opened a dialog; never route by current tab."""
+    for event in reversed(state._current_event_log):
+        if event.get("event") != "Page.dialogOpened":
+            continue
+        params = event.get("params") or {}
+        if params.get("dialogId") != dialog_id:
+            continue
+        session_id = event.get("session_id")
+        return session_id if isinstance(session_id, str) and session_id else None
+    return None
 
 
 @mcp.tool(name="kahin_mirage_dialog_list", annotations=_RO)
@@ -37,8 +50,12 @@ async def mirage_dialog_list() -> str:
         err = await _require_mirage()
         if err:
             return err
+        engine = _mirage_engine()
+        current_session = engine._sessions.get(engine._current_target or "")
         open_dialogs: dict[str, dict[str, Any]] = {}
         for e in state._current_event_log:
+            if e.get("session_id") != current_session:
+                continue
             if e["event"] == "Page.dialogOpened":
                 params = e.get("params") or {}
                 open_dialogs[params.get("dialogId", "?")] = {
@@ -56,18 +73,38 @@ async def mirage_dialog_list() -> str:
 async def mirage_dialog_accept(dialog_id: str, prompt_text: str | None = None) -> str:
     """Mirage: accept a dialog (Page.handleDialog accept=true). prompt_text is
     used for prompt() dialogs."""
+    if not isinstance(dialog_id, str) or not dialog_id:
+        return orjson.dumps({"error": "dialog_id must be a non-empty string", "code": "invalid_argument"}).decode()
+    if prompt_text is not None and not isinstance(prompt_text, str):
+        return orjson.dumps({"error": "prompt_text must be a string when provided", "code": "invalid_argument"}).decode()
     async with _healer_ref.safe("kahin_mirage_dialog_accept", dialog_id=dialog_id[:80]):
         params: dict[str, Any] = {"dialogId": dialog_id, "accept": True}
         if prompt_text is not None:
             params["promptText"] = prompt_text
-        return await _mirage_call("Page.handleDialog", params)
+        owner_session = _dialog_owner_session(dialog_id)
+        if owner_session is None:
+            return orjson.dumps({
+                "error": "dialog_id is not present in the live dialog buffer; refusing to route it to the current tab",
+                "code": "stale_dialog",
+            }).decode()
+        return await _mirage_call("Page.handleDialog", params, session_id=owner_session)
 
 
 @mcp.tool(name="kahin_mirage_dialog_dismiss", annotations=_RW)
 async def mirage_dialog_dismiss(dialog_id: str) -> str:
     """Mirage: dismiss (cancel) a dialog (Page.handleDialog accept=false)."""
+    if not isinstance(dialog_id, str) or not dialog_id:
+        return orjson.dumps({"error": "dialog_id must be a non-empty string", "code": "invalid_argument"}).decode()
     async with _healer_ref.safe("kahin_mirage_dialog_dismiss", dialog_id=dialog_id[:80]):
-        return await _mirage_call("Page.handleDialog", {"dialogId": dialog_id, "accept": False})
+        owner_session = _dialog_owner_session(dialog_id)
+        if owner_session is None:
+            return orjson.dumps({
+                "error": "dialog_id is not present in the live dialog buffer; refusing to route it to the current tab",
+                "code": "stale_dialog",
+            }).decode()
+        return await _mirage_call(
+            "Page.handleDialog", {"dialogId": dialog_id, "accept": False}, session_id=owner_session,
+        )
 
 
 @mcp.tool(name="kahin_mirage_download_list", annotations=_RO)
@@ -78,10 +115,14 @@ async def mirage_download_list() -> str:
         err = await _require_mirage()
         if err:
             return err
+        engine = _mirage_engine()
+        current_target = engine._current_target
         downloads: dict[str, dict[str, Any]] = {}
         for e in state._current_event_log:
             params = e.get("params") or {}
             if e["event"] == "Browser.downloadCreated":
+                if params.get("pageTargetId") and params.get("pageTargetId") != current_target:
+                    continue
                 downloads[params.get("uuid", "?")] = {
                     "uuid": params.get("uuid"),
                     "pageTargetId": params.get("pageTargetId"),
@@ -103,11 +144,20 @@ async def mirage_download_list() -> str:
 async def mirage_download_save(downloads_dir: str | None = None) -> str:
     """Mirage: save downloads to disk instead of canceling them
     (Browser.setDownloadOptions behavior=saveToDisk, optional downloadsDir)."""
+    if downloads_dir is not None and (not isinstance(downloads_dir, str) or len(downloads_dir) > 4096):
+        return orjson.dumps({"error": "downloads_dir must be a string of at most 4096 characters", "code": "invalid_argument"}).decode()
     async with _healer_ref.safe("kahin_mirage_download_save", downloads_dir=downloads_dir or ""):
         options: dict[str, Any] = {"behavior": "saveToDisk"}
         if downloads_dir:
             options["downloadsDir"] = downloads_dir
-        return await _mirage_call("Browser.setDownloadOptions", {"downloadOptions": options})
+        params: dict[str, Any] = {"downloadOptions": options}
+        try:
+            context_id = _mirage_engine().current_browser_context_id()
+        except Exception:  # liveness is reported by _mirage_call
+            context_id = None
+        if context_id:
+            params["browserContextId"] = context_id
+        return await _mirage_call("Browser.setDownloadOptions", params)
 
 
 @mcp.tool(name="kahin_mirage_worker_list", annotations=_RO)
@@ -118,8 +168,12 @@ async def mirage_worker_list() -> str:
         err = await _require_mirage()
         if err:
             return err
+        engine = _mirage_engine()
+        current_session = engine._sessions.get(engine._current_target or "")
         workers: dict[str, dict[str, Any]] = {}
         for e in state._current_event_log:
+            if e.get("session_id") != current_session:
+                continue
             params = e.get("params") or {}
             if e["event"] == "Page.workerCreated":
                 workers[params.get("workerId", "?")] = {
@@ -140,8 +194,12 @@ async def mirage_websocket_list() -> str:
         err = await _require_mirage()
         if err:
             return err
+        engine = _mirage_engine()
+        current_session = engine._sessions.get(engine._current_target or "")
         sockets: dict[str, dict[str, Any]] = {}
         for e in state._current_event_log:
+            if e.get("session_id") != current_session:
+                continue
             params = e.get("params") or {}
             name = e["event"]
             if name == "Page.webSocketCreated":

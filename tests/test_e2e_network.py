@@ -41,12 +41,10 @@ import time
 from collections.abc import AsyncGenerator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
-from urllib.parse import quote
 
 import pytest
 from pytest_asyncio import fixture as async_fixture
 
-from kahin import _state as state
 from kahin.the_twins import mirage as mirage_mod
 from kahin.tools import dejavu_mirage, pilot, pilot_mirage, trainman_mirage
 
@@ -262,6 +260,23 @@ async def test_network_get_response_body(mirage_tools: None, http_server: str) -
     body = _loads(await dejavu_mirage.mirage_get_response_body(request_id))
     assert "hello" in body["body"] and "world" in body["body"], body
     assert body["body"] == '{"hello": "world"}', body
+
+
+@pytest.mark.asyncio
+async def test_raw_cdp_get_response_body_is_cdp_shaped(
+    mirage_tools: None, http_server: str
+) -> None:
+    """The generic CDP entry point decodes Juggler's base64body into the
+    Chrome-shaped {body, base64Encoded} contract instead of leaking a native
+    implementation detail."""
+    await _navigate(f"{http_server}/form")
+    await pilot_mirage.mirage_click("#btn-json")
+    sent = await _poll_requests(lambda r: _sent_to(r, "/json"))
+    request_id = sent["params"]["requestId"]
+
+    body = _loads(await pilot.execute_cdp("Network", "getResponseBody", {"requestId": request_id}))
+    assert body["body"] == '{"hello": "world"}', body
+    assert body["base64Encoded"] is False, body
 
 
 # ---------------------------------------------------------------------------

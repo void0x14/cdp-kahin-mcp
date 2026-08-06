@@ -158,6 +158,55 @@ async def test_multi_tab_lifecycle(mirage_tools: None) -> None:
 
 
 @pytest.mark.asyncio
+async def test_concurrent_tab_session_ownership(mirage_tools: None) -> None:
+    """Explicit page sessions stay bound while the current tab switches.
+
+    The two Runtime.evaluate calls deliberately overlap.  The active tab is
+    switched while the first call is waiting in the real browser; each call
+    carries its owning Juggler session explicitly and must still read its own
+    document.  This is a deterministic engine-level regression guard for the
+    ownership primitive used by session-aware callers.
+    """
+    engine = state._current_engine
+    assert isinstance(engine, mirage_mod.Mirage), engine
+
+    first = _loads(await trainman_mirage.mirage_tab_list())
+    first_target = next(tab for tab in first if tab.get("current"))
+    second = _loads(await trainman_mirage.mirage_tab_new(url="about:blank"))
+    await asyncio.sleep(0.3)
+
+    for tab, label in ((first_target, "first-owner"), (second, "second-owner")):
+        await engine.call(
+            "Page.navigate",
+            {"url": _doc(f"<html><body>{label}</body></html>")},
+            session_id=tab["sessionId"],
+        )
+    await asyncio.sleep(0.3)
+
+    first_read = asyncio.create_task(engine.call(
+        "Runtime.evaluate",
+        {
+            "expression": "new Promise(resolve => setTimeout(() => resolve(document.body.textContent), 150))",
+            "awaitPromise": True,
+            "returnByValue": True,
+        },
+        session_id=first_target["sessionId"],
+    ))
+    await asyncio.sleep(0.03)
+    switched = _loads(await trainman_mirage.mirage_tab_switch(second["targetId"]))
+    assert switched.get("switched") == second["targetId"], switched
+    second_result = await engine.call(
+        "Runtime.evaluate",
+        {"expression": "document.body.textContent", "returnByValue": True},
+        session_id=second["sessionId"],
+    )
+    first_result = await first_read
+
+    assert first_result["result"]["value"] == "first-owner", first_result
+    assert second_result["result"]["value"] == "second-owner", second_result
+
+
+@pytest.mark.asyncio
 async def test_cookie_round_trip(mirage_tools: None) -> None:
     """set -> get matches -> clear -> get empty.
 
@@ -182,6 +231,48 @@ async def test_cookie_round_trip(mirage_tools: None) -> None:
 
     cookies = _loads(await storage_mirage.mirage_cookie_get())["cookies"]
     assert all(c.get("name") != "kahin_e2e" for c in cookies), cookies
+
+
+@pytest.mark.asyncio
+async def test_browser_context_isolation_and_cleanup(mirage_tools: None) -> None:
+    """Context-scoped cookies/UA do not leak to the default context, and
+    the public context-close tool removes its tabs instead of leaving a
+    browser resource behind."""
+    tabs_before = _loads(await trainman_mirage.mirage_tab_list())
+    default_target = next(tab["targetId"] for tab in tabs_before if tab.get("current"))
+
+    created = _loads(await trainman_mirage.mirage_context_new())
+    context_id = created.get("browserContextId")
+    assert isinstance(context_id, str) and context_id, created
+    context_tab = _loads(await trainman_mirage.mirage_tab_new(browser_context_id=context_id))
+    assert context_tab.get("targetId"), context_tab
+    await asyncio.sleep(0.4)
+
+    set_cookie = await storage_mirage.mirage_cookie_set([{
+        "name": "kahin_context_cookie",
+        "value": "isolated",
+        "url": "http://example.com/",
+    }])
+    assert _loads(set_cookie) == {}, set_cookie
+    context_cookies = _loads(await storage_mirage.mirage_cookie_get())["cookies"]
+    assert any(cookie.get("name") == "kahin_context_cookie" for cookie in context_cookies), context_cookies
+
+    ua = "KahinContext/1.0"
+    assert _loads(await emulation_mirage.mirage_set_user_agent(ua)) == {}, "context UA override failed"
+    await _navigate(_doc("<html><body>context</body></html>"))
+    context_ua = _loads(await pilot.evaluate(expression="navigator.userAgent"))
+    assert context_ua["result"]["value"] == ua, context_ua
+
+    switched = _loads(await trainman_mirage.mirage_tab_switch(default_target))
+    assert switched.get("switched") == default_target, switched
+    default_cookies = _loads(await storage_mirage.mirage_cookie_get())["cookies"]
+    assert all(cookie.get("name") != "kahin_context_cookie" for cookie in default_cookies), default_cookies
+
+    closed = _loads(await trainman_mirage.mirage_context_close(context_id))
+    assert closed == {}, closed
+    await asyncio.sleep(0.4)
+    tabs_after = _loads(await trainman_mirage.mirage_tab_list())
+    assert all(tab.get("targetId") != context_tab["targetId"] for tab in tabs_after), tabs_after
 
 
 @pytest.mark.asyncio

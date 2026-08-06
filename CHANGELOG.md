@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.3.7] — 2026-08-06
+
+### Eklenen
+- Gerçek Camoufox/Mirage akışı için canlı DOM snapshot/event cursor sözleşmesi;
+  stale node, reset ve dropped durumları artık ajanı yeni snapshot almaya zorlar.
+- CI üzerinde Playwright veya sahte e2e yerine checkout'tan derlenen Zig sidecar,
+  resmi Camoufox ve zorunlu gerçek browser testlerinden oluşan release gate'i.
+
+### Düzeltilen
+- Mirage çağrıları, DOM/input/network/storage/screencast ve iframe işlemlerinde
+  doğru page/session sahipliğine sabitlendi; paralel sekmeler birbirine karışmaz.
+- Sidecar IPC ve process lifecycle hataları artık yutulmadan fail-closed davranır;
+  screenshot, upload, accessibility ve network yanıtları bounded hale getirildi.
+- npm launcher her kurulumda gömülü wheel'i günceller ve Camoufox binary'sini
+  hazırlar; npm release sorgusu ağ/auth hatalarını yanlışlıkla başarı saymaz.
+
+### Testler
+- Gerçek Camoufox/Mirage uygulama suite'i: 119 passed.
+- Zig sidecar testleri: 201/201 passed; ruff, compile, shell/YAML ve npm pack
+  release kontrolleri başarılı.
+
 ## [0.3.6] — 2026-08-06
 
 ### Düzeltilen
@@ -171,3 +192,4 @@ Tüm önemli değişiklikler bu dosyada tutulur. Format: [Keep a Changelog](http
 [0.1.8]: https://gitlab.com/void0x14/kahin-mcp/-/compare/v0.1.7...v0.1.8
 [0.1.7]: https://gitlab.com/void0x14/kahin-mcp/-/compare/v0.1.6...v0.1.7
 [0.3.6]: https://gitlab.com/void0x14/kahin-mcp/-/compare/v0.3.5...v0.3.6
+[0.3.7]: https://gitlab.com/void0x14/kahin-mcp/-/compare/v0.3.6...v0.3.7

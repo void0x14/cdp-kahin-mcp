@@ -22,6 +22,7 @@ class ParamInfo:
     type: str
     optional: bool
     description: str
+    enum_values: list[str] | None = None
 
 
 @dataclass
@@ -282,6 +283,12 @@ class SchemaEngine:
         cmd = self.commands.get(full)
         if not cmd:
             return {"valid": False, "errors": [{"message": f"Unknown command: {full}"}]}
+        if not isinstance(parameters, dict):
+            return {
+                "valid": False,
+                "errors": [{"param": "parameters", "message": "parameters must be an object"}],
+                "warnings": [],
+            }
 
         errors: list[dict] = []
         warnings: list[dict] = []
@@ -307,6 +314,45 @@ class SchemaEngine:
                 errors.append({
                     "param": req,
                     "message": f"Missing required parameter '{req}'",
+                })
+
+        # Catch the class of errors that used to pass schema validation and
+        # fail only after reaching a real browser. References are left open
+        # (their shape is domain-specific); primitive CDP types and explicit
+        # enum values are safe to validate here.
+        for param in cmd.parameters:
+            if param.name not in parameters:
+                continue
+            value = parameters[param.name]
+            expected = param.type.rsplit(".", 1)[-1]
+            primitive_type = expected in {
+                "string", "boolean", "integer", "number", "object", "array",
+            }
+            type_ok = (
+                expected in {"any", "objectId", "unserializableValue"}
+                or (expected == "string" and isinstance(value, str))
+                or (expected == "boolean" and isinstance(value, bool))
+                or (expected == "integer" and isinstance(value, int) and not isinstance(value, bool))
+                or (expected == "number" and isinstance(value, (int, float)) and not isinstance(value, bool))
+                or (expected == "object" and isinstance(value, dict))
+                or (expected == "array" and isinstance(value, list))
+                or expected.startswith("{")
+            )
+            if primitive_type and not type_ok:
+                errors.append({
+                    "param": param.name,
+                    "message": f"Parameter '{param.name}' must be {expected}, got {type(value).__name__}",
+                })
+            enum_values = param.enum_values
+            if enum_values is None:
+                ref_name = param.type if "." in param.type else f"{cmd.domain}.{param.type}"
+                referenced = self.types.get(ref_name)
+                enum_values = referenced.enum_values if referenced else None
+            if enum_values is not None and value not in enum_values:
+                errors.append({
+                    "param": param.name,
+                    "message": f"Parameter '{param.name}' must be one of {enum_values}",
+                    "allowed": enum_values,
                 })
 
         return {"valid": len(errors) == 0, "errors": errors, "warnings": warnings}
@@ -418,9 +464,10 @@ def _parse_params(params: list[dict]) -> list[ParamInfo]:
     return [
         ParamInfo(
             name=p["name"],
-            type=p.get("type", "string"),
+            type=p.get("type") or p.get("$ref", "string"),
             optional=p.get("optional", False),
             description=p.get("description", ""),
+            enum_values=p.get("enum"),
         )
         for p in params
     ]
@@ -454,4 +501,5 @@ def _param_to_dict(p: ParamInfo) -> dict:
         "type": p.type,
         "optional": p.optional,
         "description": p.description,
+        "enum_values": p.enum_values,
     }

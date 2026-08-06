@@ -8,6 +8,7 @@ Faz 9 Task 3: Juggler session lifecycle over Mirage.call():
 - tab_list         -> attachedToTarget-derived target/session table
 - tab_bring_front  -> Page.bringToFront
 - context_new      -> Browser.createBrowserContext (isolated context)
+- context_close    -> Browser.removeBrowserContext (real cleanup)
 
 All real Juggler methods — no fallbacks.
 """
@@ -34,6 +35,18 @@ from kahin.tools._common import (
 async def mirage_tab_new(url: str = "about:blank", browser_context_id: str | None = None) -> str:
     """Mirage: open a new tab (Browser.newPage) and make it the current one.
     Returns {targetId, sessionId}."""
+    if not isinstance(url, str) or not url or len(url) > 16_384:
+        return orjson.dumps({
+            "error": "url must be a non-empty string of at most 16384 characters",
+            "code": "invalid_argument",
+            "field": "url",
+        }).decode()
+    if browser_context_id is not None and (not isinstance(browser_context_id, str) or not browser_context_id):
+        return orjson.dumps({
+            "error": "browser_context_id must be a non-empty string when provided",
+            "code": "invalid_argument",
+            "field": "browser_context_id",
+        }).decode()
     async with _healer_ref.safe("kahin_mirage_tab_new", url=url[:120]):
         err = await _require_mirage()
         if err:
@@ -48,6 +61,12 @@ async def mirage_tab_new(url: str = "about:blank", browser_context_id: str | Non
 @mcp.tool(name="kahin_mirage_tab_switch", annotations=_RW)
 async def mirage_tab_switch(target_id: str) -> str:
     """Mirage: route page-scoped calls to an existing tab by targetId."""
+    if not isinstance(target_id, str) or not target_id:
+        return orjson.dumps({
+            "error": "target_id must be a non-empty string",
+            "code": "invalid_argument",
+            "field": "target_id",
+        }).decode()
     async with _healer_ref.safe("kahin_mirage_tab_switch", target_id=target_id[:80]):
         err = await _require_mirage()
         if err:
@@ -62,6 +81,12 @@ async def mirage_tab_switch(target_id: str) -> str:
 @mcp.tool(name="kahin_mirage_tab_close", annotations=_DW)
 async def mirage_tab_close(target_id: str) -> str:
     """Mirage: close a tab (Page.close on its Juggler session)."""
+    if not isinstance(target_id, str) or not target_id:
+        return orjson.dumps({
+            "error": "target_id must be a non-empty string",
+            "code": "invalid_argument",
+            "field": "target_id",
+        }).decode()
     async with _healer_ref.safe("kahin_mirage_tab_close", target_id=target_id[:80]):
         err = await _require_mirage()
         if err:
@@ -97,3 +122,27 @@ async def mirage_context_new() -> str:
     Returns the browserContextId to pass to kahin_mirage_tab_new."""
     async with _healer_ref.safe("kahin_mirage_context_new"):
         return await _mirage_call("Browser.createBrowserContext")
+
+
+@mcp.tool(name="kahin_mirage_context_close", annotations=_DW)
+async def mirage_context_close(browser_context_id: str) -> str:
+    """Mirage: close an isolated browser context and all tabs in it
+    (Browser.removeBrowserContext). Refuses an empty or malformed id."""
+    if not isinstance(browser_context_id, str) or not browser_context_id.strip():
+        return orjson.dumps({
+            "error": "browser_context_id must be a non-empty string",
+            "code": "invalid_argument",
+            "field": "browser_context_id",
+        }).decode()
+    if len(browser_context_id) > 512:
+        return orjson.dumps({
+            "error": "browser_context_id exceeds the 512-character limit",
+            "code": "invalid_argument",
+            "field": "browser_context_id",
+        }).decode()
+    async with _healer_ref.safe(
+        "kahin_mirage_context_close", browser_context_id=browser_context_id[:80],
+    ):
+        return await _mirage_call(
+            "Browser.removeBrowserContext", {"browserContextId": browser_context_id},
+        )

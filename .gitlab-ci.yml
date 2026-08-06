@@ -23,6 +23,19 @@ release-check:
         - bin/setup.mjs
         - CHANGELOG.md
 
+real-e2e:
+  stage: verify
+  image: ghcr.io/astral-sh/uv:python3.14-bookworm
+  before_script:
+    - apt-get update -qq
+    - apt-get install -y -qq curl xz-utils
+  script:
+    - bash scripts/real-e2e.sh
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_TAG =~ /^v[0-9]+\.[0-9]+\.[0-9]+$/'
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+
 npm-publish:
   stage: publish
   needs: [release-check]

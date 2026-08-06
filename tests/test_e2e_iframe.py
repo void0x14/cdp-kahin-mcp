@@ -27,7 +27,6 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
-import time
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, TypeVar
@@ -35,7 +34,6 @@ from typing import Any, TypeVar
 import pytest
 from pytest_asyncio import fixture as async_fixture
 
-from kahin import _state as state
 from kahin.the_twins import mirage as mirage_mod
 from kahin.tools import pilot, pilot_mirage, trainman_mirage
 

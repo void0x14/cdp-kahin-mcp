@@ -14,6 +14,10 @@ const PY = process.platform === "win32" ? join(VENV, "Scripts", "python.exe") : 
 function sh(cmd, args, opts = {}) {
   return new Promise((resolve) => {
     const c = spawn(cmd, args, { stdio: ["ignore", "ignore", "pipe"], ...opts });
+    c.on("error", (err) => {
+      process.stderr.write(`[kahin] ${cmd} başlatılamadı: ${err.message}\n`);
+      resolve(1);
+    });
     c.stderr.on("data", (d) => process.stderr.write(`[kahin] ${d}`));
     c.on("close", (code) => resolve(code));
   });
@@ -41,6 +45,12 @@ const args = process.argv.slice(2);
 if (args[0] === "setup") {
   const { setup: registerClients } = await import("./setup.mjs");
   registerClients();
+  const { installPython } = await import("./setup.mjs");
+  const install = await installPython();
+  if (install && install.error) {
+    process.stderr.write(`[kahin] Python/Camoufox kurulumu başarısız (çıkış ${install.error})\n`);
+    process.exit(1);
+  }
   process.exit(0);
 }
 

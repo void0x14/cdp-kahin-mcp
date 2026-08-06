@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import time
 import traceback
 from collections import Counter, defaultdict
@@ -150,7 +149,7 @@ class Healer:
     def bind_engine(self, engine_ref: Any) -> None:
         self._engine_ref = engine_ref
 
-    def bind_state(self, state_ref: dict[str, Any]) -> None:
+    def bind_state(self, state_ref: Any) -> None:
         self._state_ref = state_ref
 
     def _write_log(self, entry: ErrorEntry) -> None:
@@ -186,20 +185,35 @@ class Healer:
         ))
 
         if action == RecoveryAction.CLEAR_STATE:
-            if self._state_ref:
+            if self._state_ref is not None:
                 from kahin._state import clear_state
                 clear_state()
             return "state cleared"
 
         if action == RecoveryAction.RESTART_ENGINE:
-            if self._engine_ref is not None:
+            engine = self._engine_ref
+            if engine is None and self._state_ref is not None:
+                engine = (
+                    self._state_ref.get("_current_engine")
+                    if isinstance(self._state_ref, dict)
+                    else getattr(self._state_ref, "_current_engine", None)
+                )
+            if engine is not None:
                 try:
-                    await self._engine_ref.stop()
-                except Exception:
-                    pass
+                    await engine.stop()
+                except Exception as exc:
+                    logger.exception("engine cleanup failed during recovery")
+                    # Do not clear the state or healer reference when the
+                    # child may still be alive. The next explicit stop can
+                    # still reap the same object; publishing a replacement
+                    # here would create an orphan and target the wrong engine.
+                    return f"engine cleanup failed: {exc}"
                 self._engine_ref = None
-            if self._state_ref:
-                self._state_ref["_current_engine"] = None
+            if self._state_ref is not None:
+                if isinstance(self._state_ref, dict):
+                    self._state_ref["_current_engine"] = None
+                else:
+                    setattr(self._state_ref, "_current_engine", None)
             from kahin._state import clear_state
             clear_state()
             return "engine stopped, state cleared"

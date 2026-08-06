@@ -5,9 +5,11 @@ Importing this package registers every tool on the shared ``mcp`` instance
 ``kahin/oracle.py`` imports this package at the end of its bootstrap; the
 tool modules import ``mcp`` back from ``kahin.oracle``.
 
-Engine-agnostic categories are shared files; Obscura/Camoufox-specific
-categories live in the ``*_obscura.py`` / ``*_mirage.py`` stubs (filled in
-by later phases).
+Engine-agnostic categories are shared files; Camoufox-specific categories
+live in the ``*_mirage.py`` modules.  Shadow keeps the shared CDP surface;
+visual capabilities are promoted to Mirage by the common tool layer.  The
+engine-specific placeholder modules are retained only as package boundaries
+and do not register pretend tools.
 """
 
 from kahin.tools import accessibility_mirage  # noqa: F401

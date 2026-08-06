@@ -66,7 +66,7 @@ kahin_pattern_query(context="doggystyle")
 kahin_pattern_suggest(partial="navig")
 ```
 
-## Tool Listesi (109 adet)
+## Tool Listesi (110 adet)
 
 Juggler/Mirage yüzeyinin ajana dönük, uçtan uca sözleşmesi:
 [docs/juggler-ai-native.md](docs/juggler-ai-native.md)
@@ -126,7 +126,7 @@ Juggler/Mirage yüzeyinin ajana dönük, uçtan uca sözleşmesi:
 | `kahin_pattern_forget` | Pattern sil |
 | `kahin_pattern_stats` | Pattern istatistikleri |
 
-### MIRAGE — Juggler Native (77) — Camoufox varsayılandır; Shadow'dan gerektiğinde otomatik yükseltilir
+### MIRAGE — Juggler Native (78) — Camoufox varsayılandır; Shadow'dan gerektiğinde otomatik yükseltilir
 
 #### DOM Stream (5) — gerçek MutationObserver + Juggler binding
 | Tool | Ne işe yarar? |
@@ -172,7 +172,7 @@ Juggler/Mirage yüzeyinin ajana dönük, uçtan uca sözleşmesi:
 | `kahin_mirage_frame_tree` | Frame hiyerarşisini göster |
 | `kahin_mirage_page_content` | Tüm sayfa HTML'ini al |
 
-#### Tab/Session (6)
+#### Tab/Session (7)
 | Tool | Ne işe yarar? |
 |------|---------------|
 | `kahin_mirage_tab_new` | Yeni sayfa/sekme aç |
@@ -181,6 +181,7 @@ Juggler/Mirage yüzeyinin ajana dönük, uçtan uca sözleşmesi:
 | `kahin_mirage_tab_list` | Açık sekmeleri listele |
 | `kahin_mirage_tab_bring_front` | Sekmeyi öne getir |
 | `kahin_mirage_context_new` | Yeni browser context oluştur |
+| `kahin_mirage_context_close` | İzole browser context'i ve içindeki sekmeleri kapat |
 
 #### Network/Console (10)
 | Tool | Ne işe yarar? |

@@ -1,5 +1,7 @@
-"""dejavu_obscura.py — Obscura (Chrome/CDP) specific DEJA_VU tools.
+"""Obscura-specific DEJA_VU extensions.
 
-Placeholder: CDP-only debug surfaces (network request bodies, stack traces,
-coverage). Not yet implemented.
+The public CDP debug surface is registered by :mod:`kahin.tools.dejavu`.
+This module intentionally registers no duplicate or advertised-but-empty
+tools; future Obscura-only additions must be backed by a real CDP path and a
+test before they are exposed.
 """

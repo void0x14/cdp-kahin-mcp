@@ -32,6 +32,7 @@ from kahin.the_source.architect import SchemaEngine
 logger = logging.getLogger(__name__)
 
 _healer_ref = get_healer()
+_healer_ref.bind_state(state)
 
 _schema: SchemaEngine | None = None
 _fate: FateDB | None = None
@@ -74,6 +75,7 @@ _MIRAGE_PAGE_DOMAINS = ("Page", "Runtime", "Network", "Input", "Accessibility", 
 _MIRAGE_HEALTH_TIMEOUT = 5.0
 _MIRAGE_PROMOTE_TIMEOUT = 60.0
 _MIRAGE_STOP_TIMEOUT = 15.0
+_MAX_TOOL_PAYLOAD_BYTES = 16 * 1024 * 1024
 
 
 def _needs_mirage_page(domain: str, command: str) -> bool:
@@ -93,7 +95,17 @@ async def _safe_cdp(domain: str, command: str, params: dict[str, Any] | None = N
     """
     err = await _require_engine()
     if err:
-        return err
+        try:
+            parsed = orjson.loads(err)
+        except orjson.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict):
+            return orjson.dumps(parsed, option=orjson.OPT_INDENT_2).decode()
+        return orjson.dumps({
+            "error": err,
+            "code": "engine_unavailable",
+            "hint": "Use kahin_engine_health, then kahin_browser_start.",
+        }, option=orjson.OPT_INDENT_2).decode()
     engine = state._current_engine
     try:
         if isinstance(engine, Obscura) and requires_mirage(domain, command):
@@ -102,12 +114,26 @@ async def _safe_cdp(domain: str, command: str, params: dict[str, Any] | None = N
                 return promoted
             engine = promoted
         if isinstance(engine, Mirage):
+            page_session_id = None
             if _needs_mirage_page(domain, command):
-                await engine.ensure_page()
-            result = await engine.execute_cdp(domain, command, params or {})
+                page = await engine.ensure_page()
+                page_session_id = page.get("sessionId")
+            result = await engine.execute_cdp(
+                domain, command, params or {}, session_id=page_session_id,
+            )
         else:
             result = await engine.send_cdp(domain, command, params or {})  # type: ignore[union-attr]
-        return orjson.dumps(result, option=orjson.OPT_INDENT_2).decode()
+        encoded = orjson.dumps(result, option=orjson.OPT_INDENT_2)
+        if len(encoded) > _MAX_TOOL_PAYLOAD_BYTES:
+            return orjson.dumps({
+                "error": "CDP result exceeds Kahin's bounded tool payload",
+                "code": "result_too_large",
+                "method": f"{domain}.{command}",
+                "payloadBytes": len(encoded),
+                "maxPayloadBytes": _MAX_TOOL_PAYLOAD_BYTES,
+                "hint": "Narrow the query, page, event limit, or screenshot viewport.",
+            }, option=orjson.OPT_INDENT_2).decode()
+        return encoded.decode()
     except RuntimeError as e:
         msg = str(e)
         lowered = msg.lower()
@@ -126,12 +152,16 @@ async def _safe_cdp(domain: str, command: str, params: dict[str, Any] | None = N
         correction = _get_schema().error_decode(error_code=-32601, error_message=f"'{domain}.{command}' not found")
         return orjson.dumps({
             "error": f"CDP error: {msg}",
+            "code": "cdp_command_failed",
+            "method": f"{domain}.{command}",
             "hint": correction.get("common_causes", []) + correction.get("solutions", []),
         }, option=orjson.OPT_INDENT_2).decode()
     except Exception as e:
         msg = str(e)
         return orjson.dumps({
             "error": f"Connection lost: {msg}",
+            "code": "connection_lost",
+            "method": f"{domain}.{command}",
             "hint": "Browser engine may have crashed. Use kahin_browser_stop then kahin_browser_start to restart.",
         }).decode()
 
@@ -145,21 +175,30 @@ async def _require_engine() -> str | None:
     """
     engine = state._current_engine
     if engine is None:
-        return "No browser engine running. Use kahin_browser_start first."
+        return orjson.dumps({
+            "error": "No browser engine running. Use kahin_browser_start first.",
+            "code": "engine_unavailable",
+        }, option=orjson.OPT_INDENT_2).decode()
     if isinstance(engine, Mirage):
         try:
             health = await asyncio.wait_for(engine.health(), timeout=_MIRAGE_HEALTH_TIMEOUT)
         except asyncio.TimeoutError:
             engine._mark_dead()
-            state.clear_state()
-            return "Browser engine health check timed out. Use kahin_browser_stop, then kahin_browser_start to restart."
+            return orjson.dumps({
+                "error": "Browser engine health check timed out. Use kahin_browser_stop, then kahin_browser_start to restart.",
+                "code": "engine_health_timeout",
+            }, option=orjson.OPT_INDENT_2).decode()
         if not health.get("alive"):
-            state.clear_state()
-            return "Browser engine is dead (crashed). Use kahin_browser_stop, then kahin_browser_start to restart."
+            return orjson.dumps({
+                "error": "Browser engine is dead (crashed). Use kahin_browser_stop, then kahin_browser_start to restart.",
+                "code": "engine_dead",
+            }, option=orjson.OPT_INDENT_2).decode()
         return None
     if not engine.is_alive():
-        state.clear_state()
-        return "Browser engine is dead (crashed). Use kahin_browser_stop, then kahin_browser_start to restart."
+        return orjson.dumps({
+            "error": "Browser engine is dead (crashed). Use kahin_browser_stop, then kahin_browser_start to restart.",
+            "code": "engine_dead",
+        }, option=orjson.OPT_INDENT_2).decode()
     return None
 
 
@@ -196,17 +235,37 @@ def _mirage_engine() -> Mirage:
     return state._current_engine  # type: ignore[return-value]
 
 
-async def _mirage_call(method: str, params: dict[str, Any] | None = None) -> str:
+async def _mirage_call(
+    method: str,
+    params: dict[str, Any] | None = None,
+    session_id: str | None = None,
+) -> str:
     """Run one Juggler method through Mirage.call(); answer is pretty JSON."""
     err = await _require_mirage()
     if err:
-        return err
+        try:
+            parsed = orjson.loads(err)
+        except orjson.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict):
+            return orjson.dumps(parsed, option=orjson.OPT_INDENT_2).decode()
+        return orjson.dumps({
+            "error": err,
+            "code": "engine_unavailable",
+            "engine": "mirage",
+            "hint": "Use kahin_engine_health, then kahin_browser_start when the engine is unavailable.",
+        }, option=orjson.OPT_INDENT_2).decode()
     try:
         domain, _, command = method.partition(".")
         engine = _mirage_engine()
         if _needs_mirage_page(domain, command):
-            await engine.ensure_page()
-        result = await engine.call(method, params or {})
+            page = await engine.ensure_page()
+            # Pin page-scoped calls to the target selected at the start of
+            # this helper. A concurrent tab switch must not redirect a
+            # multi-step tool action to another page.
+            if session_id is None:
+                session_id = page.get("sessionId")
+        result = await engine.call(method, params or {}, session_id=session_id)
         return orjson.dumps(result, option=orjson.OPT_INDENT_2).decode()
     except RuntimeError as e:
         return orjson.dumps({
@@ -278,6 +337,14 @@ async def _promote_shadow_to_mirage() -> Mirage | str:
             eng.on_death(lambda: _on_engine_death(eng))
 
             await candidate.ensure_page()
+            # Restore HTTP-only/auth cookies before navigation. Without this,
+            # a Shadow -> Mirage promotion silently turns an authenticated
+            # session into an anonymous one. The CDP and Juggler cookie
+            # schemas overlap, but their sameSite spellings do not always;
+            # normalize only fields the Juggler schema actually accepts.
+            cookies = page_state.get("cookies")
+            if isinstance(cookies, list) and cookies:
+                await candidate.call("Browser.setCookies", {"cookies": cookies})
             target_url = page_state["url"]
             if target_url and target_url != "about:blank":
                 await candidate.execute_cdp("Page", "navigate", {"url": target_url})
@@ -288,6 +355,26 @@ async def _promote_shadow_to_mirage() -> Mirage | str:
                     "navigate",
                     {"url": f"data:text/html;base64,{encoded}"},
                 )
+            storage = page_state.get("storage")
+            if target_url and target_url != "about:blank" and isinstance(storage, dict):
+                encoded_storage = orjson.dumps(storage).decode()
+                storage_result = await candidate.execute_cdp(
+                    "Runtime",
+                    "evaluate",
+                    {
+                        "expression": (
+                            "(() => {"
+                            f"const s={encoded_storage};"
+                            "for (const [k,v] of Object.entries(s.localStorage || {})) localStorage.setItem(k,v);"
+                            "for (const [k,v] of Object.entries(s.sessionStorage || {})) sessionStorage.setItem(k,v);"
+                            "return true;"
+                            "})()"
+                        ),
+                        "returnByValue": True,
+                    },
+                )
+                if not isinstance(storage_result, dict) or storage_result.get("exceptionDetails"):
+                    raise RuntimeError(f"could not restore Shadow storage: {storage_result}")
         except asyncio.CancelledError:
             try:
                 await asyncio.wait_for(candidate.stop(), timeout=_MIRAGE_STOP_TIMEOUT)
@@ -305,26 +392,53 @@ async def _promote_shadow_to_mirage() -> Mirage | str:
                 "hint": "Kahin did not fall back to an external automation library.",
             }, option=orjson.OPT_INDENT_2).decode()
 
-        # Publish only after Camoufox is healthy and the page is available.
-        # Keep the bounded event/network buffers: callers may have started
-        # with Shadow specifically to inspect a request before asking for a
-        # visual capability. A backend handoff must not erase that evidence.
-        state._current_engine = candidate
+        # Reap Shadow before publishing Mirage. Publishing first leaves two
+        # browsers on cleanup failure and leaves the healer bound to Shadow.
         try:
             await asyncio.wait_for(current.stop(), timeout=_MIRAGE_STOP_TIMEOUT)
-        except BaseException:  # noqa: BLE001
-            logger.exception("Shadow cleanup failed after successful Mirage promotion")
+        except Exception as exc:  # noqa: BLE001 - handoff must fail closed
+            try:
+                await asyncio.wait_for(candidate.stop(), timeout=_MIRAGE_STOP_TIMEOUT)
+            except Exception:
+                logger.exception("failed to clean up Mirage after Shadow handoff failure")
+            return orjson.dumps({
+                "error": f"Shadow cleanup failed during Mirage handoff: {exc}",
+                "code": "mirage_handoff_cleanup_failed",
+                "hint": "The existing Shadow engine was retained; retry stop/start before using Mirage.",
+            }, option=orjson.OPT_INDENT_2).decode()
+
+        # Publish only after Camoufox is healthy, the page is available, and
+        # Shadow has been reaped. Keep event/network evidence across the
+        # backend handoff.
+        state._current_engine = candidate
+        _healer_ref.bind_engine(candidate)
         return candidate
 
 
-async def _shadow_page_state(engine: Obscura) -> dict[str, str]:
-    """Read enough live state to make a Shadow -> Mirage handoff useful."""
+async def _shadow_page_state(engine: Obscura) -> dict[str, Any]:
+    """Read bounded live state so promotion does not erase a real session."""
     result = await asyncio.wait_for(
         engine.send_cdp(
             "Runtime",
             "evaluate",
             {
-                "expression": "({url: location.href, html: document.documentElement?.outerHTML || ''})",
+                "expression": """(() => {
+                    const read = (storage) => {
+                        try {
+                            const out = {};
+                            for (let i = 0; i < Math.min(storage.length, 200); i++) {
+                                const key = storage.key(i);
+                                if (key !== null) out[String(key).slice(0, 1024)] = String(storage.getItem(key) ?? '').slice(0, 4096);
+                            }
+                            return out;
+                        } catch (_) { return {}; }
+                    };
+                    return {
+                        url: location.href,
+                        html: document.documentElement?.outerHTML || '',
+                        storage: {localStorage: read(localStorage), sessionStorage: read(sessionStorage)},
+                    };
+                })()""",
                 "returnByValue": True,
             },
         ),
@@ -337,12 +451,49 @@ async def _shadow_page_state(engine: Obscura) -> dict[str, str]:
     html = value.get("html")
     if not isinstance(url, str) or not isinstance(html, str):
         raise RuntimeError("active page state had an invalid URL or HTML snapshot")
+    cookies: list[dict[str, Any]] = []
+    try:
+        cookie_result = await asyncio.wait_for(
+            engine.send_cdp("Network", "getAllCookies", {}), timeout=10.0,
+        )
+    except Exception as exc:  # noqa: BLE001 - incomplete auth handoff is unsafe
+        raise RuntimeError(f"could not snapshot Shadow cookies: {exc}") from exc
+    raw_cookies = cookie_result.get("cookies") if isinstance(cookie_result, dict) else None
+    if not isinstance(raw_cookies, list):
+        raise RuntimeError("Shadow Network.getAllCookies returned no cookie list")
+    for raw in raw_cookies[:500]:
+        if not isinstance(raw, dict):
+            continue
+        name, cookie_value = raw.get("name"), raw.get("value")
+        if not isinstance(name, str) or not name or not isinstance(cookie_value, str):
+            continue
+        cookie: dict[str, Any] = {"name": name[:8192], "value": cookie_value[:8192]}
+        for field in ("domain", "path"):
+            if isinstance(raw.get(field), str):
+                cookie[field] = raw[field][:8192]
+        for field in ("secure", "httpOnly"):
+            if isinstance(raw.get(field), bool):
+                cookie[field] = raw[field]
+        same_site = raw.get("sameSite")
+        if same_site in {"Strict", "Lax", "None"}:
+            cookie["sameSite"] = same_site
+        expires = raw.get("expires")
+        if isinstance(expires, (int, float)) and not isinstance(expires, bool) and expires >= 0:
+            cookie["expires"] = expires
+        cookies.append(cookie)
     # Keep the handoff bounded.  Navigable URLs retain external resources;
     # the HTML snapshot is only used for about:blank documents.
-    return {"url": url, "html": html[:5_000_000]}
+    storage = value.get("storage")
+    if not isinstance(storage, dict):
+        storage = {"localStorage": {}, "sessionStorage": {}}
+    return {"url": url, "html": html[:5_000_000], "cookies": cookies, "storage": storage}
 
 
-async def _mirage_eval_result(expression: str, frame_id: str | None = None) -> dict[str, Any] | str:
+async def _mirage_eval_result(
+    expression: str,
+    frame_id: str | None = None,
+    session_id: str | None = None,
+) -> dict[str, Any] | str:
     """Run an expression in a frame's main world; raw Juggler result dict.
 
     Default (frame_id=None) keeps the historical path: Runtime.evaluate,
@@ -355,13 +506,29 @@ async def _mirage_eval_result(expression: str, frame_id: str | None = None) -> d
     """
     err = await _require_mirage()
     if err:
-        return err
+        # Visual helpers historically leaked this plain liveness sentence
+        # through their evaluate path. Keep every Mirage tool machine
+        # readable, including the failure before a Juggler call exists.
+        try:
+            parsed = orjson.loads(err)
+        except orjson.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict):
+            return parsed
+        return orjson.dumps({
+            "error": err,
+            "code": "engine_unavailable",
+            "engine": "mirage",
+            "hint": "Use kahin_engine_health, then kahin_browser_start when the engine is unavailable.",
+        }, option=orjson.OPT_INDENT_2).decode()
     engine = _mirage_engine()
-    await engine.ensure_page()
+    page = await engine.ensure_page()
+    if session_id is None:
+        session_id = page.get("sessionId")
     method = "Runtime.evaluate"
     params: dict[str, Any] = {"expression": expression}
     if frame_id is not None:
-        ctx_id = engine.resolve_context(frame_id)
+        ctx_id = engine.resolve_context(frame_id, session_id=session_id)
         if ctx_id is None:
             return orjson.dumps({
                 "error": f"no execution context for frame {frame_id}; "
@@ -375,19 +542,25 @@ async def _mirage_eval_result(expression: str, frame_id: str | None = None) -> d
             "returnByValue": True,
         }
     try:
-        return await engine.call(method, params)
+        return await engine.call(method, params, session_id=session_id)
     except RuntimeError as e:
         return orjson.dumps({"error": f"Juggler evaluate failed: {e}"}, option=orjson.OPT_INDENT_2).decode()
     except Exception as e:
         return orjson.dumps({"error": f"Connection lost: {e}"}).decode()
 
 
-async def _mirage_evaluate(expression: str, frame_id: str | None = None) -> str:
+async def _mirage_evaluate(
+    expression: str,
+    frame_id: str | None = None,
+    session_id: str | None = None,
+) -> str:
     """Evaluate an expression (optionally in a specific frame's main world);
     returns result.value as pretty JSON."""
-    result = await _mirage_eval_result(expression, frame_id)
+    result = await _mirage_eval_result(expression, frame_id, session_id=session_id)
     if isinstance(result, str):
         return result
+    if "error" in result:
+        return orjson.dumps(result, option=orjson.OPT_INDENT_2).decode()
     if result.get("exceptionDetails"):
         return orjson.dumps({
             "error": "evaluate threw",

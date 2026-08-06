@@ -39,6 +39,7 @@ pub const enable_timeout_ms: i32 = 30_000;
 /// oldest). Kahin's own collectors keep bounded lists too.
 const max_console_messages: usize = 2_000;
 const max_network_events: usize = 5_000;
+const max_screenshot_dimension: f64 = 32_768;
 
 /// One response message returned by `send`; `raw` is an owned copy.
 pub const SendResult = struct {
@@ -333,6 +334,7 @@ pub const Driver = struct {
     /// Juggler's Browser.newPage has NO url param (schema fact) — navigation
     /// is a separate Page.navigate call.
     pub fn newPage(self: *Driver, browser_context_id: ?[]const u8, url: ?[]const u8, timeout_ms: i32) ![]u8 {
+        const deadline = nowMs() + timeout_ms;
         const params = try browser.newPageParams(self.allocator, browser_context_id);
         defer self.allocator.free(params);
         var resp = try self.send(null, browser.method_new_page, params, timeout_ms);
@@ -342,7 +344,6 @@ pub const Driver = struct {
         errdefer self.allocator.free(target_id);
 
         // The attachedToTarget event may precede or follow the response.
-        const deadline = nowMs() + timeout_ms;
         while (true) {
             const p = self.pages.get(target_id) orelse {
                 const rem = remainingMs(deadline) orelse return error.TargetNotAttached;
@@ -355,7 +356,8 @@ pub const Driver = struct {
         }
 
         if (url) |u| {
-            const nav_id = try self.navigate(target_id, u, timeout_ms);
+            const rem = remainingMs(deadline) orelse return error.WaitTimeout;
+            const nav_id = try self.navigate(target_id, u, rem);
             self.allocator.free(nav_id);
         }
         return target_id;
@@ -398,14 +400,16 @@ pub const Driver = struct {
     /// navigate() captures the NEW document. Redirects pass via the started
     /// event (final URL may differ).
     pub fn navigate(self: *Driver, target_id: []const u8, url: []const u8, timeout_ms: i32) ![]u8 {
+        const deadline = nowMs() + timeout_ms;
         const p = self.pages.get(target_id) orelse return error.UnknownTarget;
         if (p.session_id.len == 0) return error.TargetNotAttached;
-        try self.waitForMainFrame(p, nowMs() + timeout_ms);
+        try self.waitForMainFrame(p, deadline);
 
         p.lifecycle.begin(p.main_frame_id.?);
         const params = try page.navigateParams(self.allocator, p.main_frame_id.?, url, null);
         defer self.allocator.free(params);
-        var resp = try self.send(p.session_id, page.method_navigate, params, timeout_ms);
+        const send_timeout = remainingMs(deadline) orelse return error.WaitTimeout;
+        var resp = try self.send(p.session_id, page.method_navigate, params, send_timeout);
         defer resp.deinit(self.allocator);
         if (resp.is_error) return error.JugglerError;
 
@@ -413,7 +417,6 @@ pub const Driver = struct {
         errdefer self.allocator.free(nav_id);
         p.lifecycle.setNavigationId(p.main_frame_id.?, nav_id);
 
-        const deadline = nowMs() + timeout_ms;
         try self.waitForLoad(p, deadline);
         // Return gate: keep pumping until the navigation is genuinely done
         // (see navigationSatisfied).
@@ -597,7 +600,11 @@ pub const Driver = struct {
             "[document.documentElement.scrollWidth, document.documentElement.scrollHeight]"
         else
             "[window.innerWidth, window.innerHeight]";
-        return self.evalSize(p, expr, timeout_ms);
+        const size = try self.evalSize(p, expr, timeout_ms);
+        if (size.w <= 0 or size.h <= 0 or size.w != size.w or size.h != size.h or
+            size.w > max_screenshot_dimension or size.h > max_screenshot_dimension)
+            return error.SizeUnavailable;
+        return size;
     }
 
     /// Evaluate a [width, height] pair in the page (viewport or full
@@ -736,11 +743,16 @@ pub const Driver = struct {
     ) !void {
         var req = self.takeIntercepted(request_id) orelse return error.UnknownInterceptedRequest;
         defer req.deinit(self.allocator);
+        var restore = true;
+        defer {
+            if (restore) self.restoreIntercepted(request_id, &req) catch {};
+        }
         const params = try network.resumeParams(self.allocator, request_id, url, method, headers, post_data);
         defer self.allocator.free(params);
         var resp = try self.send(req.session_id, network.method_resume_intercepted_request, params, timeout_ms);
         defer resp.deinit(self.allocator);
         if (resp.is_error) return error.JugglerError;
+        restore = false;
     }
 
     /// CDP Network.fulfillInterceptedRequest equivalent (same schema name).
@@ -756,11 +768,16 @@ pub const Driver = struct {
     ) !void {
         var req = self.takeIntercepted(request_id) orelse return error.UnknownInterceptedRequest;
         defer req.deinit(self.allocator);
+        var restore = true;
+        defer {
+            if (restore) self.restoreIntercepted(request_id, &req) catch {};
+        }
         const params = try network.fulfillParams(self.allocator, request_id, status, status_text, headers, base64_body);
         defer self.allocator.free(params);
         var resp = try self.send(req.session_id, network.method_fulfill_intercepted_request, params, timeout_ms);
         defer resp.deinit(self.allocator);
         if (resp.is_error) return error.JugglerError;
+        restore = false;
     }
 
     /// CDP Network.abortInterceptedRequest equivalent (same schema name).
@@ -769,11 +786,16 @@ pub const Driver = struct {
     pub fn abortInterceptedRequest(self: *Driver, request_id: []const u8, error_code: []const u8, timeout_ms: i32) !void {
         var req = self.takeIntercepted(request_id) orelse return error.UnknownInterceptedRequest;
         defer req.deinit(self.allocator);
+        var restore = true;
+        defer {
+            if (restore) self.restoreIntercepted(request_id, &req) catch {};
+        }
         const params = try network.abortParams(self.allocator, request_id, error_code);
         defer self.allocator.free(params);
         var resp = try self.send(req.session_id, network.method_abort_intercepted_request, params, timeout_ms);
         defer resp.deinit(self.allocator);
         if (resp.is_error) return error.JugglerError;
+        restore = false;
     }
 
     // ---- Faz 4: input (Page domain — Juggler has no Input domain) --------
@@ -1034,6 +1056,13 @@ pub const Driver = struct {
         const sid = params.object.get("sessionId") orelse return;
         const tid = params.object.get("targetId") orelse return;
         if (sid != .string or tid != .string) return;
+
+        // An old detach can arrive after the same target was reattached with
+        // a new session. Never tear down the new live page for that stale
+        // lifecycle event.
+        if (self.pages.get(tid.string)) |page_state| {
+            if (!std.mem.eql(u8, page_state.session_id, sid.string)) return;
+        }
 
         self.router.removeSession(sid.string);
         if (self.pages.fetchRemove(tid.string)) |kv| {
@@ -1353,6 +1382,31 @@ pub const Driver = struct {
         const kv = self.intercepted.fetchRemove(request_id) orelse return null;
         self.allocator.free(kv.key);
         return kv.value;
+    }
+
+    /// Restore a decision entry when the browser rejected/timed out the wire
+    /// command. A failed continue/fulfill/abort must not silently lose a
+    /// paused request that the agent can still decide.
+    fn restoreIntercepted(self: *Driver, request_id: []const u8, req: *const InterceptedEntry) !void {
+        const key = try self.allocator.dupe(u8, request_id);
+        errdefer self.allocator.free(key);
+        const entry = InterceptedEntry{
+            .session_id = try self.allocator.dupe(u8, req.session_id),
+            .url = try self.allocator.dupe(u8, req.url),
+            .method = try self.allocator.dupe(u8, req.method),
+        };
+        errdefer {
+            self.allocator.free(entry.session_id);
+            self.allocator.free(entry.url);
+            self.allocator.free(entry.method);
+        }
+        const gop = try self.intercepted.getOrPut(key);
+        if (gop.found_existing) {
+            self.allocator.free(key);
+            var old = gop.value_ptr.*;
+            old.deinit(self.allocator);
+        }
+        gop.value_ptr.* = entry;
     }
 };
 
