@@ -73,6 +73,33 @@ async def test_call_timeout(fake_sidecar: Path, monkeypatch: pytest.MonkeyPatch)
 
 
 @pytest.mark.asyncio
+async def test_get_response_body_retries_native_completion_race(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A request id can be visible before Juggler exposes its body."""
+    engine = Mirage()
+    calls: list[str] = []
+
+    async def fake_call(
+        method: str,
+        params: dict[str, object] | None = None,
+        session_id: str | None = None,
+    ) -> dict[str, object]:
+        del params, session_id
+        calls.append(method)
+        if len(calls) < 3:
+            raise RuntimeError("CDP error: {'message': 'No resource with given identifier'}")
+        return {"base64body": "eA=="}
+
+    monkeypatch.setattr(engine, "call", fake_call)
+    monkeypatch.setattr(mirage_mod, "_RESPONSE_BODY_RETRY_INTERVAL", 0.001)
+    monkeypatch.setattr(mirage_mod, "_RESPONSE_BODY_RETRY_TIMEOUT", 0.1)
+
+    assert await engine.get_response_body("request-1") == {"base64body": "eA=="}
+    assert calls == ["Network.getResponseBody"] * 3
+
+
+@pytest.mark.asyncio
 async def test_event_dispatch(fake_sidecar: Path) -> None:
     engine = Mirage()
     received: list[EventData] = []

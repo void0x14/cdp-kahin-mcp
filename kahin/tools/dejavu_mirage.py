@@ -406,9 +406,7 @@ async def mirage_get_response_body(request_id: str) -> str:
                     method="Network.getResponseBody",
                     hint="Refresh kahin_mirage_network_requests and use a request from the active browser session.",
                 )
-            result = await engine.call(
-                "Network.getResponseBody", {"requestId": request_id}, session_id=owner_session,
-            )
+            result = await engine.get_response_body(request_id, session_id=owner_session)
         except RuntimeError as exc:
             return _error(tool, "juggler_call_failed", f"Juggler call failed: {exc}", method="Network.getResponseBody")
         except Exception as exc:  # noqa: BLE001

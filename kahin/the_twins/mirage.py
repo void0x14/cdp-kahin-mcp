@@ -43,6 +43,8 @@ except ImportError:  # pragma: no cover - harness without the camoflox package
 logger = logging.getLogger(__name__)
 
 _REQUEST_TIMEOUT = 30.0
+_RESPONSE_BODY_RETRY_TIMEOUT = 5.0
+_RESPONSE_BODY_RETRY_INTERVAL = 0.1
 _CAMOUFOX_FETCH_TIMEOUT = 120.0
 _CAMOUFOX_PROBE_TIMEOUT = 10.0
 _CAMOUFOX_OUTPUT_LIMIT = 600
@@ -870,6 +872,35 @@ class Mirage(BrowserEngine):
             self._pending.pop(request_id, None)
             raise
 
+    async def get_response_body(
+        self, request_id: str, session_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Read a response body with a bounded completion-race retry.
+
+        Juggler may emit ``requestWillBeSent`` before the response body is
+        queryable.  CDP callers commonly receive that request id from an
+        event and ask for the body immediately, so a single native call can
+        fail transiently even though the request is healthy.  Retry only
+        native protocol errors and keep the total wait bounded; transport or
+        liveness failures still fail immediately.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _RESPONSE_BODY_RETRY_TIMEOUT
+        while True:
+            try:
+                return await self.call(
+                    "Network.getResponseBody",
+                    {"requestId": request_id},
+                    session_id=session_id,
+                )
+            except RuntimeError as exc:
+                if "cdp error:" not in str(exc).lower():
+                    raise
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise
+                await asyncio.sleep(min(_RESPONSE_BODY_RETRY_INTERVAL, remaining))
+
     # --- session management (Juggler target model) ---
 
     async def create_page(self, url: str = "about:blank", browser_context_id: str | None = None) -> dict[str, Any]:
@@ -1386,9 +1417,7 @@ class Mirage(BrowserEngine):
             request_id = params.get("requestId")
             if not isinstance(request_id, str) or not request_id:
                 raise RuntimeError("Network.getResponseBody requires a non-empty requestId")
-            result = await self.call(
-                "Network.getResponseBody", {"requestId": request_id}, session_id=session_id,
-            )
+            result = await self.get_response_body(request_id, session_id=session_id)
             raw = result.get("base64body") if isinstance(result, dict) else None
             if not isinstance(raw, str):
                 raise RuntimeError("Juggler Network.getResponseBody returned no base64body")
