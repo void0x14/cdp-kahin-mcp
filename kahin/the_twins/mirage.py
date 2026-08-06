@@ -383,6 +383,17 @@ class Mirage(BrowserEngine):
             self._screencast_event.clear()
         return frame
 
+    def drain_screencast_frames(self) -> int:
+        """Discard queued frames before a caller requests a fresh capture.
+
+        The caller must ACK the returned count before waiting again; frames
+        are held by Camoufox until their acknowledgements arrive.
+        """
+        discarded = len(self._screencast_frames)
+        self._screencast_frames.clear()
+        self._screencast_event.clear()
+        return discarded
+
     def screencast_pending(self) -> dict[str, Any]:
         """Unacked frame count + newest frame summary + stream id — stream
         health: pending > 0 while frames wait for their ack (Camoufox holds

@@ -18,6 +18,7 @@ import orjson
 from kahin import _state as state
 from kahin._mcp import mcp
 from kahin.oracle import _on_cdp_event, _on_console_event, _on_engine_death, _on_network_event
+from kahin.the_twins.capabilities import capabilities_for
 from kahin.the_twins.mirage import Mirage
 from kahin.the_twins.shadow import Obscura
 from kahin.tools._common import (
@@ -27,7 +28,7 @@ from kahin.tools._common import (
     _auto_learn,
     _get_schema,
     _healer_ref,
-    _require_engine,
+    _require_mirage,
     _safe_cdp,
 )
 
@@ -59,12 +60,16 @@ async def _engine_is_healthy(engine: Any) -> bool:
 
 
 @mcp.tool(name="kahin_browser_start", annotations=_RW)
-async def browser_start(engine: str = "shadow", headless: bool = True, port: int = 0) -> str:
+async def browser_start(engine: str = "mirage", headless: bool = True, port: int = 0) -> str:
     """Start or reuse one browser engine.
 
-    Mirage/camoufox tabs live inside this one process. Repeating a start for
-    the active engine is idempotent; use ``kahin_mirage_tab_new`` for another
-    task/page instead of booting another browser.
+    Camoufox/Mirage is the default because it is the complete visual browser
+    surface: screenshots, mobile viewport, input, accessibility and
+    screencast all work in the same Kahin process. Shadow/Obscura remains an
+    explicit fast CDP opt-in; a visual tool promotes it to Mirage in-process.
+    Repeating a start for the active engine is idempotent; use
+    ``kahin_mirage_tab_new`` for another task/page instead of booting another
+    browser.
     """
     if port in (9222, 9240):
         return orjson.dumps({"error": f"Port {port} is RESERVED. Use a different port."}).decode()
@@ -82,11 +87,15 @@ async def browser_start(engine: str = "shadow", headless: bool = True, port: int
                     if current_kind == requested_kind:
                         # Same browser, same process: callers may safely make
                         # start part of their setup without leaking a child.
+                        current_port = (
+                            getattr(current, "port", None) if current_kind == "shadow" else 0
+                        )
                         return orjson.dumps({
                             "status": "reused",
                             "engine": current_kind,
+                            "capabilities": capabilities_for(current_kind),
                             "message": "Engine already running; reusing the existing browser and tabs.",
-                            "port": port or (9241 if current_kind == "shadow" else 0),
+                            "port": current_port or 0,
                         }, option=orjson.OPT_INDENT_2).decode()
                     return orjson.dumps({
                         "error": f"Engine {current_kind} already running. Stop it before switching to {engine}.",
@@ -103,7 +112,7 @@ async def browser_start(engine: str = "shadow", headless: bool = True, port: int
 
             if engine == "shadow":
                 candidate: Any = Obscura()
-                actual_port = port or 9241
+                actual_port = port
             else:
                 candidate = Mirage(engine_name=engine)
                 actual_port = 0  # Juggler pipe: no remote-debugging port
@@ -113,10 +122,14 @@ async def browser_start(engine: str = "shadow", headless: bool = True, port: int
                     candidate.start(headless=headless, port=actual_port),
                     timeout=_ENGINE_START_TIMEOUT,
                 )
+                if engine == "shadow":
+                    actual_port = candidate.port or actual_port
             except asyncio.TimeoutError as exc:
+                failed_port = getattr(candidate, "port", None) or actual_port
                 await _stop_engine(candidate)
                 raise RuntimeError(
-                    f"Engine {engine} failed to start on port {actual_port} (timeout after {_ENGINE_START_TIMEOUT:.0f}s)"
+                    f"Engine {engine} failed to start on port {failed_port} "
+                    f"(timeout after {_ENGINE_START_TIMEOUT:.0f}s)"
                 ) from exc
             except BaseException:
                 await _stop_engine(candidate)
@@ -139,7 +152,8 @@ async def browser_start(engine: str = "shadow", headless: bool = True, port: int
 
             return orjson.dumps({
                 "status": "started",
-                "engine": engine,
+                "engine": "mirage" if engine == "camoufox" else engine,
+                "capabilities": capabilities_for("mirage" if engine == "camoufox" else engine),
                 "port": actual_port,
                 "tabs": [],
                 "hint": "Reuse this browser; for separate work create/switch a Mirage tab.",
@@ -200,8 +214,8 @@ async def extract(selector: str | None = None, attribute: str | None = None) -> 
 
 @mcp.tool(name="kahin_screenshot", annotations=_RO)
 async def screenshot(full_page: bool = False) -> str:
-    """Capture a screenshot. Returns base64 PNG."""
-    err = await _require_engine()
+    """Capture a screenshot through Camoufox, promoting Shadow if needed."""
+    err = await _require_mirage()
     if err:
         return err
     async with _healer_ref.safe("kahin_screenshot", full_page=full_page):

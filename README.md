@@ -87,7 +87,13 @@ Gerisini AI halleder. Ama dilersen tool'ları direkt de çağırabilirsin:
 → kahin_error_decode(error_code=-32601) → hatayı çözümler
 ```
 
-Camoufox (Juggler native) ile, engine `mirage` seçilince:
+`kahin_browser_start` varsayılan olarak Camoufox/Mirage başlatır. Shadow
+yalnızca hızlı, görsel olmayan CDP işleri için açıkça seçilir; screenshot,
+mobile viewport, screencast, upload veya accessibility isteyen bir tool,
+Shadow'ı Kahin içinde Camoufox'a yükseltir. Ajanın başka bir otomasyon
+kütüphanesine geçmesi gerekmez.
+
+Camoufox (Juggler native) ile:
 
 ```
 → kahin_browser_start(engine="mirage")
@@ -130,8 +136,13 @@ mcp · orjson · Levenshtein · websockets · httpx · camoufox · Pillow · pyd
 |------|-------|----------|
 | 9222 | Chrome DevTools | RESERVED |
 | 9240 | Kusatma Engine | RESERVED |
-| 9241 | Obscura (varsayılan) | Kahin kullanır |
-| 9242 | Mirage (varsayılan) | Kahin kullanır |
+| 9241 | Eski Shadow/Obscura sabit portu | Varsayılan olarak kullanılmaz |
+| — | Mirage/Camoufox | TCP portu yok; Juggler stdio pipe kullanır |
+
+Shadow/Obscura için `kahin_browser_start` port verilmeden çağrıldığında Kahin,
+her child için loopback üzerinde kernel'den geçici bir port alır. Böylece aynı
+makinedeki bağımsız MCP/OpenCode süreçleri birbirlerinin WebSocket'ine bağlanmaz.
+Sabit port yalnızca özellikle `port=...` verildiğinde kullanılır.
 
 ## Kendi Kendini Onarma
 
@@ -146,7 +157,8 @@ Kahin'de hata loglama ve kendini onarma sistemi gömülüdür:
 ```
 oracle.py               → MCP server (bootstrap: mcp instance + engine lifecycle + main)
   tools/                → 109 tool, engine-ayrımlı kategori dosyaları
-    _common.py          → _safe_cdp, _require_engine, _auto_learn
+    _common.py          → capability routing, _safe_cdp, _require_engine, _auto_learn
+    the_twins/capabilities → motor-yetenek sözleşmesi ve Mirage yükseltme matrisi
     grimoire/seraph/prophecy/healer → CDP bilgi + doğrulama + pattern (paylaşılan)
     pilot/trainman/dejavu           → browser/session/debug (paylaşılan)
     pilot_mirage/trainman_mirage/dejavu_mirage → Camoufox DOM+Input+PageEx / Tab / Network+Console
@@ -167,7 +179,7 @@ camoufox-harness/       → Zig sidecar (Juggler protocol, vendor binary gömül
 ## 🗺️ Yol Haritası
 
 - [x] **Juggler protokolü** için AI-native uçtan uca dokümantasyon, kullanım ve pratik örnekleri
-- [x] **Camoufox entegrasyonu tamamlandı** — gerçek Camoufox (Zig sidecar + Juggler pipe) ile native çalışıyor; engine seçimi ajan tarafından `shadow`/`mirage` parametresiyle yapılıyor
+- [x] **Camoufox entegrasyonu tamamlandı** — gerçek Camoufox (Zig sidecar + Juggler pipe) varsayılandır; görsel capability isteyen Shadow çağrıları Kahin içinde Mirage'a yükseltilir
 - [x] **Obscura entegrasyonu tamamlandı** — gerçek Obscura binary'si (WebSocket CDP) ile çalışıyor, startup problemleri giderildi
 - [ ] **SKILLS** destekleri ve konfigre edilebilir kişsiel hazır skills oluşturma özelliği
 - [x] **Tek tık kurulum** — `pnpm add -g @kahinmcp/kahin`, sonra `kahin` (ilk çalıştırmada Python ortamını otomatik kurar)

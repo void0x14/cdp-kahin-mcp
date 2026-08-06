@@ -27,7 +27,7 @@ from kahin.tools._common import (
     _healer_ref,
     _mirage_call,
     _mirage_engine,
-    _require_engine,
+    _require_mirage,
 )
 
 _REQUEST_EVENTS = ("requestWillBeSent", "responseReceived", "requestFinished", "requestFailed")
@@ -38,6 +38,9 @@ async def mirage_network_requests(limit: int = 50) -> str:
     """Mirage: recent network requests from the buffered event stream
     (requestWillBeSent/responseReceived/requestFinished/requestFailed)."""
     async with _healer_ref.safe("kahin_mirage_network_requests", limit=limit):
+        err = await _require_mirage()
+        if err:
+            return err
         reqs = [e for e in state._network_requests if e["event"] in _REQUEST_EVENTS]
         return orjson.dumps(list(reqs)[-int(limit):], option=orjson.OPT_INDENT_2).decode()
 
@@ -47,10 +50,7 @@ async def mirage_get_response_body(request_id: str) -> str:
     """Mirage: response body of a request (Network.getResponseBody ->
     {base64body, evicted?}), decoded to text when possible."""
     async with _healer_ref.safe("kahin_mirage_get_response_body", request_id=request_id[:80]):
-        # Intentional: _require_engine (not _require_mirage) — Network.
-        # getResponseBody exists in BOTH protocols (Juggler NetworkEx and CDP),
-        # and Obscura.call folds the Juggler token back into a CDP command.
-        err = await _require_engine()
+        err = await _require_mirage()
         if err:
             return err
         try:
@@ -134,6 +134,9 @@ async def mirage_console_log(limit: int = 100) -> str:
     """Mirage: buffered console messages (Runtime.console events forwarded
     by the sidecar)."""
     async with _healer_ref.safe("kahin_mirage_console_log", limit=limit):
+        err = await _require_mirage()
+        if err:
+            return err
         return orjson.dumps(list(state._console_messages)[-int(limit):], option=orjson.OPT_INDENT_2).decode()
 
 
@@ -141,5 +144,8 @@ async def mirage_console_log(limit: int = 100) -> str:
 async def mirage_errors_list(limit: int = 50) -> str:
     """Mirage: buffered uncaught page errors (Page.uncaughtError events)."""
     async with _healer_ref.safe("kahin_mirage_errors_list", limit=limit):
+        err = await _require_mirage()
+        if err:
+            return err
         errors = [e for e in state._current_event_log if e["event"] == "Page.uncaughtError"]
         return orjson.dumps(list(errors)[-int(limit):], option=orjson.OPT_INDENT_2).decode()

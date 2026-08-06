@@ -92,7 +92,7 @@ Juggler/Mirage yüzeyinin ajana dönük, uçtan uca sözleşmesi:
 ### PILOT — Browser Kontrol (8)
 | Tool | Ne işe yarar? |
 |------|---------------|
-| `kahin_browser_start` | Browser motoru başlat (shadow/mirage) |
+| `kahin_browser_start` | Varsayılan Camoufox/Mirage browser motorunu başlat (Shadow açıkça seçilebilir) |
 | `kahin_browser_stop` | Browser'ı durdur, state temizle |
 | `kahin_navigate` | URL'e git |
 | `kahin_click` | CSS selector ile element tıkla |
@@ -126,7 +126,7 @@ Juggler/Mirage yüzeyinin ajana dönük, uçtan uca sözleşmesi:
 | `kahin_pattern_forget` | Pattern sil |
 | `kahin_pattern_stats` | Pattern istatistikleri |
 
-### MIRAGE — Juggler Native (77) — sadece `engine="mirage"` ile çalışır
+### MIRAGE — Juggler Native (77) — Camoufox varsayılandır; Shadow'dan gerektiğinde otomatik yükseltilir
 
 #### DOM Stream (5) — gerçek MutationObserver + Juggler binding
 | Tool | Ne işe yarar? |
@@ -239,7 +239,7 @@ Juggler/Mirage yüzeyinin ajana dönük, uçtan uca sözleşmesi:
 | Tool | Ne işe yarar? |
 |------|---------------|
 | `kahin_mirage_screencast_start` | Canlı ekran kaydı başlat (Page.startScreencast → screencastId) |
-| `kahin_mirage_screencast_frame` | Bir sonraki frame'i al (base64 JPEG) + otomatik ack |
+| `kahin_mirage_screencast_frame` | Bir sonraki frame'i al (base64 JPEG) + otomatik ack; sayfa değişiminden sonra `fresh=true` ile kuyruk temizle |
 | `kahin_mirage_screencast_stop` | Kaydı durdur, kalan frame'leri temizle |
 | `kahin_mirage_screencast_pending` | Bekleyen (ack'siz) frame sayısı + stream sağlığı |
 
@@ -260,7 +260,7 @@ Juggler/Mirage yüzeyinin ajana dönük, uçtan uca sözleşmesi:
 
 ### 2. Browser Aç + Sayfaya Git + İçerik Çek
 ```
-→ kahin_browser_start(engine="shadow", headless=true)
+→ kahin_browser_start(headless=true)
 → kahin_navigate(url="https://github.com/void0x14/doggystyle")
 → kahin_extract()                              -> tüm sayfa metni
 → kahin_screenshot()                           -> ekran görüntüsü

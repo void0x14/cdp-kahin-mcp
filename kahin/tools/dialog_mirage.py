@@ -26,7 +26,7 @@ import orjson
 
 from kahin import _state as state
 from kahin._mcp import mcp
-from kahin.tools._common import _RO, _RW, _healer_ref, _mirage_call
+from kahin.tools._common import _RO, _RW, _healer_ref, _mirage_call, _require_mirage
 
 
 @mcp.tool(name="kahin_mirage_dialog_list", annotations=_RO)
@@ -34,6 +34,9 @@ async def mirage_dialog_list() -> str:
     """Mirage: dialogs currently open (Page.dialogOpened minus dialogClosed),
     read from the forwarded event buffer."""
     async with _healer_ref.safe("kahin_mirage_dialog_list"):
+        err = await _require_mirage()
+        if err:
+            return err
         open_dialogs: dict[str, dict[str, Any]] = {}
         for e in state._current_event_log:
             if e["event"] == "Page.dialogOpened":
@@ -72,6 +75,9 @@ async def mirage_download_list() -> str:
     """Mirage: downloads seen so far (Browser.downloadCreated/downloadFinished
     events), with finished/canceled/error status merged per uuid."""
     async with _healer_ref.safe("kahin_mirage_download_list"):
+        err = await _require_mirage()
+        if err:
+            return err
         downloads: dict[str, dict[str, Any]] = {}
         for e in state._current_event_log:
             params = e.get("params") or {}
@@ -109,6 +115,9 @@ async def mirage_worker_list() -> str:
     """Mirage: web workers alive on the page (Page.workerCreated minus
     workerDestroyed), read from the forwarded event buffer."""
     async with _healer_ref.safe("kahin_mirage_worker_list"):
+        err = await _require_mirage()
+        if err:
+            return err
         workers: dict[str, dict[str, Any]] = {}
         for e in state._current_event_log:
             params = e.get("params") or {}
@@ -128,6 +137,9 @@ async def mirage_websocket_list() -> str:
     """Mirage: web sockets seen on the page (Page.webSocketCreated/Opened/
     Closed events), merged per wsid with opcode/data of the last frame."""
     async with _healer_ref.safe("kahin_mirage_websocket_list"):
+        err = await _require_mirage()
+        if err:
+            return err
         sockets: dict[str, dict[str, Any]] = {}
         for e in state._current_event_log:
             params = e.get("params") or {}

@@ -14,7 +14,9 @@ import orjson
 from kahin import _state as state
 from kahin._mcp import mcp
 from kahin.tools._common import _RO, _healer_ref
+from kahin.the_twins.capabilities import capabilities_for
 from kahin.the_twins.mirage import Mirage
+from kahin.the_twins.shadow import Obscura
 
 
 @mcp.tool(name="kahin_engine_health", annotations=_RO)
@@ -36,12 +38,19 @@ async def engine_health() -> str:
                     "error": f"Browser.health failed: {e}",
                 })
             alive = bool(result.get("alive"))
-            return _dump({"engine": "mirage", "alive": alive, "health": result})
+            return _dump({
+                "engine": "mirage",
+                "alive": alive,
+                "capabilities": capabilities_for("mirage"),
+                "health": result,
+            })
         proc = engine._process  # BrowserEngine declares _process on the base class
         pid = proc.pid if proc is not None and proc.poll() is None else None
+        engine_name = "shadow" if isinstance(engine, Obscura) else type(engine).__name__.lower()
         return _dump({
-            "engine": type(engine).__name__.lower(),
+            "engine": engine_name,
             "alive": engine.is_alive(),
+            "capabilities": capabilities_for(engine_name),
             "pid": pid,
         })
 

@@ -14,6 +14,7 @@ NOTES
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 from typing import Any
 from urllib.parse import urlparse
@@ -23,7 +24,9 @@ import orjson
 from kahin import _state as state
 from kahin._healer import get_healer
 from kahin.residual_self.fate import FateDB
+from kahin.the_twins.capabilities import requires_mirage
 from kahin.the_twins.mirage import Mirage
+from kahin.the_twins.shadow import Obscura
 from kahin.the_source.architect import SchemaEngine
 
 logger = logging.getLogger(__name__)
@@ -69,6 +72,8 @@ _DW = {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, 
 
 _MIRAGE_PAGE_DOMAINS = ("Page", "Runtime", "Network", "Input", "Accessibility", "Heap")
 _MIRAGE_HEALTH_TIMEOUT = 5.0
+_MIRAGE_PROMOTE_TIMEOUT = 60.0
+_MIRAGE_STOP_TIMEOUT = 15.0
 
 
 def _needs_mirage_page(domain: str, command: str) -> bool:
@@ -91,6 +96,11 @@ async def _safe_cdp(domain: str, command: str, params: dict[str, Any] | None = N
         return err
     engine = state._current_engine
     try:
+        if isinstance(engine, Obscura) and requires_mirage(domain, command):
+            promoted = await _promote_shadow_to_mirage()
+            if isinstance(promoted, str):
+                return promoted
+            engine = promoted
         if isinstance(engine, Mirage):
             if _needs_mirage_page(domain, command):
                 await engine.ensure_page()
@@ -144,15 +154,27 @@ async def _require_engine() -> str | None:
 
 
 async def _require_mirage() -> str | None:
-    """Mirage engine required: returns an error string, or None when fine."""
+    """Ensure the visual Camoufox backend is active.
+
+    Shadow is an explicit fast opt-in, not a reason for an agent to leave
+    Kahin.  When a Mirage-only tool is called on a live Shadow session, move
+    that session into Camoufox and preserve its current URL (and a blank-page
+    DOM snapshot when there is no navigable URL).
+    """
     err = await _require_engine()
     if err:
         return err
+    if isinstance(state._current_engine, Obscura):
+        promoted = await _promote_shadow_to_mirage()
+        if isinstance(promoted, str):
+            return promoted
     if not isinstance(state._current_engine, Mirage):
-        return (
-            "This tool requires the mirage/camoufox (Juggler) engine. "
-            "Start it with kahin_browser_start(engine='mirage')."
-        )
+        return orjson.dumps({
+            "error": "Capability requires the Camoufox/Mirage engine.",
+            "code": "capability_requires_mirage",
+            "engine": type(state._current_engine).__name__ if state._current_engine else None,
+            "hint": "Kahin could not promote the active browser; inspect kahin_engine_health.",
+        }, option=orjson.OPT_INDENT_2).decode()
     return None
 
 
@@ -183,6 +205,126 @@ async def _mirage_call(method: str, params: dict[str, Any] | None = None) -> str
             "error": f"Connection lost: {e}",
             "hint": "Browser engine may have crashed. Use kahin_browser_stop then kahin_browser_start.",
         }).decode()
+
+
+async def _promote_shadow_to_mirage() -> Mirage | str:
+    """Replace a live Shadow process with Camoufox for a visual capability.
+
+    This is the single in-process handoff used by screenshots, mobile
+    emulation, screencast, upload and accessibility tools.  It never invokes
+    another automation library and never publishes the new engine until its
+    health check, event hooks and page handoff have succeeded.
+    """
+    current = state._current_engine
+    if isinstance(current, Mirage):
+        return current
+    if not isinstance(current, Obscura):
+        return orjson.dumps({
+            "error": "No live engine can be promoted to Camoufox/Mirage.",
+            "code": "mirage_promotion_unavailable",
+        }, option=orjson.OPT_INDENT_2).decode()
+
+    async with state._lifecycle_lock:
+        current = state._current_engine
+        if isinstance(current, Mirage):
+            return current
+        if not isinstance(current, Obscura):
+            return orjson.dumps({
+                "error": "No live Shadow engine can be promoted to Camoufox/Mirage.",
+                "code": "mirage_promotion_unavailable",
+            }, option=orjson.OPT_INDENT_2).decode()
+
+        try:
+            page_state = await _shadow_page_state(current)
+        except Exception as exc:  # noqa: BLE001
+            return orjson.dumps({
+                "error": f"Could not capture the active Shadow page before Camoufox handoff: {exc}",
+                "code": "mirage_promotion_snapshot_failed",
+                "hint": "The Shadow browser is still active; retry the capability or inspect its health.",
+            }, option=orjson.OPT_INDENT_2).decode()
+
+        candidate = Mirage()
+        try:
+            await asyncio.wait_for(
+                candidate.start(headless=True, port=0),
+                timeout=_MIRAGE_PROMOTE_TIMEOUT,
+            )
+            # Import lazily: oracle imports the tool modules during bootstrap,
+            # while this function is only called after bootstrap is complete.
+            from kahin.oracle import (  # noqa: PLC0415
+                _on_cdp_event,
+                _on_console_event,
+                _on_engine_death,
+                _on_network_event,
+            )
+
+            await candidate.on_event(_on_cdp_event)
+            await candidate.on_event(_on_network_event)
+            await candidate.on_event(_on_console_event)
+            eng = candidate
+            eng.on_death(lambda: _on_engine_death(eng))
+
+            await candidate.ensure_page()
+            target_url = page_state["url"]
+            if target_url and target_url != "about:blank":
+                await candidate.execute_cdp("Page", "navigate", {"url": target_url})
+            elif page_state["html"]:
+                encoded = base64.b64encode(page_state["html"].encode()).decode()
+                await candidate.execute_cdp(
+                    "Page",
+                    "navigate",
+                    {"url": f"data:text/html;base64,{encoded}"},
+                )
+        except asyncio.CancelledError:
+            try:
+                await asyncio.wait_for(candidate.stop(), timeout=_MIRAGE_STOP_TIMEOUT)
+            except BaseException:  # noqa: BLE001
+                logger.exception("failed to clean up cancelled Mirage promotion")
+            raise
+        except Exception as exc:  # noqa: BLE001
+            try:
+                await asyncio.wait_for(candidate.stop(), timeout=_MIRAGE_STOP_TIMEOUT)
+            except BaseException:  # noqa: BLE001
+                logger.exception("failed to clean up failed Mirage promotion")
+            return orjson.dumps({
+                "error": f"Camoufox/Mirage promotion failed: {exc}",
+                "code": "mirage_promotion_failed",
+                "hint": "Kahin did not fall back to an external automation library.",
+            }, option=orjson.OPT_INDENT_2).decode()
+
+        # Publish only after Camoufox is healthy and the page is available.
+        state._current_engine = candidate
+        state.clear_state()
+        try:
+            await asyncio.wait_for(current.stop(), timeout=_MIRAGE_STOP_TIMEOUT)
+        except BaseException:  # noqa: BLE001
+            logger.exception("Shadow cleanup failed after successful Mirage promotion")
+        return candidate
+
+
+async def _shadow_page_state(engine: Obscura) -> dict[str, str]:
+    """Read enough live state to make a Shadow -> Mirage handoff useful."""
+    result = await asyncio.wait_for(
+        engine.send_cdp(
+            "Runtime",
+            "evaluate",
+            {
+                "expression": "({url: location.href, html: document.documentElement?.outerHTML || ''})",
+                "returnByValue": True,
+            },
+        ),
+        timeout=10.0,
+    )
+    value = (result.get("result") or {}).get("value")
+    if not isinstance(value, dict):
+        raise RuntimeError(f"Runtime.evaluate returned no page state: {result}")
+    url = value.get("url")
+    html = value.get("html")
+    if not isinstance(url, str) or not isinstance(html, str):
+        raise RuntimeError("active page state had an invalid URL or HTML snapshot")
+    # Keep the handoff bounded.  Navigable URLs retain external resources;
+    # the HTML snapshot is only used for about:blank documents.
+    return {"url": url, "html": html[:5_000_000]}
 
 
 async def _mirage_eval_result(expression: str, frame_id: str | None = None) -> dict[str, Any] | str:

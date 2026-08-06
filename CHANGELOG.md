@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.3.5] — 2026-08-06
+
+### Düzeltilen
+- `kahin_browser_start()` artık varsayılan olarak gerçek Camoufox/Mirage
+  başlatıyor; screenshot, mobile viewport, screencast, upload ve accessibility
+  çağrıları Shadow seçilmiş olsa bile Kahin içinde görsel backend'e yükseltiliyor.
+- Yeni capability sözleşmesi `kahin_engine_health` yanıtında motorun gerçek
+  görsel/mobile/DOM-stream/a11y/screencast sınırlarını raporluyor; generic
+  `kahin_screenshot` ve `Page.captureScreenshot` yolu dış otomasyon fallback'i
+  kullanmadan Camoufox'a geçiyor.
+- Shadow/Obscura artık bağımsız MCP/OpenCode süreçleri arasında sabit `9241`
+  portunu paylaşmıyor; varsayılan başlatma her child için geçici loopback portu
+  kullanıyor ve gerçek portu raporluyor.
+- Port çakışmasında ikinci child'ın yabancı browser WebSocket'ine bağlanıp
+  yanlışlıkla `started` dönmesi engellendi; child kararlılığı doğrulanmadan
+  engine state'e yayınlanmıyor ve başarısız child temizleniyor.
+- Mirage/Zig sidecar shutdown cancellation path'i child ve IPC kaynaklarını
+  güvenle temizliyor.
+
+### Testler
+- İki bağımsız Shadow instance'ı ve explicit port çakışması gerçek Obscura
+  binary'siyle regresyon testine alındı.
+- Shadow -> Camoufox screenshot handoff ve varsayılan motor gerçek browser ile
+  doğrulandı.
+- Python runtime suite: 115 passed; Zig sidecar tests/build: passed.
+
 ## [0.3.4] — 2026-08-05
 
 ### Eklenen
@@ -123,6 +149,7 @@ Tüm önemli değişiklikler bu dosyada tutulur. Format: [Keep a Changelog](http
 - CDP ansiklopedisi: 56 domain, 667 komut, 237 event, 609 type (Chrome 148)
 
 [0.3.4]: https://gitlab.com/void0x14/kahin-mcp/-/compare/v0.3.3...v0.3.4
+[0.3.5]: https://gitlab.com/void0x14/kahin-mcp/-/compare/v0.3.4...v0.3.5
 [0.3.3]: https://gitlab.com/void0x14/kahin-mcp/-/compare/v0.3.2...v0.3.3
 [0.3.2]: https://gitlab.com/void0x14/kahin-mcp/-/compare/v0.3.1...v0.3.2
 [0.2.0]: https://gitlab.com/void0x14/kahin-mcp/-/compare/v0.1.8...v0.2.0

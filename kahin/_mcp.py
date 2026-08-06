@@ -15,11 +15,15 @@ mcp = FastMCP(
     name="kahin",
     instructions=(
         "I am the Oracle. Always validate CDP commands before sending. "
-        "Start one browser and reuse it; repeated kahin_browser_start calls "
+        "Start one browser and reuse it; kahin_browser_start defaults to the "
+        "complete Camoufox/Mirage engine, and repeated start calls "
         "reuse the active engine. With mirage/camoufox, use tabs ("
         "kahin_mirage_tab_new/switch/close) for separate pages instead of "
         "starting another browser. CDP commands are automatically routed to "
-        "their Mirage equivalent when Camoufox is active. Ports 9222 and "
+        "their Mirage equivalent when Camoufox is active. If Shadow was "
+        "explicitly selected, visual capabilities promote the live page to "
+        "Mirage inside Kahin; never leave Kahin for another automation library. "
+        "Ports 9222 and "
         "9240 are RESERVED. For adaptive Mirage automation, start "
         "kahin_mirage_dom_start, read kahin_mirage_dom_snapshot, then consume "
         "kahin_mirage_dom_events with its streamId/cursor; on reset or dropped "

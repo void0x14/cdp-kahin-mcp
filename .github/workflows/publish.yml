@@ -1,29 +1,18 @@
-name: npm publish
+name: release verification
 
 on:
   push:
     branches: [main]
-    paths: ["package.json"]
+    tags: ["v*.*.*"]
   workflow_dispatch:
 
 jobs:
-  publish:
+  verify:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-          registry-url: https://registry.npmjs.org
-      - name: Publish if version differs
-        run: |
-          PUBLISHED=$(npm view @kahinmcp/kahin version 2>/dev/null || echo none)
-          LOCAL=$(node -p "require('./package.json').version")
-          echo "npm: $PUBLISHED | local: $LOCAL"
-          if [ "$PUBLISHED" != "$LOCAL" ]; then
-            npm publish
-          else
-            echo "version unchanged — publish atlandı"
-          fi
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Validate synchronized release artifacts
+        run: bash scripts/release-check.sh

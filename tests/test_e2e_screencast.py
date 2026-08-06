@@ -232,7 +232,7 @@ async def test_screencast_frames_flow_and_ack(mirage_tools: None, http_server: s
     _assert_jpeg(f1)
 
     await _paint_distinct_canvas()
-    f2 = _loads(await screencast_mirage.mirage_screencast_frame(timeout=10.0))
+    f2 = _loads(await screencast_mirage.mirage_screencast_frame(timeout=10.0, fresh=True))
     assert "data" in f2, f2
     assert f2["ack"]["sent"] is True, f2["ack"]
     _assert_jpeg(f2)
@@ -271,7 +271,7 @@ async def test_screencast_pending_queues_unacked_frames(
 
     # Stream resumes after the ack: a fresh frame arrives.
     await _paint_distinct_canvas()
-    f2 = _loads(await screencast_mirage.mirage_screencast_frame(timeout=10.0))
+    f2 = _loads(await screencast_mirage.mirage_screencast_frame(timeout=10.0, fresh=True))
     assert "data" in f2 and f2["ack"]["sent"] is True, f2
     assert f1["data"] != f2["data"], f1
 

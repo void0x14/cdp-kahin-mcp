@@ -19,8 +19,10 @@ and camoufox's ``nsScreencastService.cpp``):
 
 The frame tool acks automatically when it hands a frame to the caller; the
 ack is awaited in the TOOL call, never inside the reader loop, so event
-dispatch is never blocked. ``Browser.setScreencastOptions`` exists only in
-upstream Chrome Juggler — Camoufox removed it, so nothing here uses it.
+dispatch is never blocked. ``fresh=true`` drops and ACKs frames already in
+the queue, then waits for a frame arriving after the call (useful after a
+page mutation). ``Browser.setScreencastOptions`` exists only in upstream
+Chrome Juggler — Camoufox removed it, so nothing here uses it.
 Video-file recording (``Page.videoRecordingStarted``) is NOT wired: it needs
 browser-context video options this server does not create.
 
@@ -111,17 +113,26 @@ async def mirage_screencast_start(width: int = 1280, height: int = 720, quality:
 
 
 @mcp.tool(name="kahin_mirage_screencast_frame", annotations=_RW)
-async def mirage_screencast_frame(screencast_id: str | None = None, timeout: float = 10.0) -> str:
+async def mirage_screencast_frame(
+    screencast_id: str | None = None, timeout: float = 10.0, fresh: bool = False
+) -> str:
     """Mirage: wait for and return the next screencast frame
     (Page.screencastFrame) as base64-JPEG in ``data`` with deviceWidth /
     deviceHeight. Waits up to ``timeout`` seconds when no frame is queued;
-    frames already queued (unacked) are returned oldest-first. On return the
-    frame is automatically ACKed (Page.screencastFrameAck) with its stream
-    id — Camoufox holds the stream at one unacked frame, so a missing ack
-    would stall it; the ack happens in THIS call (never in the reader loop)
-    and a failed ack is reported without losing the frame. screencast_id
-    defaults to the id from kahin_mirage_screencast_start."""
-    async with _healer_ref.safe("kahin_mirage_screencast_frame", screencast_id=screencast_id, timeout=timeout):
+    frames already queued (unacked) are returned oldest-first unless fresh is
+    true. With fresh=true, queued frames are discarded and ACKed, then the
+    tool waits for a frame arriving after this call. On return the frame is
+    automatically ACKed (Page.screencastFrameAck) with its stream id —
+    Camoufox holds the stream at one unacked frame, so a missing ack would
+    stall it; the ack happens in THIS call (never in the reader loop) and a
+    failed ack is reported without losing the frame. screencast_id defaults
+    to the id from kahin_mirage_screencast_start."""
+    async with _healer_ref.safe(
+        "kahin_mirage_screencast_frame",
+        screencast_id=screencast_id,
+        timeout=timeout,
+        fresh=fresh,
+    ):
         try:
             wait = float(timeout)
         except (TypeError, ValueError):
@@ -132,6 +143,20 @@ async def mirage_screencast_frame(screencast_id: str | None = None, timeout: flo
         if err:
             return err
         engine = _mirage_engine()
+        dropped = 0
+        sid = screencast_id or engine._screencast_id
+        if fresh:
+            dropped = engine.drain_screencast_frames()
+            if dropped and not sid:
+                return '{"error": "cannot ACK fresh screencast frames without a screencastId"}'
+            try:
+                for _ in range(dropped):
+                    await engine.call("Page.screencastFrameAck", {"screencastId": sid})
+            except Exception as e:  # noqa: BLE001
+                return orjson.dumps({
+                    "error": f"could not ACK discarded screencast frames: {e}",
+                    "droppedFrames": dropped,
+                }).decode()
         try:
             frame = await engine.wait_for_screencast_frame(wait)
         except Exception as e:  # noqa: BLE001
@@ -144,7 +169,6 @@ async def mirage_screencast_frame(screencast_id: str | None = None, timeout: flo
                 "hint": "Is a screencast running? Start one with "
                 "kahin_mirage_screencast_start; an animating page emits frames.",
             }, option=orjson.OPT_INDENT_2).decode()
-        sid = screencast_id or engine._screencast_id
         ack = {"sent": False, "screencastId": sid, "error": None}
         if sid:
             try:
@@ -162,6 +186,7 @@ async def mirage_screencast_frame(screencast_id: str | None = None, timeout: flo
             "deviceWidth": frame.get("deviceWidth"),
             "deviceHeight": frame.get("deviceHeight"),
             "format": "jpeg",
+            "droppedFrames": dropped,
             "ack": ack,
         }, option=orjson.OPT_INDENT_2).decode()
 

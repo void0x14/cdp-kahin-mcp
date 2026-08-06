@@ -14,7 +14,13 @@ MCP tool
       -> Camoufox Page/Browser
 ```
 
-- `engine="mirage"` bir Camoufox süreci ve tek bir sidecar başlatır.
+- `kahin_browser_start` varsayılan olarak bir Camoufox süreci ve tek bir
+  sidecar başlatır. `engine="shadow"` yalnızca hızlı, görsel olmayan CDP
+  işleri için açıkça seçilir.
+- Shadow aktifken screenshot, mobile emulation, accessibility, upload veya
+  screencast isteyen bir tool çağrısı, aktif URL'i koruyarak Kahin içinde
+  Shadow -> Mirage yükseltmesi yapar. Ajanın Playwright ya da başka bir
+  otomasyon kütüphanesine geçmesi sözleşme dışıdır.
 - İlk sayfa ilk sayfa tool'u çağrıldığında tembel olarak oluşturulur.
 - Aynı browser'ı ve aktif sekmeyi yeniden kullan. Başka sayfa gerektiğinde
   yeni browser açmak yerine `kahin_mirage_tab_new` ve
@@ -22,8 +28,9 @@ MCP tool
 - Juggler'da `Browser.*` browser köküne, `Page.*` ise aktif target/session'a
   aittir. MCP araçları session routing'i ajandan saklar.
 - `kahin_execute_cdp`, Mirage aktifken desteklenen CDP çağrılarını Juggler
-  eşdeğerine yönlendirir; Juggler'da bulunmayan her CDP domain'i varmış gibi
-  tahmin etme.
+  eşdeğerine yönlendirir; görsel capability isteyen bilinen çağrılar Shadow
+  aktifse önce Mirage'a yükseltilir. Juggler'da bulunmayan her CDP domain'i
+  varmış gibi tahmin etme.
 
 ## 2. Ajanın temel protokolü
 
@@ -346,6 +353,12 @@ tool'ları `engine="mirage"` aktifken kullanılır.
 - `kahin_mirage_screencast_start`, `kahin_mirage_screencast_frame`
 - `kahin_mirage_screencast_stop`, `kahin_mirage_screencast_pending`
 
+`kahin_mirage_screencast_frame(fresh=true)`, önceki çağrıların ACK edilmiş
+ama henüz kuyrukta kalan frame'lerini temizler ve çağrıdan sonra gelen ilk
+frame'i bekler. Sayfa mutation'ı veya viewport değişiminden sonra görsel
+doğrulama için bu yol kullanılmalıdır; varsayılan `fresh=false` ise kuyruktaki
+en eski frame FIFO olarak döner.
+
 ### Accessibility ve health (2)
 
 - `kahin_mirage_accessibility_tree`
@@ -391,7 +404,7 @@ dom_events(after_seq=C, stream_id=S, frame_id=F, wait_ms=5000)
 
 | Hata/sinyal | Sebep | Kurtarma |
 |---|---|---|
-| `Browser engine is not running` | Start yok | `kahin_browser_start(engine="mirage")` |
+| `Browser engine is not running` | Start yok | `kahin_browser_start()` |
 | `Browser engine is dead` | Sidecar/Camoufox öldü | `kahin_browser_stop`, sonra yeni `start` |
 | `stale_node` | Node silindi veya document değişti | Snapshot + yeni nodeId |
 | `reset`/`dropped` | Stream değişti veya ring overflow | Snapshot; eski cursor'u bırak |
