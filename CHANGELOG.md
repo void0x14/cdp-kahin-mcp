@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.3.6] — 2026-08-06
+
+### Düzeltilen
+- `Page.getLayoutMetrics` ve `Page.stopLoading` CDP çağrıları Mirage içinde
+  gerçek sayfa ölçümü/evaluate ile karşılanıyor; Juggler'ın olmayan methodları
+  artık yanıltıcı typo yerine `unsupported_on_engine` olarak raporlanıyor.
+- Shadow -> Mirage handoff event/network buffer'larını silmiyor; görsel
+  capability'ye geçmeden önce toplanan gerçek teşhis verisi korunuyor.
+- npm release script'i sürüm registry'de zaten varsa CI auth olmadan idempotent
+  şekilde başarılı tamamlanıyor.
+
+### Testler
+- Gerçek Camoufox'ta CDP layout metrics, Shadow'dan mobile viewport ve
+  screenshot handoff doğrulandı.
+
 ## [0.3.5] — 2026-08-06
 
 ### Düzeltilen
@@ -155,3 +170,4 @@ Tüm önemli değişiklikler bu dosyada tutulur. Format: [Keep a Changelog](http
 [0.2.0]: https://gitlab.com/void0x14/kahin-mcp/-/compare/v0.1.8...v0.2.0
 [0.1.8]: https://gitlab.com/void0x14/kahin-mcp/-/compare/v0.1.7...v0.1.8
 [0.1.7]: https://gitlab.com/void0x14/kahin-mcp/-/compare/v0.1.6...v0.1.7
+[0.3.6]: https://gitlab.com/void0x14/kahin-mcp/-/compare/v0.3.5...v0.3.6
