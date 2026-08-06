@@ -15,6 +15,8 @@
   screenshot, upload, accessibility ve network yanıtları bounded hale getirildi.
 - npm launcher her kurulumda gömülü wheel'i günceller ve Camoufox binary'sini
   hazırlar; npm release sorgusu ağ/auth hatalarını yanlışlıkla başarı saymaz.
+- GitLab gerçek-browser job'u Firefox'u Docker root olarak çalıştırmaz; npm
+  publish artık release-check yanında real-e2e kapısına da bağlıdır.
 
 ### Testler
 - Gerçek Camoufox/Mirage uygulama suite'i: 119 passed.

@@ -28,9 +28,13 @@ real-e2e:
   image: ghcr.io/astral-sh/uv:python3.14-bookworm
   before_script:
     - apt-get update -qq
-    - apt-get install -y -qq curl xz-utils
+    - apt-get install -y -qq curl xz-utils passwd util-linux
+    # Camoufox/Firefox must not be launched as Docker root. Keep the build
+    # setup privileged, then run the real browser gate as an unprivileged user.
+    - useradd --create-home --user-group --shell /bin/bash kahin-ci
+    - chown -R kahin-ci:kahin-ci "$CI_PROJECT_DIR"
   script:
-    - bash scripts/real-e2e.sh
+    - runuser --user kahin-ci -- env HOME=/home/kahin-ci PATH="$PATH" bash scripts/real-e2e.sh
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
     - if: '$CI_COMMIT_TAG =~ /^v[0-9]+\.[0-9]+\.[0-9]+$/'
@@ -38,7 +42,7 @@ real-e2e:
 
 npm-publish:
   stage: publish
-  needs: [release-check]
+  needs: [release-check, real-e2e]
   script:
     - bash scripts/npm-publish.sh
   rules:

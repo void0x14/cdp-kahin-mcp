@@ -246,7 +246,7 @@ async def test_upload_single_file(mirage_tools: None, http_server: str, tmp_path
     assert up["chooser"]["objectId"], up
 
     await pilot_mirage.mirage_click("#up")
-    last = await _poll_last(http_server, lambda d: d["count"] == 1)
+    last = await _poll_last(http_server, lambda d: d.get("count") == 1)
     part = last["parts"][0]
     assert part["filename"] == "test.txt", last
     assert part["content"] == "hello from kahin upload\n", last
@@ -292,7 +292,7 @@ async def test_upload_multiple_files_waits_for_chooser(
     assert set(up["names"]) == {"alpha.txt", "beta.txt"}, up
 
     await pilot_mirage.mirage_click("#up")
-    last = await _poll_last(http_server, lambda d: d["count"] == 2)
+    last = await _poll_last(http_server, lambda d: d.get("count") == 2)
     by_name = {p["filename"]: p["content"] for p in last["parts"]}
     assert by_name == {"alpha.txt": "alpha content", "beta.txt": "beta content 42"}, last
 
