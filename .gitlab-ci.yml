@@ -28,7 +28,11 @@ real-e2e:
   image: ghcr.io/astral-sh/uv:python3.14-bookworm
   before_script:
     - apt-get update -qq
-    - apt-get install -y -qq curl xz-utils passwd util-linux
+    - >-
+      apt-get install -y -qq curl xz-utils passwd util-linux libgtk-3-0
+      libdbus-glib-1-2 libdbus-1-3 libasound2 libx11-xcb1 libxcomposite1
+      libxdamage1 libxfixes3 libxrandr2 libxtst6 libxss1 libatk1.0-0
+      libpango-1.0-0 libcairo2
     # Camoufox/Firefox must not be launched as Docker root. Keep the build
     # setup privileged, then run the real browser gate as an unprivileged user.
     - useradd --create-home --user-group --shell /bin/bash kahin-ci

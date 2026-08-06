@@ -74,9 +74,15 @@ SIDECAR="$ROOT/camoufox-harness/vendor/bin/kahin-sidecar"
 if command -v uv >/dev/null 2>&1; then
   uv sync --frozen --dev
   uv run python -m camoufox fetch
+  CAMOUFOX_BIN="$(uv run python -c 'from kahin.the_twins.mirage import _camoufox_bin; print(_camoufox_bin())')"
+  echo "==> validating Camoufox runtime: $CAMOUFOX_BIN"
+  "$CAMOUFOX_BIN" --headless --version
   KAHIN_REQUIRE_REAL_E2E=1 uv run pytest -q tests
 else
   python3 -m pip install -e . pytest pytest-asyncio
   python3 -m camoufox fetch
+  CAMOUFOX_BIN="$(python3 -c 'from kahin.the_twins.mirage import _camoufox_bin; print(_camoufox_bin())')"
+  echo "==> validating Camoufox runtime: $CAMOUFOX_BIN"
+  "$CAMOUFOX_BIN" --headless --version
   KAHIN_REQUIRE_REAL_E2E=1 python3 -m pytest -q tests
 fi

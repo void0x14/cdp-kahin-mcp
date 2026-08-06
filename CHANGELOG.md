@@ -17,6 +17,8 @@
   hazırlar; npm release sorgusu ağ/auth hatalarını yanlışlıkla başarı saymaz.
 - GitLab gerçek-browser job'u Firefox'u Docker root olarak çalıştırmaz; npm
   publish artık release-check yanında real-e2e kapısına da bağlıdır.
+- CI image'ına Camoufox'un GTK/DBus/audio/X11 runtime bağımlılıkları eklendi;
+  testten önce gerçek binary `--version` ile başlatılabilirliği doğrulanıyor.
 
 ### Testler
 - Gerçek Camoufox/Mirage uygulama suite'i: 119 passed.
