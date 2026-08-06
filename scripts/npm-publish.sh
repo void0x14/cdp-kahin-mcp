@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+PUBLISHED=$(npm view @kahinmcp/kahin version 2>/dev/null || echo none)
+LOCAL=$(node -p "require('./package.json').version")
+echo "npm: $PUBLISHED | local: $LOCAL"
+
+if [ "$PUBLISHED" = "$LOCAL" ]; then
+  echo "version unchanged — publish atlandı"
+  exit 0
+fi
+
 AUTH_TOKEN="${NPM_TOKEN:-${NODE_AUTH_TOKEN:-}}"
 if [[ -n "$AUTH_TOKEN" ]]; then
   npm config set "//registry.npmjs.org/:_authToken=$AUTH_TOKEN" >/dev/null
@@ -11,13 +20,5 @@ if ! npm whoami >/dev/null 2>&1; then
   exit 1
 fi
 
-PUBLISHED=$(npm view @kahinmcp/kahin version 2>/dev/null || echo none)
-LOCAL=$(node -p "require('./package.json').version")
-echo "npm: $PUBLISHED | local: $LOCAL"
-
-if [ "$PUBLISHED" != "$LOCAL" ]; then
-  npm publish --access public --provenance=false
-  echo "published $LOCAL"
-else
-  echo "version unchanged — publish atlandı"
-fi
+npm publish --access public --provenance=false
+echo "published $LOCAL"
