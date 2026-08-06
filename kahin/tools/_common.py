@@ -110,6 +110,19 @@ async def _safe_cdp(domain: str, command: str, params: dict[str, Any] | None = N
         return orjson.dumps(result, option=orjson.OPT_INDENT_2).decode()
     except RuntimeError as e:
         msg = str(e)
+        lowered = msg.lower()
+        if "not supported" in lowered or "method not found" in lowered:
+            engine_name = "mirage" if isinstance(engine, Mirage) else "shadow"
+            return orjson.dumps({
+                "error": f"{domain}.{command} is not supported by the active {engine_name} adapter",
+                "code": "unsupported_on_engine",
+                "engine": engine_name,
+                "method": f"{domain}.{command}",
+                "hint": [
+                    "Use kahin_find_concept/kahin_get_command to inspect the supported surface.",
+                    "Use the native kahin_mirage_* tool when one exists; no external automation fallback is used.",
+                ],
+            }, option=orjson.OPT_INDENT_2).decode()
         correction = _get_schema().error_decode(error_code=-32601, error_message=f"'{domain}.{command}' not found")
         return orjson.dumps({
             "error": f"CDP error: {msg}",
@@ -293,8 +306,10 @@ async def _promote_shadow_to_mirage() -> Mirage | str:
             }, option=orjson.OPT_INDENT_2).decode()
 
         # Publish only after Camoufox is healthy and the page is available.
+        # Keep the bounded event/network buffers: callers may have started
+        # with Shadow specifically to inspect a request before asking for a
+        # visual capability. A backend handoff must not erase that evidence.
         state._current_engine = candidate
-        state.clear_state()
         try:
             await asyncio.wait_for(current.stop(), timeout=_MIRAGE_STOP_TIMEOUT)
         except BaseException:  # noqa: BLE001

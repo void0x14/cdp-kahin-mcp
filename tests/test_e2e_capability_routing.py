@@ -83,23 +83,38 @@ async def test_shadow_cdp_screenshot_promotes_to_camoufox() -> None:
 
 
 @pytest.mark.asyncio
+async def test_cdp_layout_metrics_are_real_on_camoufox() -> None:
+    started = _loads(await pilot.browser_start())
+    assert started["engine"] == "mirage", started
+    try:
+        await pilot.navigate(
+            "data:text/html," + quote("<html><body style='height:2400px'>metrics</body></html>")
+        )
+        metrics = _loads(await pilot.execute_cdp("Page", "getLayoutMetrics", {}))
+        assert metrics["contentSize"]["height"] >= metrics["layoutViewport"]["clientHeight"]
+        assert metrics["layoutViewport"]["clientWidth"] > 0
+        assert metrics["visualViewport"]["scale"] == 1
+    finally:
+        await pilot.browser_stop()
+
+
+@pytest.mark.asyncio
 async def test_shared_screenshot_preserves_shadow_page_without_external_fallback() -> None:
     started = _loads(await pilot.browser_start(engine="shadow"))
     assert started["engine"] == "shadow", started
     try:
         await pilot.navigate(_page())
+        viewport = _loads(await emulation_mirage.mirage_set_viewport(390, 844))
+        assert viewport == {}, viewport
+        assert isinstance(state._current_engine, Mirage)
+
         result = _loads(await pilot.screenshot())
         assert result["format"] == "png", result
         assert result["screenshot"].startswith("iVBOR"), result
+        png = base64.b64decode(result["screenshot"])
+        assert struct.unpack(">II", png[16:24]) == (390, 844), "mobile screenshot size drifted"
 
-        assert isinstance(state._current_engine, Mirage)
         body = await pilot.extract("#title")
         assert _loads(body)["result"]["value"] == "Kahin visual contract", body
-
-        viewport = _loads(await emulation_mirage.mirage_set_viewport(390, 844))
-        assert viewport == {}, viewport
-        mobile = _loads(await pilot.screenshot())
-        png = base64.b64decode(mobile["screenshot"])
-        assert struct.unpack(">II", png[16:24]) == (390, 844), "mobile screenshot size drifted"
     finally:
         await pilot.browser_stop()

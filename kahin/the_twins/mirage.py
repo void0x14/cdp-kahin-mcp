@@ -632,6 +632,12 @@ class Mirage(BrowserEngine):
             await self.ensure_page()
             result = await self.call("Page.captureScreenshot", p)
             return {"data": result.get("data", "")}
+        if domain == "Page" and command == "getLayoutMetrics":
+            return await self._execute_cdp_layout_metrics()
+        if domain == "Page" and command == "stopLoading":
+            await self.ensure_page()
+            await self.call("Runtime.evaluate", {"expression": "window.stop()"})
+            return {}
         if domain == "Page" and command == "close":
             target_id = self._current_target
             if target_id is None:
@@ -642,6 +648,81 @@ class Mirage(BrowserEngine):
         # Page.navigate, Runtime.evaluate, frame tree, and the other
         # already CDP-shaped sidecar handlers remain direct Juggler calls.
         return await self.call(method, p)
+
+    async def _execute_cdp_layout_metrics(self) -> dict[str, Any]:
+        """Build the CDP layout-metrics shape from real page measurements.
+
+        Juggler intentionally has no Page.getLayoutMetrics method.  The
+        browser still exposes the underlying layout through the page's
+        JavaScript environment, so the adapter measures it there instead of
+        returning a fake hard-coded viewport or leaking the protocol gap to
+        the agent.
+        """
+        await self.ensure_page()
+        result = await self.call("Runtime.evaluate", {
+            "expression": """
+                (() => {
+                  const root = document.documentElement;
+                  const body = document.body;
+                  const width = Math.max(
+                    window.innerWidth || 0,
+                    root?.clientWidth || 0,
+                    body?.clientWidth || 0,
+                  );
+                  const height = Math.max(
+                    window.innerHeight || 0,
+                    root?.clientHeight || 0,
+                    body?.clientHeight || 0,
+                  );
+                  return {
+                    viewportWidth: width,
+                    viewportHeight: height,
+                    contentWidth: Math.max(
+                      root?.scrollWidth || 0,
+                      body?.scrollWidth || 0,
+                      width,
+                    ),
+                    contentHeight: Math.max(
+                      root?.scrollHeight || 0,
+                      body?.scrollHeight || 0,
+                      height,
+                    ),
+                    pageX: window.scrollX || 0,
+                    pageY: window.scrollY || 0,
+                    deviceScaleFactor: window.devicePixelRatio || 1,
+                  };
+                })()
+            """,
+            "returnByValue": True,
+        })
+        value = (result.get("result") or {}).get("value")
+        if not isinstance(value, dict):
+            raise RuntimeError(f"could not measure page layout: {result}")
+        width = float(value.get("viewportWidth", 0) or 0)
+        height = float(value.get("viewportHeight", 0) or 0)
+        content_width = float(value.get("contentWidth", width) or width)
+        content_height = float(value.get("contentHeight", height) or height)
+        page_x = float(value.get("pageX", 0) or 0)
+        page_y = float(value.get("pageY", 0) or 0)
+        return {
+            "contentSize": {"x": 0, "y": 0, "width": content_width, "height": content_height},
+            "layoutViewport": {
+                "pageX": page_x,
+                "pageY": page_y,
+                "clientWidth": width,
+                "clientHeight": height,
+            },
+            "visualViewport": {
+                "offsetX": 0,
+                "offsetY": 0,
+                "pageX": page_x,
+                "pageY": page_y,
+                "clientWidth": width,
+                "clientHeight": height,
+                "scale": 1,
+                "zoom": 1,
+            },
+        }
 
     async def _execute_cdp_target(self, command: str, params: dict[str, Any]) -> dict[str, Any]:
         if command == "getTargets":
