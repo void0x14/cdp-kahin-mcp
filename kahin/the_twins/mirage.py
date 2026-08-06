@@ -869,22 +869,34 @@ class Mirage(BrowserEngine):
                 proc.stdin.close()  # stdin EOF -> sidecar stops the browser
             except Exception:  # noqa: BLE001
                 pass
+        wait_task = asyncio.create_task(proc.wait())
         try:
-            await asyncio.wait_for(proc.wait(), timeout=10)
+            await asyncio.wait_for(asyncio.shield(wait_task), timeout=10)
         except TimeoutError:
             try:
                 proc.kill()
             except ProcessLookupError:
                 pass
-            await proc.wait()
-        if self._stderr_file is not None:
-            self._stderr_file.close()
-            self._stderr_file = None
-        self._sessions.clear()
-        self._target_infos.clear()
-        self._frame_contexts.clear()
-        self._current_target = None
-        self._remove_profile()
+            await wait_task
+        except asyncio.CancelledError:
+            # A cancelled MCP request must still reap the sidecar before the
+            # cancellation escapes; otherwise the next tool sees a cleared
+            # Python state with a live child underneath it.
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            await asyncio.shield(wait_task)
+            raise
+        finally:
+            if self._stderr_file is not None:
+                self._stderr_file.close()
+                self._stderr_file = None
+            self._sessions.clear()
+            self._target_infos.clear()
+            self._frame_contexts.clear()
+            self._current_target = None
+            self._remove_profile()
 
     def _remove_profile(self) -> None:
         profile, self._profile_dir = self._profile_dir, None

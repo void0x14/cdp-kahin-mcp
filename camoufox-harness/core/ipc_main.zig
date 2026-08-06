@@ -48,6 +48,7 @@ const Allocator = std.mem.Allocator;
 
 const driver_mod = @import("driver.zig");
 const pipe = @import("src/transport/pipe.zig");
+const process_manager = @import("process-manager/lifecycle.zig");
 
 const max_line: usize = 16 * 1024 * 1024;
 const request_timeout_ms: i32 = 30_000;
@@ -71,6 +72,22 @@ pub fn main(args: std.process.Init.Minimal) u8 {
         return 1;
     };
     return 0;
+}
+
+/// Own the sidecar shutdown sequence. The browser must be stopped before the
+/// Driver is deinitialized, and all process-global buffers must be released
+/// even when the loop exits through an I/O error (not only clean EOF).
+fn cleanupRun(d: *driver_mod.Driver, a: Allocator) void {
+    _ = d.stop() catch {};
+
+    if (current_target) |t| a.free(t);
+    current_target = null;
+
+    sink_buf.deinit(a);
+    sink_buf = .empty;
+    line_buf.deinit(a);
+    line_buf = .empty;
+    running = false;
 }
 
 fn run(args: std.process.Init.Minimal) !void {
@@ -103,6 +120,7 @@ fn run(args: std.process.Init.Minimal) !void {
         std.fmt.bufPrint(&prof_buf, "/tmp/kahin-sidecar-{d}", .{linux.getpid()}) catch "kahin-sidecar-default";
 
     ignoreSigpipe();
+    running = true;
 
     var gpa = std.heap.DebugAllocator(.{}).init;
     defer _ = gpa.deinit();
@@ -110,7 +128,7 @@ fn run(args: std.process.Init.Minimal) !void {
 
     var d = try driver_mod.Driver.start(a, exe, profile, verbose, visible);
     defer d.deinit();
-    defer _ = d.stop() catch 0;
+    defer cleanupRun(&d, a);
 
     // Tee every event the driver's pump dispatches (calls in flight) into
     // sink_buf; flushed upward after each request completes.
@@ -144,7 +162,14 @@ fn run(args: std.process.Init.Minimal) !void {
             }
         }
         if (pollfds[0].revents & (linux.POLL.IN | linux.POLL.HUP) != 0) {
-            const line = readLine(a) catch null orelse break; // stdin EOF -> take the browser down
+            const maybe_line = readLine(a) catch {
+                running = false;
+                break;
+            };
+            const line = maybe_line orelse {
+                running = false; // client stdin EOF -> take the browser down
+                break;
+            };
             defer a.free(line);
 
             drainEvents(&d, a, null, &out) catch {};
@@ -161,11 +186,6 @@ fn run(args: std.process.Init.Minimal) !void {
             else => return err,
         };
     }
-
-    _ = d.stop() catch 0; // browser may already be gone (HUP exit path)
-    if (current_target) |t| a.free(t);
-    sink_buf.deinit(a);
-    line_buf.deinit(a);
 }
 
 /// Route one method-based request. Responses are appended to `out` (the
@@ -277,7 +297,10 @@ fn handleHealth(d: *driver_mod.Driver, a: Allocator, out: *std.array_list.Aligne
 /// Browser.close — browser exits before replying; the sidecar shuts down
 /// with it.
 fn handleClose(d: *driver_mod.Driver, a: Allocator, out: *std.array_list.Aligned(u8, null), id: u32) !void {
-    d.close(request_timeout_ms) catch {};
+    // Browser.close is terminal: Juggler may tear down its pipe without
+    // sending a response. The cleanup defer closes/reaps the child, so do
+    // not hold the IPC loop for the normal request timeout here.
+    d.close(0) catch {};
     try respondOk(a, out, id, "{}");
     running = false;
 }
@@ -823,6 +846,58 @@ fn testRig() !struct { d: driver_mod.Driver, cmd: [2]i32, resp: [2]i32 } {
     if (std.os.linux.errno(std.os.linux.pipe2(&cmd, .{})) != .SUCCESS) return error.PipeFailed;
     if (std.os.linux.errno(std.os.linux.pipe2(&resp, .{})) != .SUCCESS) return error.PipeFailed;
     return .{ .d = driver_mod.Driver.init(testing.allocator, resp[0], cmd[1], false), .cmd = cmd, .resp = resp };
+}
+
+test "shutdown: stdin EOF cleanup reaps child and releases sidecar state" {
+    const inst = try process_manager.Instance.spawnArgv(testing.allocator, &.{ "/bin/true" }, null, false);
+    var d = driver_mod.Driver.init(testing.allocator, inst.child.read_fd, inst.child.write_fd, false);
+    d.child = inst.child;
+    d.instance = inst;
+    defer d.deinit();
+    defer running = true;
+
+    try testing.expectEqual(@as(usize, 0), line_buf.items.len);
+    try testing.expectEqual(@as(usize, 0), sink_buf.items.len);
+    try testing.expect(current_target == null);
+
+    try line_buf.appendSlice(testing.allocator, "partial stdin line");
+    try sink_buf.appendSlice(testing.allocator, "buffered event");
+    current_target = try testing.allocator.dupe(u8, "target-1");
+    running = true;
+
+    cleanupRun(&d, testing.allocator);
+
+    try testing.expectEqual(@as(usize, 0), line_buf.items.len);
+    try testing.expectEqual(@as(usize, 0), sink_buf.items.len);
+    try testing.expect(current_target == null);
+    try testing.expect(!running);
+}
+
+test "shutdown: Browser.close returns without waiting for terminal wire reply" {
+    const rig = try testRig();
+    defer {
+        _ = std.os.linux.close(rig.cmd[0]);
+        _ = std.os.linux.close(rig.cmd[1]);
+        _ = std.os.linux.close(rig.resp[0]);
+        _ = std.os.linux.close(rig.resp[1]);
+    }
+    var d = rig.d;
+    defer d.deinit();
+    defer running = true;
+
+    const expected = [_][]const u8{"{\"id\":1,\"method\":\"Browser.close\",\"params\":{}}"};
+    const reply = [_][]const u8{"{\"id\":1,\"result\":{}}"};
+    const extra = [_][]const u8{};
+    const thread = try std.Thread.spawn(.{}, FakePeer.thread, .{ rig.cmd[0], rig.resp[1], &expected, &reply, &extra });
+    defer thread.join();
+
+    var out: std.array_list.Aligned(u8, null) = .empty;
+    defer out.deinit(testing.allocator);
+    running = true;
+    try handleClose(&d, testing.allocator, &out, 1);
+
+    try testing.expectEqualStrings("{\"id\":1,\"result\":{}}\n", out.items);
+    try testing.expect(!running);
 }
 
 /// Preload a page session (attachedToTarget + frameAttached) into the driver.

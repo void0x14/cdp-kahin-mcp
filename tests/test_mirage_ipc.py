@@ -88,6 +88,51 @@ async def test_event_dispatch(fake_sidecar: Path) -> None:
         await engine.stop()
 
 
+@pytest.mark.asyncio
+async def test_stop_reaps_sidecar_when_cancelled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Cancellation during stop must not leave the sidecar running."""
+    script = tmp_path / "stubborn_sidecar.py"
+    script.write_text(
+        """#!/usr/bin/env python3
+import json
+import sys
+import time
+
+for line in sys.stdin:
+    request = json.loads(line)
+    if request[\"method\"] == \"Browser.health\":
+        print(json.dumps({\"id\": request[\"id\"], \"result\": {\"alive\": True}}), flush=True)
+        break
+
+while True:
+    time.sleep(60)
+"""
+    )
+    script.chmod(0o755)
+    monkeypatch.setattr(mirage_mod, "_sidecar_bin", lambda: script)
+    monkeypatch.setattr(mirage_mod, "_camoufox_bin", lambda: script)
+
+    engine = Mirage()
+    await engine.start()
+    proc = engine._process
+    assert proc is not None
+    try:
+        stop_task = asyncio.create_task(engine.stop())
+        await asyncio.sleep(0.1)
+        stop_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await stop_task
+        assert proc.returncode is not None
+    finally:
+        if proc.returncode is None:
+            proc.kill()
+            await proc.wait()
+        if engine._stderr_file is not None:
+            engine._stderr_file.close()
+            engine._stderr_file = None
+        engine._remove_profile()
+
+
 def _real_available() -> bool:
     try:
         mirage_mod._sidecar_bin()
