@@ -24,6 +24,7 @@ from kahin.tools import grimoire  # noqa: F401
 from kahin.tools import healer  # noqa: F401
 from kahin.tools import pilot  # noqa: F401
 from kahin.tools import pilot_mirage  # noqa: F401
+from kahin.tools import reliability_mirage  # noqa: F401
 from kahin.tools import pilot_obscura  # noqa: F401
 from kahin.tools import prophecy  # noqa: F401
 from kahin.tools import screencast_mirage  # noqa: F401
@@ -47,6 +48,7 @@ __all__ = [
     "healer",
     "pilot",
     "pilot_mirage",
+    "reliability_mirage",
     "pilot_obscura",
     "prophecy",
     "screencast_mirage",

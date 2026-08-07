@@ -49,7 +49,8 @@ def test_server_initialize_and_list_tools() -> None:
     # Gap D: +4 screencast tools (start, frame, stop, pending) = 103.
     # Gap E: +1 accessibility tool (kahin_mirage_accessibility_tree) = 104.
     # Faz 11: +5 adaptive DOM stream tools + context cleanup = 110.
-    assert len(tools) == 110
+    # Faz 1 reliability: +8 expect/check/select/dblclick/drag/wait tools = 118.
+    assert len(tools) == 118
     assert "kahin_mirage_dom_start" in tool_names
     assert "kahin_mirage_dom_snapshot" in tool_names
     assert "kahin_mirage_dom_events" in tool_names
@@ -83,6 +84,14 @@ def test_server_initialize_and_list_tools() -> None:
         "kahin_mirage_screencast_stop",
         "kahin_mirage_screencast_pending",
         "kahin_engine_health",
+        "kahin_mirage_expect",
+        "kahin_mirage_check",
+        "kahin_mirage_uncheck",
+        "kahin_mirage_select_option",
+        "kahin_mirage_dblclick",
+        "kahin_mirage_drag",
+        "kahin_mirage_wait_for_text",
+        "kahin_mirage_wait_for_timeout",
     ]:
         assert name in tool_names, f"missing tool {name}"
     proc.terminate()

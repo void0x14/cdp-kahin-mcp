@@ -20,7 +20,7 @@ import pytest
 from pytest_asyncio import fixture as async_fixture
 
 from kahin.the_twins import mirage as mirage_mod
-from kahin.tools import pilot, pilot_mirage, trainman_mirage
+from kahin.tools import pilot, pilot_mirage, reliability_mirage, trainman_mirage
 
 
 def _real_available() -> bool:
@@ -148,3 +148,61 @@ async def test_click_waits_for_enabled(mirage_tools: None) -> None:
     ))
     result = _loads(await pilot_mirage.mirage_click("text=Go", timeout=5.0))
     assert not result.get("error"), result
+
+
+@pytest.mark.asyncio
+async def test_expect_retries_text_and_reports_actual(mirage_tools: None) -> None:
+    await _navigate(_doc(
+        "<html><body><div id='s'>Loading</div>"
+        "<script>setTimeout(() => { document.getElementById('s').textContent = 'Ready now'; }, 400);</script>"
+        "</body></html>"
+    ))
+    matched = _loads(await reliability_mirage.mirage_expect("#s", text="Ready now", timeout=5.0))
+    assert matched.get("matched") is True, matched
+    assert matched.get("actual", {}).get("text") == "Ready now", matched
+    failed = _loads(await reliability_mirage.mirage_expect("#s", text="Never", timeout=0.4))
+    assert failed.get("code") == "expectation_failed", failed
+    assert "Ready now" in str(failed.get("actual")), failed
+
+
+@pytest.mark.asyncio
+async def test_check_select_and_dblclick(mirage_tools: None) -> None:
+    await _navigate(_doc(
+        "<html><body><input type='checkbox' id='c'>"
+        "<select id='s'><option value='a'>Alpha</option><option value='b'>Bravo</option></select>"
+        "<button id='b'>x</button><div id='n'>0</div>"
+        "<script>"
+        "let n=0; document.getElementById('c').addEventListener('change', () => document.getElementById('c').dataset.changed='1');"
+        "document.getElementById('b').addEventListener('click', () => { n += 1; document.getElementById('n').textContent=String(n); });"
+        "</script></body></html>"
+    ))
+    checked = _loads(await reliability_mirage.mirage_check("#c", timeout=5.0))
+    assert checked.get("checked") is True and checked.get("changed") is True, checked
+    unchecked = _loads(await reliability_mirage.mirage_uncheck("#c", timeout=5.0))
+    assert unchecked.get("checked") is False, unchecked
+    selected = _loads(await reliability_mirage.mirage_select_option("#s", value="b", timeout=5.0))
+    assert selected.get("selected") == "b", selected
+    missing = _loads(await reliability_mirage.mirage_select_option("#s", value="zzz", timeout=1.0))
+    assert missing.get("code") == "option_not_found", missing
+    dbl = _loads(await reliability_mirage.mirage_dblclick("#b", timeout=5.0))
+    assert not dbl.get("error"), dbl
+    count = _loads(await pilot_mirage.mirage_get_text("#n"))
+    assert count == "2", count
+
+
+@pytest.mark.asyncio
+async def test_drag_and_wait_helpers(mirage_tools: None) -> None:
+    await _navigate(_doc(
+        "<html><head><style>#a,#b{position:absolute;top:10px;width:100px;height:50px}"
+        "#a{left:10px}#b{left:300px}</style></head><body>"
+        "<div id='a'>Source</div><div id='b'>Target</div><div id='s'></div>"
+        "<script>setTimeout(() => document.getElementById('s').textContent='ready-now', 250);</script>"
+        "</body></html>"
+    ))
+    dragged = _loads(await reliability_mirage.mirage_drag("#a", "#b", timeout=5.0, steps=5))
+    assert not dragged.get("error") and dragged.get("steps") == 5, dragged
+    found = _loads(await reliability_mirage.mirage_wait_for_text("ready-now", timeout=3.0))
+    assert found.get("found") is True, found
+    started = time.monotonic()
+    waited = _loads(await reliability_mirage.mirage_wait_for_timeout(ms=150))
+    assert waited.get("waited_ms") == 150 and time.monotonic() - started >= 0.12, waited
