@@ -413,8 +413,9 @@ en eski frame FIFO olarak döner.
   pinlenir
 - `kahin_mirage_click_humanized` — yörüngeli + insansı gecikmeli gerçek DOM
   tıklaması (mousedown+mouseup)
-- `kahin_mirage_key_text` — jitter'lı tuş cadence'i ile metin yazma
-  (`delay_ms=0` → hızlı yol; gerçek keydown/keyup çiftleri)
+- `kahin_mirage_key_text` (çapraz liste) — jitter'lı tuş cadence'i ile metin yazma
+  (`delay_ms=0` → hızlı yol; gerçek keydown/keyup çiftleri); Input (7) altında
+  sayılır — tek kayıt, Stealth sayımına dahil değil
 - `kahin_identity_pin` / `kahin_identity_unpin` / `kahin_identity_pins` /
   `kahin_identity_for_domain` — domain başına identity rotasyon politikası;
   kanonik domain anahtarlı, bounded ve doğrulanmış `~/.config/kahin/pins.json`

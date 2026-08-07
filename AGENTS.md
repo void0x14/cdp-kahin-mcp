@@ -277,10 +277,13 @@ Juggler/Mirage yüzeyinin ajana dönük, uçtan uca sözleşmesi:
 | `kahin_stealth_audit` | Salt-okunur leak probe paketi (14 check); skor `{passed, total, ratio}` ile döner, hiçbir check atlanmaz |
 | `kahin_mirage_mouse_trajectory` | Jitter'lı Bézier fare yörüngesi (steps ≤ 200, jitter ≤ 20px, seed'li deterministik) |
 | `kahin_mirage_click_humanized` | Yörüngeli, insansı gecikmeli gerçek DOM tıklaması |
-| `kahin_mirage_key_text` | Jitter'lı tuş cadence'i ile metin yazma (delay_ms=0 → hızlı yol) |
+| `kahin_mirage_key_text` (çapraz liste) | Jitter'lı tuş cadence'i ile metin yazma (delay_ms=0 → hızlı yol); Input (7) altında sayılır — tek kayıt, Stealth sayımına dahil değil |
 | `kahin_identity_pin` / `kahin_identity_unpin` / `kahin_identity_pins` / `kahin_identity_for_domain` | Domain başına identity rotasyon politikası (bounded, doğrulanmış `~/.config/kahin/pins.json`) |
 | `kahin_fingerprint_report` | Canlı sayfa evaluate'sinden sitenin göreceği fingerprint (UA/platform/screen/WebGL; emülasyon onayından uydurulmaz) |
 | `kahin_proxy_resolve` | Proxy exit-IP geo + timezone/locale/geolocation önerisi; URL'deki kimlik bilgileri asla yankılanmaz |
+
+Stealth (9) sayımı yalnızca Stealth-native araçları içerir; `kahin_mirage_key_text`
+çapraz listelenmiştir ve sayıma Input (7) altında girer (MCP yüzeyinde tek kayıt).
 
 Stealth CI kapısı: `KAHIN_REQUIRE_STEALTH=1` altında audit ratio ≥ 0.8 ve
 identity rotasyonu tam fingerprint özetini değiştirmek zorundadır
