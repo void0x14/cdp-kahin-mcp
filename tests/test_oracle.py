@@ -60,7 +60,8 @@ def test_server_initialize_and_list_tools() -> None:
     # Faz 3 Task 3: +2 humanized input tools (mouse_trajectory, click_humanized) = 132.
     #   (kahin_mirage_key_text already exists — cadence params replaced the
     #   fast-path registration in place, so it is NOT double-counted.)
-    assert len(tools) == 132
+    # Faz 3 Task 4: +4 identity pin tools (pin/unpin/pins/for_domain) = 136.
+    assert len(tools) == 136
     assert "kahin_mirage_dom_start" in tool_names
     assert "kahin_mirage_dom_snapshot" in tool_names
     assert "kahin_mirage_dom_events" in tool_names
@@ -79,6 +80,10 @@ def test_server_initialize_and_list_tools() -> None:
     assert "kahin_stealth_audit" in tool_names
     assert "kahin_mirage_mouse_trajectory" in tool_names
     assert "kahin_mirage_click_humanized" in tool_names
+    assert "kahin_identity_pin" in tool_names
+    assert "kahin_identity_unpin" in tool_names
+    assert "kahin_identity_pins" in tool_names
+    assert "kahin_identity_for_domain" in tool_names
     for name in [
         "kahin_mirage_query",
         "kahin_mirage_click",

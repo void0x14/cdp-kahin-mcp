@@ -1,10 +1,21 @@
-"""Stealth probe tests — pure Python (JS string + scoring)."""
+"""Stealth probe + identity-pin store tests — pure Python."""
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
-from kahin.stealth import STEALTH_PROBE_JS, score_checks
+from kahin.stealth import (
+    STEALTH_PROBE_JS,
+    load_pins,
+    normalize_domain,
+    pin_identity,
+    pins_path,
+    save_pins,
+    score_checks,
+    unpin_identity,
+)
 
 
 def test_probe_covers_expected_checks() -> None:
@@ -37,3 +48,91 @@ def test_score_checks() -> None:
 def test_score_no_checks_is_zero() -> None:
     score = score_checks([])
     assert score["passed"] == 0 and score["total"] == 0 and score["ratio"] == 0.0
+
+
+def test_normalize_domain() -> None:
+    assert normalize_domain("HTTPS://Example.COM/Path") == "example.com"
+    assert normalize_domain("http://Sub.Example.COM:8080/x/y") == "sub.example.com"
+    assert normalize_domain("example.com:8443") == "example.com"
+    assert normalize_domain("  EXAMPLE.com  ") == "example.com"
+    assert normalize_domain("localhost") == "localhost"
+
+
+def test_normalize_domain_rejects_malformed() -> None:
+    for bad in (
+        "bad domain!",
+        "exa mple.com",
+        "example..com",
+        "-example.com",
+        "example-.com",
+        "exa_mple.com",
+        "example.com<script>",
+        "user@example.com",
+        "http://",
+        "",
+        "a",
+        "example",
+        "example.com.",
+    ):
+        assert normalize_domain(bad) is None, bad
+
+
+def test_pin_roundtrip(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("kahin.stealth._PINS_FILE", tmp_path / "pins.json")
+    pin_identity("example.com", "id1")
+    assert load_pins() == {"example.com": "id1"}
+    unpin_identity("example.com")
+    assert load_pins() == {}
+
+
+def test_pin_rejects_invalid_domain_and_name(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("kahin.stealth._PINS_FILE", tmp_path / "pins.json")
+    failed = pin_identity("bad domain!", "id1")
+    assert failed is not None and failed["code"] == "invalid_argument"
+    failed = pin_identity("example.com", "x" * 65)
+    assert failed is not None and failed["code"] == "invalid_argument"
+    assert load_pins() == {}
+
+
+def test_save_pins_roundtrips_through_file(tmp_path, monkeypatch) -> None:
+    pins_file = tmp_path / "pins.json"
+    monkeypatch.setattr("kahin.stealth._PINS_FILE", pins_file)
+    save_pins({"a.example.com": "id1", "b.example.com": "id2"})
+    payload = json.loads(pins_file.read_text(encoding="utf-8"))
+    assert payload == {
+        "version": 1,
+        "pins": {"a.example.com": "id1", "b.example.com": "id2"},
+    }
+    assert pins_path() == pins_file
+
+
+def test_save_pins_filters_invalid_entries(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("kahin.stealth._PINS_FILE", tmp_path / "pins.json")
+    save_pins({"BAD DOMAIN!": "x", "example.com": "id1", "ok.example.org": "y" * 65})
+    assert load_pins() == {"example.com": "id1"}
+
+
+def test_load_pins_ignores_tampered_store(tmp_path, monkeypatch) -> None:
+    pins_file = tmp_path / "pins.json"
+    monkeypatch.setattr("kahin.stealth._PINS_FILE", pins_file)
+    pins_file.write_text(
+        json.dumps({
+            "version": 1,
+            "pins": {
+                "not a domain": "x",
+                "example.com": "ok",
+                "example.net": 123,
+                "a.example.org": "y" * 100,
+            },
+        }),
+        encoding="utf-8",
+    )
+    assert load_pins() == {"example.com": "ok"}
+
+
+def test_load_pins_corrupt_or_missing_store_is_empty(tmp_path, monkeypatch) -> None:
+    pins_file = tmp_path / "pins.json"
+    monkeypatch.setattr("kahin.stealth._PINS_FILE", pins_file)
+    assert load_pins() == {}
+    pins_file.write_text("{not json", encoding="utf-8")
+    assert load_pins() == {}

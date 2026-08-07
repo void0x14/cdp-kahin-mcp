@@ -2,8 +2,10 @@
 
 Task 1: read-only self-audit probe (`kahin_stealth_audit`). Humanized
 input tools (Task 3): jittered Bézier mouse travel, humanized clicks and
-cadence typing. Identity pins, proxy/geo sync and the fingerprint report
-land in later Faz 3 tasks.
+cadence typing. Task 4: per-domain identity rotation policy
+(`kahin_identity_pin`/`unpin`/`pins`/`for_domain`) backed by the bounded
+pin store. Proxy/geo sync and the fingerprint report land in later Faz 3
+tasks.
 """
 
 from __future__ import annotations
@@ -14,7 +16,14 @@ import orjson
 
 from kahin._mcp import mcp
 from kahin.humanize import bezier_trajectory, jittered_delay, typing_cadence
-from kahin.stealth import STEALTH_PROBE_JS, score_checks
+from kahin.stealth import (
+    STEALTH_PROBE_JS,
+    load_pins,
+    normalize_domain,
+    pin_identity,
+    score_checks,
+    unpin_identity,
+)
 from kahin.tools._common import _DW, _RO, _RW, _healer_ref
 from kahin.tools.pilot_mirage import (
     _MAX_COORDINATE,
@@ -250,3 +259,96 @@ async def mirage_key_text(
             if cadence[index] > 0:
                 await asyncio.sleep(cadence[index] / 1000.0)
         return orjson.dumps({"typed": text_value, "cadence": cadence}, option=orjson.OPT_INDENT_2).decode()
+
+
+@mcp.tool(name="kahin_identity_pin", annotations=_RW)
+async def identity_pin(domain: str, name: str) -> str:
+    """Mirage: pin a saved identity (Faz 2) to a canonical domain so
+    rotation is deterministic per site. Only identities that exist in the
+    Faz 2 store can be pinned; the map lives at ~/.config/kahin/pins.json.
+    Returns {pinned, domain, name}."""
+    tool = "kahin_identity_pin"
+    domain_value, error = _text_arg(domain, tool=tool, field="domain", maximum=253)
+    if error:
+        return error
+    name_value, error = _text_arg(name, tool=tool, field="name", maximum=64)
+    if error:
+        return error
+    assert domain_value is not None and name_value is not None
+    # Lazy import mirrors pilot.py's precedent: agent_mirage pulls the DOM
+    # stream tooling, which this module must not load at import time.
+    from kahin.tools.agent_mirage import _identity_path  # noqa: PLC0415
+
+    path = _identity_path(name_value)
+    if path is None or not path.is_file():
+        return _json_error(tool, f"unknown identity: {name_value!r}", "invalid_argument", field="name")
+    async with _healer_ref.safe(tool, domain=domain_value, name=name_value):
+        normalized = normalize_domain(domain_value)
+        if normalized is None:
+            return _json_error(tool, "invalid domain", "invalid_argument", field="domain")
+        try:
+            failed = pin_identity(domain_value, name_value)
+        except OSError as exc:
+            return _json_error(tool, f"cannot write pins: {exc}", "tool_failed")
+        if failed:
+            return _json_error(tool, failed["error"], failed["code"], field="domain")
+        return orjson.dumps({
+            "pinned": True, "domain": normalized, "name": name_value,
+        }, option=orjson.OPT_INDENT_2).decode()
+
+
+@mcp.tool(name="kahin_identity_unpin", annotations=_DW)
+async def identity_unpin(domain: str) -> str:
+    """Mirage: remove the identity pin for a domain (rotation policy
+    change). Destructive only to the pin mapping, never to identities or
+    the engine. Returns {unpinned, domain}."""
+    tool = "kahin_identity_unpin"
+    domain_value, error = _text_arg(domain, tool=tool, field="domain", maximum=253)
+    if error:
+        return error
+    assert domain_value is not None
+    async with _healer_ref.safe(tool, domain=domain_value):
+        normalized = normalize_domain(domain_value)
+        if normalized is None:
+            return _json_error(tool, "invalid domain", "invalid_argument", field="domain")
+        try:
+            failed = unpin_identity(domain_value)
+        except OSError as exc:
+            return _json_error(tool, f"cannot write pins: {exc}", "tool_failed")
+        if failed:
+            return _json_error(tool, failed["error"], failed["code"], field="domain")
+        return orjson.dumps({
+            "unpinned": True, "domain": normalized,
+        }, option=orjson.OPT_INDENT_2).decode()
+
+
+@mcp.tool(name="kahin_identity_pins", annotations=_RO)
+async def identity_pins() -> str:
+    """Mirage: list the current per-domain identity pin map
+    ({pins: {domain: name}}). Read-only."""
+    async with _healer_ref.safe("kahin_identity_pins"):
+        return orjson.dumps({"pins": load_pins()}, option=orjson.OPT_INDENT_2).decode()
+
+
+@mcp.tool(name="kahin_identity_for_domain", annotations=_RO)
+async def identity_for_domain(domain: str) -> str:
+    """Mirage: report which saved identity is pinned to a domain, plus an
+    actionable next step ({domain, name|null, hint}). Read-only."""
+    tool = "kahin_identity_for_domain"
+    domain_value, error = _text_arg(domain, tool=tool, field="domain", maximum=253)
+    if error:
+        return error
+    assert domain_value is not None
+    async with _healer_ref.safe(tool, domain=domain_value):
+        normalized = normalize_domain(domain_value)
+        if normalized is None:
+            return _json_error(tool, "invalid domain", "invalid_argument", field="domain")
+        name = load_pins().get(normalized)
+        hint = (
+            f"start with: kahin_browser_start(identity={name!r})"
+            if name
+            else "no pin — rotate freely"
+        )
+        return orjson.dumps({
+            "domain": normalized, "name": name, "hint": hint,
+        }, option=orjson.OPT_INDENT_2).decode()
