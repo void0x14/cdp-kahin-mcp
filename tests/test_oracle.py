@@ -57,7 +57,10 @@ def test_server_initialize_and_list_tools() -> None:
     # Faz 2 Task 5: +5 identity tools (new/save/list/delete/report) = 128.
     # Faz 2 Task 6: +1 agent status overview tool = 129.
     # Faz 3 Task 1: +1 stealth audit tool = 130.
-    assert len(tools) == 130
+    # Faz 3 Task 3: +2 humanized input tools (mouse_trajectory, click_humanized) = 132.
+    #   (kahin_mirage_key_text already exists — cadence params replaced the
+    #   fast-path registration in place, so it is NOT double-counted.)
+    assert len(tools) == 132
     assert "kahin_mirage_dom_start" in tool_names
     assert "kahin_mirage_dom_snapshot" in tool_names
     assert "kahin_mirage_dom_events" in tool_names
@@ -74,6 +77,8 @@ def test_server_initialize_and_list_tools() -> None:
     assert "kahin_identity_report" in tool_names
     assert "kahin_agent_status" in tool_names
     assert "kahin_stealth_audit" in tool_names
+    assert "kahin_mirage_mouse_trajectory" in tool_names
+    assert "kahin_mirage_click_humanized" in tool_names
     for name in [
         "kahin_mirage_query",
         "kahin_mirage_click",

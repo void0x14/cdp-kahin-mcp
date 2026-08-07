@@ -281,6 +281,15 @@ def _q(selector: str) -> str:
 # --- shared dispatch helpers ----------------------------------------------
 
 
+_last_mouse_position: tuple[float, float] = (1.0, 1.0)
+
+
+def get_last_mouse_position() -> tuple[float, float]:
+    """Last (x, y) dispatched through ``_dispatch_mouse``; (1.0, 1.0) until
+    the first mouse event. Feeds humanized trajectory start points."""
+    return _last_mouse_position
+
+
 async def _dispatch_mouse(
     kind: str, x: float, y: float, *, button: int = 0, modifiers: int = 0,
     click_count: int = 1, buttons: int = 0, session_id: str | None = None,
@@ -288,10 +297,19 @@ async def _dispatch_mouse(
     """Page.dispatchMouseEvent with the full required param set."""
     x = _bounded_float(x, minimum=0.0, maximum=_MAX_COORDINATE, default=0.0)
     y = _bounded_float(y, minimum=0.0, maximum=_MAX_COORDINATE, default=0.0)
+    # Live-verified: Juggler never completes a dispatchMouseEvent at (0, 0)
+    # on this Camoufox build — the call hangs until the 30s timeout and
+    # leaves the input channel wedged. Clamp to (1, 1) so every mouse event
+    # reaches a coordinate the engine actually processes.
+    x = max(x, 1.0)
+    y = max(y, 1.0)
     button = _bounded_int(button, minimum=0, maximum=2, default=0)
     modifiers = _bounded_int(modifiers, minimum=0, maximum=255, default=0)
     click_count = _bounded_int(click_count, minimum=1, maximum=10, default=1)
     buttons = _bounded_int(buttons, minimum=0, maximum=7, default=0)
+    global _last_mouse_position
+    if kind in ("mousemove", "mousedown", "mouseup"):
+        _last_mouse_position = (x, y)
     params: dict[str, Any] = {
         "type": kind, "button": button, "x": x, "y": y,
         "modifiers": modifiers, "clickCount": click_count, "buttons": buttons,
@@ -1175,17 +1193,19 @@ async def mirage_key_press(
         return orjson.dumps({"key": key_value, "keyDown": down, "keyUp": up}, option=orjson.OPT_INDENT_2).decode()
 
 
-@mcp.tool(name="kahin_mirage_key_text", annotations=_RW)
-async def mirage_key_text(text: str) -> str:
-    """Mirage: type text one character at a time via dispatchKeyEvent
-    (keyDown with text + keyUp per char, repeat=False)."""
+async def mirage_key_text_fast(text: str) -> str:
+    """Internal fast path for ``kahin_mirage_key_text``: type text one
+    character at a time via dispatchKeyEvent (keydown with text + keyup per
+    char, repeat=False) with no cadence delays. Uses Juggler's accepted
+    lowercase event types and browser-native codes from ``_key_defaults``
+    (verified live: CDP casing such as ``keyDown`` is rejected by Juggler)."""
     text_value, error = _text_arg(
-        text, tool="kahin_mirage_key_text", field="text", maximum=_MAX_KEY_TEXT_LENGTH,
+        text, tool="kahin_mirage_key_text_fast", field="text", maximum=_MAX_KEY_TEXT_LENGTH,
     )
     if error:
         return error
-    async with _healer_ref.safe("kahin_mirage_key_text", text_length=len(text_value or "")):
-        session_id, capture_error = await _capture_page_session("kahin_mirage_key_text")
+    async with _healer_ref.safe("kahin_mirage_key_text_fast", text_length=len(text_value or "")):
+        session_id, capture_error = await _capture_page_session("kahin_mirage_key_text_fast")
         if capture_error:
             return capture_error
         assert session_id is not None
@@ -1193,14 +1213,14 @@ async def mirage_key_text(text: str) -> str:
         for ch in text_value:
             code, key_code = _key_defaults(ch)
             key_code = _bounded_int(key_code, minimum=0, maximum=65_535, default=0)
-            down = await _safe_mirage_call("kahin_mirage_key_text", "Page.dispatchKeyEvent", {
-                "type": "keyDown", "key": ch, "keyCode": key_code,
+            down = await _safe_mirage_call("kahin_mirage_key_text_fast", "Page.dispatchKeyEvent", {
+                "type": "keydown", "key": ch, "keyCode": key_code,
                 "location": 0, "code": code, "repeat": False, "text": ch,
             }, session_id=session_id)
             if _is_error_response(down):
                 return down
-            up = await _safe_mirage_call("kahin_mirage_key_text", "Page.dispatchKeyEvent", {
-                "type": "keyUp", "key": ch, "keyCode": key_code,
+            up = await _safe_mirage_call("kahin_mirage_key_text_fast", "Page.dispatchKeyEvent", {
+                "type": "keyup", "key": ch, "keyCode": key_code,
                 "location": 0, "code": code, "repeat": False,
             }, session_id=session_id)
             if _is_error_response(up):
