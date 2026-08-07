@@ -37,6 +37,27 @@
   sekme sayısı, gerçek DOM-stream bookkeeping'inden `refsLive`/`domCursor`,
   dialog/network/console sayaçları ve identity; engine yoksa yapılandırılmış
   idle yanıt, asla hata fırlatmaz.
+- Faz 3 stealth/anti-detect yüzeyi: `kahin_stealth_audit` (14 salt-okunur
+  leak probe'u, skor `{passed, total, ratio}`; hiçbir check atlanmaz),
+  `kahin_mirage_mouse_trajectory` / `kahin_mirage_click_humanized` ve
+  cadence'li `kahin_mirage_key_text` (jitter'lı Bézier yörünge, gerçek DOM
+  tıklaması, jitter'lı tuş hızı; hepsi seed'li deterministik).
+- Domain başına kimlik rotasyonu: `kahin_identity_pin` / `kahin_identity_unpin`
+  / `kahin_identity_pins` / `kahin_identity_for_domain` — kanonik domain
+  anahtarlı, bounded ve doğrulanmış `~/.config/kahin/pins.json` deposu.
+- `kahin_fingerprint_report` (canlı sayfadan sitenin göreceği fingerprint;
+  emülasyon onayından kanıt üretmez) ve `kahin_proxy_resolve` + `kahin_browser_start(proxy=...)`
+  (proxy exit-IP geo + timezone/locale/geolocation önerileri; URL kimlik
+  bilgileri asla loglanmaz; aktif engine config'iyle çakışma
+  `engine_config_conflict`).
+- Stealth CI kapısı: `KAHIN_REQUIRE_STEALTH=1` altında audit ratio ≥ 0.8 ve
+  identity rotasyonu tam fingerprint özetini değiştirmek zorunludur;
+  `scripts/stealth-regression.py` drift-watcher'ı sabitlenmiş
+  `camoufox-harness/tests/perf/stealth-baseline.json` ile karşılaştırır
+  (0 = temiz, 1 = yeni leak, 2 = ortam; baseline yalnızca
+  `KAHIN_UPDATE_BASELINE=1` ile yeniden yazılır) ve GitLab `stealth-regression`
+  job'ı (`stage: verify`, real-e2e ile aynı unprivileged/GTK kurulumu)
+  schedule/main'da suite + regression'ı çalıştırır.
 
 ## [0.3.7] — 2026-08-06
 

@@ -66,7 +66,7 @@ kahin_pattern_query(context="doggystyle")
 kahin_pattern_suggest(partial="navig")
 ```
 
-## Tool Listesi (129 adet)
+## Tool Listesi (138 adet)
 
 Juggler/Mirage yüzeyinin ajana dönük, uçtan uca sözleşmesi:
 [docs/juggler-ai-native.md](docs/juggler-ai-native.md)
@@ -126,7 +126,7 @@ Juggler/Mirage yüzeyinin ajana dönük, uçtan uca sözleşmesi:
 | `kahin_pattern_forget` | Pattern sil |
 | `kahin_pattern_stats` | Pattern istatistikleri |
 
-### MIRAGE — Juggler Native (97) — Camoufox varsayılandır; Shadow'dan gerektiğinde otomatik yükseltilir
+### MIRAGE — Juggler Native (106) — Camoufox varsayılandır; Shadow'dan gerektiğinde otomatik yükseltilir
 
 #### DOM Stream (5) — gerçek MutationObserver + Juggler binding
 | Tool | Ne işe yarar? |
@@ -270,6 +270,21 @@ Juggler/Mirage yüzeyinin ajana dönük, uçtan uca sözleşmesi:
 | `kahin_identity_new` / `kahin_identity_save` / `kahin_identity_list` / `kahin_identity_delete` | Camoufox fingerprint kimliklerini oluştur/kaydet/listele/sil |
 | `kahin_identity_report` | Aktif engine'in kimlik özetini ve sayfa-içi canlı `navigator.userAgent`'ı raporlar |
 | `kahin_agent_status` | Agent döngüsü özeti: engine liveness, sayfa durumu, sekme sayısı, refsLive/domCursor, dialog/network/console sayaçları |
+
+#### Stealth (9) — anti-detect denetimi, insansı girdi, kimlik rotasyonu ve proxy/geo
+| Tool | Ne işe yarar? |
+|------|---------------|
+| `kahin_stealth_audit` | Salt-okunur leak probe paketi (14 check); skor `{passed, total, ratio}` ile döner, hiçbir check atlanmaz |
+| `kahin_mirage_mouse_trajectory` | Jitter'lı Bézier fare yörüngesi (steps ≤ 200, jitter ≤ 20px, seed'li deterministik) |
+| `kahin_mirage_click_humanized` | Yörüngeli, insansı gecikmeli gerçek DOM tıklaması |
+| `kahin_mirage_key_text` | Jitter'lı tuş cadence'i ile metin yazma (delay_ms=0 → hızlı yol) |
+| `kahin_identity_pin` / `kahin_identity_unpin` / `kahin_identity_pins` / `kahin_identity_for_domain` | Domain başına identity rotasyon politikası (bounded, doğrulanmış `~/.config/kahin/pins.json`) |
+| `kahin_fingerprint_report` | Canlı sayfa evaluate'sinden sitenin göreceği fingerprint (UA/platform/screen/WebGL; emülasyon onayından uydurulmaz) |
+| `kahin_proxy_resolve` | Proxy exit-IP geo + timezone/locale/geolocation önerisi; URL'deki kimlik bilgileri asla yankılanmaz |
+
+Stealth CI kapısı: `KAHIN_REQUIRE_STEALTH=1` altında audit ratio ≥ 0.8 ve
+identity rotasyonu tam fingerprint özetini değiştirmek zorundadır
+(`scripts/stealth-regression.py` drift-watcher + `camoufox-harness/tests/perf/stealth-baseline.json`).
 
 ## Örnek İş Akışları
 

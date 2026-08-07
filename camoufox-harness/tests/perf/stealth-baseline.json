@@ -1,0 +1,16 @@
+{
+  "audio": true,
+  "binding-hidden": true,
+  "cdp-markers": true,
+  "hardware-concurrency": true,
+  "languages": true,
+  "oscpu": true,
+  "permissions-api": true,
+  "platform": true,
+  "plugins": true,
+  "prototype-integrity": true,
+  "screen-sane": true,
+  "timezone-sane": true,
+  "webdriver": true,
+  "webgl": true
+}

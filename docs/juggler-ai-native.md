@@ -283,7 +283,7 @@ script'i ayrıca evaluate eder. Observer sayfa tarafında bounded olduğu için
 
 ## 6. Juggler tool kataloğu (A-Z)
 
-Aşağıdaki liste Mirage'ın 97 Juggler-native tool'unun tamamıdır. `MIRAGE`
+Aşağıdaki liste Mirage'ın 106 Juggler-native tool'unun tamamıdır. `MIRAGE`
 tool'ları `engine="mirage"` aktifken kullanılır.
 
 ### DOM gözlem ve adaptif action (5)
@@ -400,6 +400,38 @@ en eski frame FIFO olarak döner.
   bookkeeping; snapshot sonrası live, reset/dropped/stale/stop sonrası geçersiz),
   pendingDialogs, networkEvents, consoleMessages, identity; engine yoksa
   yapılandırılmış idle yanıt döner ve asla hata fırlatmaz
+
+### Stealth ve anti-detect (9)
+
+- `kahin_stealth_audit` — salt-okunur leak probe paketi (14 check: webdriver,
+  cdp-markers, binding-hidden, plugins, languages, platform, oscpu,
+  timezone-sane, screen-sane, prototype-integrity, permissions-api, webgl,
+  audio, hardware-concurrency); skor `{passed, total, ratio}` ile döner,
+  hiçbir check atlanmaz (bilinmeyen → fail + `detail:"unsupported"`)
+- `kahin_mirage_mouse_trajectory` — jitter'lı Bézier fare yörüngesi
+  (steps ≤ 200, jitter ≤ 20px, seed'li deterministik); bitiş noktası birebir
+  pinlenir
+- `kahin_mirage_click_humanized` — yörüngeli + insansı gecikmeli gerçek DOM
+  tıklaması (mousedown+mouseup)
+- `kahin_mirage_key_text` — jitter'lı tuş cadence'i ile metin yazma
+  (`delay_ms=0` → hızlı yol; gerçek keydown/keyup çiftleri)
+- `kahin_identity_pin` / `kahin_identity_unpin` / `kahin_identity_pins` /
+  `kahin_identity_for_domain` — domain başına identity rotasyon politikası;
+  kanonik domain anahtarlı, bounded ve doğrulanmış `~/.config/kahin/pins.json`
+- `kahin_fingerprint_report` — canlı sayfa evaluate'sinden sitenin göreceği
+  fingerprint (userAgent/platform/oscpu/languages/timezone/locale/screen/
+  viewport/WebGL); kanıt her zaman sayfadan, asla emülasyon onayından gelmez
+- `kahin_proxy_resolve` — proxy üzerinden exit-IP geo çözümü +
+  timezone/locale/geolocation önerisi; URL'deki kimlik bilgileri asla
+  yankılanmaz; `browser_start(proxy=...)` ile gerçek proxy env uygulanır,
+  aktif engine config'iyle çakışma `engine_config_conflict` döner
+
+Stealth CI kapısı: `KAHIN_REQUIRE_STEALTH=1` altında audit ratio ≥ 0.8 ve
+identity rotasyonu tam fingerprint özetini değiştirmek zorundadır;
+`scripts/stealth-regression.py` drift-watcher'ı sabitlenmiş
+`camoufox-harness/tests/perf/stealth-baseline.json` ile karşılaştırır
+(0 = temiz, 1 = yeni leak, 2 = ortam; baseline yalnızca
+`KAHIN_UPDATE_BASELINE=1` ile yeniden yazılır).
 
 ## 7. Hazır akışlar
 
