@@ -283,7 +283,7 @@ script'i ayrıca evaluate eder. Observer sayfa tarafında bounded olduğu için
 
 ## 6. Juggler tool kataloğu (A-Z)
 
-Aşağıdaki liste Mirage'ın 106 Juggler-native tool'unun tamamıdır. `MIRAGE`
+Aşağıdaki liste Mirage'ın 107 Juggler-native tool'unun tamamıdır. `MIRAGE`
 tool'ları `engine="mirage"` aktifken kullanılır.
 
 ### DOM gözlem ve adaptif action (5)
@@ -375,10 +375,14 @@ frame'i bekler. Sayfa mutation'ı veya viewport değişiminden sonra görsel
 doğrulama için bu yol kullanılmalıdır; varsayılan `fresh=false` ise kuyruktaki
 en eski frame FIFO olarak döner.
 
-### Accessibility ve health (2)
+### Accessibility ve engine (3)
 
 - `kahin_mirage_accessibility_tree`
 - `kahin_engine_health`
+- `kahin_engine_stats` — monotonic clock ile uptime + healer tracker'dan
+  bounded per-tool rollup (`tool_calls`, `tool_errors`, `top_slow` ≤ 10,
+  `last_error`); Mirage aktifse `prewarm` metadata'sı; engine yoksa
+  yapılandırılmış `engine_unavailable` yanıtı (asla hata fırlatmaz)
 
 ### Agent-native (10)
 
@@ -493,6 +497,22 @@ gerekirse `kahin_error_decode` ve `kahin_get_dependencies` kullan.
 
 - DOM snapshot ve event payload'ları cap'lidir; bounded sonuçlar ajana açıkça
   `truncated`, `pending`, `reset` ve `dropped` durumlarını verir.
+- Sidecar istek işleme non-blocking'dir: birden fazla istek aynı anda
+  in-flight olabilir, stdin işleme browser yanıtını asla bloklamaz; IPC
+  sözleşmesi (id-matching, event forwarding, timeouts, death detection)
+  değişmez. N=20 `Runtime.evaluate` concurrency probe'u
+  `camoufox-harness/tests/perf/concurrency.md`'dedir (paralel duvar
+  56.89 → 8.71 ms, ratio 1.314 → 3.281).
+- `kahin_engine_stats` `top_slow` değeri ortalama süreye göre en yavaş 10
+  araçla sınırlıdır; tracker process-genelidir, bu yüzden tek bir hızlı
+  aracın listede olması garanti edilmez (rollup şekli ve `tool_calls`
+  sayaçları güvenilir sinyallerdir).
+- Identity profile prewarm bir **metadata/reuse kaydıdır**, cache değildir:
+  stabil identity hash + ölçülen hazırlık süreleri (`options_ms`,
+  `profile_ms`, `hits`, `starts`) in-process (max 8, FIFO) ve
+  `~/.cache/kahin/profiles/<hash>.json` içinde (≤ 4 KiB, tmp+rename) tutulur;
+  gerçek launch işi asla atlanmaz (per-launch rastgelelik korunur) ve
+  metadata kimlik payload'ı içermez.
 - Password input değerleri snapshot/event descriptor'larında redacted olur.
 - `attributes` tam HTML değildir; güvenli kimlik ve erişilebilirlik alanlarıyla
   sınırlıdır. Tam HTML gerekiyorsa bunun maliyetini bilerek

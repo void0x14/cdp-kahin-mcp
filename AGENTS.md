@@ -66,7 +66,7 @@ kahin_pattern_query(context="doggystyle")
 kahin_pattern_suggest(partial="navig")
 ```
 
-## Tool Listesi (138 adet)
+## Tool Listesi (139 adet)
 
 Juggler/Mirage yüzeyinin ajana dönük, uçtan uca sözleşmesi:
 [docs/juggler-ai-native.md](docs/juggler-ai-native.md)
@@ -126,7 +126,7 @@ Juggler/Mirage yüzeyinin ajana dönük, uçtan uca sözleşmesi:
 | `kahin_pattern_forget` | Pattern sil |
 | `kahin_pattern_stats` | Pattern istatistikleri |
 
-### MIRAGE — Juggler Native (106) — Camoufox varsayılandır; Shadow'dan gerektiğinde otomatik yükseltilir
+### MIRAGE — Juggler Native (107) — Camoufox varsayılandır; Shadow'dan gerektiğinde otomatik yükseltilir
 
 #### DOM Stream (5) — gerçek MutationObserver + Juggler binding
 | Tool | Ne işe yarar? |
@@ -237,10 +237,11 @@ Juggler/Mirage yüzeyinin ajana dönük, uçtan uca sözleşmesi:
 | `kahin_mirage_worker_list` | Web worker'ları listele |
 | `kahin_mirage_websocket_list` | WebSocket'leri listele |
 
-#### Engine (1)
+#### Engine (2)
 | Tool | Ne işe yarar? |
 |------|---------------|
 | `kahin_engine_health` | Çalışan motor sağlığı (Mirage: Browser.health) |
+| `kahin_engine_stats` | Monotonic uptime + bounded per-tool performans rollup'ı (`tool_calls`/`tool_errors`, `top_slow` ≤ 10, `last_error`); engine yoksa yapılandırılmış `engine_unavailable` |
 
 #### Upload (2)
 | Tool | Ne işe yarar? |
@@ -288,6 +289,30 @@ Stealth (9) sayımı yalnızca Stealth-native araçları içerir; `kahin_mirage_
 Stealth CI kapısı: `KAHIN_REQUIRE_STEALTH=1` altında audit ratio ≥ 0.8 ve
 identity rotasyonu tam fingerprint özetini değiştirmek zorundadır
 (`scripts/stealth-regression.py` drift-watcher + `camoufox-harness/tests/perf/stealth-baseline.json`).
+
+### Faz 4 — Performans (Zig sidecar + metrik yüzeyi)
+
+- **Non-blocking sidecar**: Zig sidecar artık tek-in-flight değil; stdin
+  işleme browser yanıtını asla bloklamaz, birden fazla istek aynı anda
+  in-flight olabilir (request state machine, poll güdümlü loop, `max_inflight`
+  cap; IPC sözleşmesi/event forwarding/id-matching değişmedi). N=20
+  `Runtime.evaluate` probe'u: seri 74.78 → 28.56 ms, paralel duvar süresi
+  56.89 → 8.71 ms (6.5× düşüş), ratio 1.314 → 3.281 (plan gate'i: ratio >
+  1.5) — `camoufox-harness/tests/perf/concurrency.md`.
+- **`kahin_engine_stats`**: monotonic clock ile ölçülen uptime + healer
+  tracker'dan per-tool agregatlar (`{calls, errors, total_ms, max_ms}`, en
+  fazla 256 tool, `top_slow` en yavaş 10'u); `safe()` ölçümleri
+  `time.monotonic()`'a taşındı; engine yoksa structured `engine_unavailable`
+  yanıtı, asla hata fırlatmaz.
+- **Identity profile prewarm (dürüst sınır)**: per-identity başına **bounded
+  metadata/reuse kaydı** — stabil sha256 identity hash (16 hex), in-process
+  cache (max 8, FIFO eviction) + `~/.cache/kahin/profiles/<hash>.json`
+  (≤ 4 KiB yazma, 8 KiB üstü okuma reddi, tmp+rename, bozuk dosya → miss);
+  `engine_stats.prewarm` `{options_ms, profile_ms, hits, starts, cache}`
+  döner. **Gerçek launch işi asla atlanmaz**: `launch_options` her start'ta
+  kasıtlı per-launch rastgelelik ürettiği için yeniden çağrılır ve runtime
+  profil dizini yeniden kullanılmaz (önceki oturum cookie/session verisini
+  geri yüklerdi). Metadata kimlik payload'ı içermez.
 
 ## Örnek İş Akışları
 

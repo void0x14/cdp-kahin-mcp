@@ -58,6 +58,22 @@
   `KAHIN_UPDATE_BASELINE=1` ile yeniden yazılır) ve GitLab `stealth-regression`
   job'ı (`stage: verify`, real-e2e ile aynı unprivileged/GTK kurulumu)
   schedule/main'da suite + regression'ı çalıştırır.
+- Faz 4 performans yüzeyi: Zig sidecar non-blocking'e geçti — tek-in-flight
+  darboğazı kalktı, stdin işleme browser yanıtını asla bloklamaz ve birden
+  fazla istek aynı anda in-flight olabilir (IPC sözleşmesi değişmedi). N=20
+  `Runtime.evaluate` concurrency probe'u
+  (`camoufox-harness/tests/perf/concurrency.md`): seri 74.78 → 28.56 ms,
+  paralel duvar süresi 56.89 → 8.71 ms (6.5× düşüş), ratio 1.314 → 3.281.
+- `kahin_engine_stats` eklendi: monotonic clock ile uptime + healer
+  tracker'dan bounded per-tool rollup (`tool_calls`/`tool_errors`,
+  `top_slow` ≤ 10, `last_error`); tüm `safe()` süre ölçümleri
+  `time.monotonic()`'a taşındı; engine yoksa yapılandırılmış
+  `engine_unavailable` yanıtı döner.
+- Identity başına bounded profile prewarm: stabil sha256 identity hash +
+  ölçülen hazırlık süreleri in-process cache (max 8, FIFO) ve
+  `~/.cache/kahin/profiles/<hash>.json` içinde tutulur; gerçek launch işi
+  asla atlanmaz (dürüst metadata/reuse kaydı; kimlik payload'ı metadata'da
+  saklanmaz).
 
 ## [0.3.7] — 2026-08-06
 
