@@ -278,6 +278,12 @@ class Mirage(BrowserEngine):
         self._engine_name = engine_name
         self._stderr_file = None
         self._profile_dir: Path | None = None
+        # Active identity applied at launch (Faz 2 Task 5): the resolved
+        # fingerprint config plus the saved identity name it came from.
+        # Retained only while this engine is running, for
+        # ``kahin_identity_report``.
+        self._identity_config: dict[str, Any] | None = None
+        self._identity_name: str | None = None
         self._write_lock = asyncio.Lock()
         self._page_lock = asyncio.Lock()
         # Switching the current tab is a routing operation, not browser
@@ -371,11 +377,34 @@ class Mirage(BrowserEngine):
         self._network_routed_ids.clear()
         self._network_signal.clear()
         self._reset_capture_state(wake_waiters=False)
+        self._identity_config = None
+        self._identity_name = None
+        identity_config = kwargs.get("identity")
+        identity_name = kwargs.get("identity_name")
+        self._identity_config = (
+            identity_config if isinstance(identity_config, dict) and identity_config else None
+        )
+        self._identity_name = identity_name if isinstance(identity_name, str) and identity_name else None
         # BrowserForge fingerprint -> CAMOU_CONFIG_* env (master plan §2.1.5).
         # Every start() draws a fresh identity; the sidecar passes our
         # environment through to the Camoufox child verbatim (pipe.zig
         # buildEnvp reads /proc/self/environ).
         opts = launch_options() if launch_options is not None else {"env": {}, "firefox_user_prefs": {}}
+        # Identity config (Faz 2 Task 5): merge through the same seam that
+        # applies the default fingerprint. ``launch_options(config=...)``
+        # regenerates the full option set (env with CAMOU_CONFIG_*, user.js
+        # prefs, args) and overlays the pinned values on top, so unrelated
+        # defaults are preserved and the identity takes precedence. A failed
+        # injection must never crash boot; fall back to a fresh random
+        # fingerprint instead.
+        if self._identity_config is not None:
+            if launch_options is None:
+                logger.warning("identity config ignored: camoufox launch_options unavailable")
+            else:
+                try:
+                    opts = launch_options(config=self._identity_config, i_know_what_im_doing=True)
+                except Exception:  # noqa: BLE001 - identity must not crash boot
+                    logger.warning("identity config injection failed; using defaults", exc_info=True)
         env = {**os.environ, **opts["env"]}
 
         # firefox_user_prefs -> <profile>/user.js (webgl etc. must be set
@@ -1571,6 +1600,8 @@ class Mirage(BrowserEngine):
     async def stop(self) -> None:
         self._dom_signal.set()
         self._reset_capture_state(wake_waiters=True)
+        self._identity_config = None
+        self._identity_name = None
         reader, self._reader = self._reader, None
         if reader is not None:
             reader.cancel()

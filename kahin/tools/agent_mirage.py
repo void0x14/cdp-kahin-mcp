@@ -14,6 +14,7 @@ to the saved url before restoring anything.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +22,7 @@ import orjson
 
 from kahin._mcp import mcp
 from kahin.agent_snapshot import format_snapshot
-from kahin.tools._common import _RO, _RW, _healer_ref, _mirage_evaluate
+from kahin.tools._common import _DW, _RO, _RW, _healer_ref, _mirage_evaluate, _require_engine
 from kahin.tools.dom_stream_mirage import mirage_dom_action, mirage_dom_snapshot
 from kahin.tools.pilot_mirage import (
     _MAX_SELECTOR_LENGTH,
@@ -40,6 +41,40 @@ _MAX_STATE_PAYLOAD = 16 * 1024 * 1024
 _STATE_STORAGE_KEY_MAX = 1_024
 _STATE_STORAGE_VALUE_MAX = 1024 * 1024
 _STATE_URL_MAX = 4_096
+_MAX_IDENTITY_PAYLOAD = 16 * 1024 * 1024
+
+# Identity persistence (Faz 2 Task 5): fingerprints live in the user config
+# dir, keyed by a strict name so a saved name can never traverse out of the
+# directory. Names are validated identically by every identity tool and by
+# ``browser_start(identity=...)`` resolution.
+_IDENTITY_DIR = Path.home() / ".config" / "kahin" / "identities"
+_IDENTITY_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
+_IDENTITY_OS_TARGETS = ("windows", "macos", "linux", "random")
+
+
+def _identity_path(name: str) -> Path | None:
+    """Resolve a saved identity name to its JSON file, or None when the
+    name is not a safe identifier (no traversal, no weird characters)."""
+    if not _IDENTITY_NAME_RE.match(name):
+        return None
+    return _IDENTITY_DIR / f"{name}.json"
+
+
+def _identity_summary(config: dict[str, Any]) -> dict[str, Any]:
+    """The fingerprint fields agents care about, pulled from a raw config."""
+    summary: dict[str, Any] = {}
+    for key in (
+        "navigator.userAgent",
+        "screen.width",
+        "screen.height",
+        "timezone",
+        "locale",
+        "webGl:renderer",
+    ):
+        value = config.get(key)
+        if isinstance(value, (str, int, float)) and not isinstance(value, bool) and value != "":
+            summary[key] = value
+    return summary
 
 
 def _loads(text: str) -> Any:
@@ -533,4 +568,228 @@ async def mirage_state_load(path: str) -> str:
             "cookies": len(cookies),
             "localStorage": len(local),
             "sessionStorage": len(session),
+        }, option=orjson.OPT_INDENT_2).decode()
+
+
+# --- Identity persistence (Faz 2 Task 5) -----------------------------------
+
+
+def _identity_name_arg(tool: str, name: Any) -> tuple[str | None, str | None, Path | None]:
+    """Validate an identity name and resolve its file path."""
+    name_value, error = _text_arg(name, tool=tool, field="name", maximum=64)
+    if error:
+        return None, error, None
+    assert name_value is not None
+    path = _identity_path(name_value)
+    if path is None:
+        return None, _json_error(
+            tool,
+            "name must match ^[a-zA-Z0-9_-]{1,64}$",
+            "invalid_argument",
+            field="name",
+        ), None
+    return name_value, None, path
+
+
+def _write_identity(tool: str, path: Path, config: dict[str, Any]) -> str | None:
+    """Persist an identity file with bounded payload; returns an error JSON
+    string on failure, None on success."""
+    try:
+        serialized = orjson.dumps(
+            {"version": 1, "config": config}, option=orjson.OPT_INDENT_2,
+        )
+    except (TypeError, ValueError) as exc:
+        return _json_error(tool, f"cannot serialize identity: {exc}", "tool_failed")
+    if len(serialized) > _MAX_IDENTITY_PAYLOAD:
+        return _json_error(
+            tool,
+            "identity config exceeds the persistence payload bound",
+            "invalid_argument",
+            maximum=_MAX_IDENTITY_PAYLOAD,
+        )
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(serialized)
+    except OSError as exc:
+        return _json_error(tool, f"cannot write identity: {exc}", "tool_failed", path=str(path))
+    return None
+
+
+@mcp.tool(name="kahin_identity_new", annotations=_RO)
+async def identity_new(name: str, os_target: str = "random") -> str:
+    """Create and persist a fresh fingerprint identity.
+
+    Uses the installed real Camoufox fingerprint generator (BrowserForge
+    synthetic identity). ``os_target``: windows|macos|linux|random. Returns
+    ``{saved, name, path, summary}`` where summary carries the pinned
+    navigator.userAgent, screen and webgl values for later verification.
+    """
+    tool = "kahin_identity_new"
+    name_value, error, path = _identity_name_arg(tool, name)
+    if error:
+        return error
+    assert name_value is not None and path is not None
+    if not isinstance(os_target, str) or os_target not in _IDENTITY_OS_TARGETS:
+        return _json_error(
+            tool,
+            "os_target must be windows|macos|linux|random",
+            "invalid_argument",
+            field="os_target",
+        )
+    async with _healer_ref.safe(tool, name=name_value, os_target=os_target):
+        try:
+            from camoufox.fingerprints import generate_context_fingerprint  # noqa: PLC0415
+        except ImportError:
+            return _json_error(
+                tool,
+                "camoufox.fingerprints unavailable",
+                "capability_requires_mirage",
+            )
+        os_filter = None if os_target == "random" else os_target
+        try:
+            generated = generate_context_fingerprint(os=os_filter)
+        except Exception as exc:  # noqa: BLE001 - public tool returns JSON
+            return _json_error(tool, f"fingerprint generation failed: {exc}", "tool_failed")
+        config = generated.get("config") or {}
+        if not isinstance(config, dict) or not config:
+            return _json_error(tool, "fingerprint generator returned no config", "tool_failed")
+        write_error = _write_identity(tool, path, config)
+        if write_error:
+            return write_error
+        return orjson.dumps({
+            "saved": True,
+            "name": name_value,
+            "path": str(path),
+            "summary": _identity_summary(config),
+        }, option=orjson.OPT_INDENT_2).decode()
+
+
+@mcp.tool(name="kahin_identity_save", annotations=_RO)
+async def identity_save(name: str, config: dict[str, Any]) -> str:
+    """Persist a raw fingerprint config dict under a name.
+
+    The config is a Camoufox ``launch_options(config=...)`` dict (keys like
+    ``navigator.userAgent``, ``screen.width``); it is applied verbatim when
+    ``kahin_browser_start(identity=<name>)`` launches the engine.
+    """
+    tool = "kahin_identity_save"
+    name_value, error, path = _identity_name_arg(tool, name)
+    if error:
+        return error
+    assert name_value is not None and path is not None
+    if not isinstance(config, dict) or not config:
+        return _json_error(
+            tool,
+            "config must be a non-empty object",
+            "invalid_argument",
+            field="config",
+        )
+    async with _healer_ref.safe(tool, name=name_value):
+        write_error = _write_identity(tool, path, config)
+        if write_error:
+            return write_error
+        return orjson.dumps({
+            "saved": True,
+            "name": name_value,
+            "path": str(path),
+        }, option=orjson.OPT_INDENT_2).decode()
+
+
+@mcp.tool(name="kahin_identity_list", annotations=_RO)
+async def identity_list() -> str:
+    """List saved identities with fingerprint summaries."""
+    async with _healer_ref.safe("kahin_identity_list"):
+        identities: list[dict[str, Any]] = []
+        if _IDENTITY_DIR.is_dir():
+            for file in sorted(_IDENTITY_DIR.glob("*.json")):
+                try:
+                    payload = orjson.loads(file.read_bytes())
+                except (OSError, orjson.JSONDecodeError):
+                    continue
+                config = payload.get("config") if isinstance(payload, dict) else None
+                if not isinstance(config, dict):
+                    continue
+                identities.append({
+                    "name": file.stem,
+                    "summary": _identity_summary(config),
+                })
+        return orjson.dumps({"identities": identities}, option=orjson.OPT_INDENT_2).decode()
+
+
+@mcp.tool(name="kahin_identity_delete", annotations=_DW)
+async def identity_delete(name: str) -> str:
+    """Delete a saved identity file."""
+    tool = "kahin_identity_delete"
+    name_value, error, path = _identity_name_arg(tool, name)
+    if error:
+        return error
+    assert name_value is not None and path is not None
+    async with _healer_ref.safe(tool, name=name_value):
+        try:
+            if path.is_file():
+                path.unlink()
+        except OSError as exc:
+            return _json_error(
+                tool,
+                f"cannot delete identity: {exc}",
+                "tool_failed",
+                path=str(path),
+            )
+        return orjson.dumps({"deleted": True, "name": name_value}, option=orjson.OPT_INDENT_2).decode()
+
+
+@mcp.tool(name="kahin_identity_report", annotations=_RO)
+async def identity_report() -> str:
+    """Report the active engine's identity summary.
+
+    With no running engine this returns a structured ``engine_unavailable``
+    result. When the engine is active it reports the configured identity
+    name/config plus the runtime ``navigator.userAgent`` read from the live
+    page (never a set_user_agent acknowledgement). Engines started without an
+    identity report ``identity: null``.
+    """
+    async with _healer_ref.safe("kahin_identity_report"):
+        engine_error = await _require_engine()
+        if engine_error:
+            return engine_error
+
+        from kahin import _state as state  # noqa: PLC0415
+
+        engine = state._current_engine
+        identity_config = getattr(engine, "_identity_config", None)
+        identity_name = getattr(engine, "_identity_name", None)
+
+        runtime_ua: str | None = None
+        list_pages = getattr(engine, "list_pages", None)
+        if list_pages is not None:
+            try:
+                pages = await list_pages()
+                session_id = next(
+                    (
+                        page.get("sessionId")
+                        for page in pages
+                        if isinstance(page, dict) and page.get("current")
+                    ),
+                    pages[0].get("sessionId") if pages and isinstance(pages[0], dict) else None,
+                )
+                if isinstance(session_id, str):
+                    raw = _loads(await _mirage_evaluate(
+                        "navigator.userAgent", session_id=session_id,
+                    ))
+                    if isinstance(raw, str):
+                        runtime_ua = raw
+            except Exception:  # noqa: BLE001 - report must never fail the engine
+                runtime_ua = None
+
+        identity: dict[str, Any] | None = None
+        if isinstance(identity_config, dict) and identity_config:
+            identity = {
+                "name": identity_name if isinstance(identity_name, str) else None,
+                "config": _identity_summary(identity_config),
+            }
+        return orjson.dumps({
+            "active": True,
+            "engine": "mirage" if list_pages is not None else "shadow",
+            "identity": identity,
+            "navigator.userAgent": runtime_ua,
         }, option=orjson.OPT_INDENT_2).decode()

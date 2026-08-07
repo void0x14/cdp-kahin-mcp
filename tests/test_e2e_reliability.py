@@ -440,3 +440,91 @@ async def test_state_paths_reject_relative(mirage_tools: None) -> None:
     assert "absolute" in str(saved.get("error", "")), saved
     loaded = _loads(await agent_mirage.mirage_state_load("relative/state.json"))
     assert loaded.get("code") == "invalid_argument", loaded
+
+
+@pytest.mark.asyncio
+async def test_identity_save_list_report_and_delete() -> None:
+    """Identity surface without an engine: name/config validation, real
+    fingerprint generation, list, delete, and the engine_unavailable report."""
+    await pilot.browser_stop()  # deterministic slate
+    try:
+        report = _loads(await agent_mirage.identity_report())
+        assert report.get("code") == "engine_unavailable", report
+
+        traversal = _loads(await agent_mirage.identity_save(
+            "../evil", {"navigator.userAgent": "x"},
+        ))
+        assert traversal.get("code") == "invalid_argument", traversal
+        empty = _loads(await agent_mirage.identity_save("emptycfg", {}))
+        assert empty.get("code") == "invalid_argument", empty
+
+        created = _loads(await agent_mirage.identity_new("freshid"))
+        assert created.get("saved") is True, created
+        assert created.get("name") == "freshid", created
+        assert created.get("summary", {}).get("navigator.userAgent"), created
+
+        fixed = {
+            "navigator.userAgent": "Mozilla/5.0 (KAHIN-TEST) Gecko/20100101 Firefox/143.0",
+            "screen.width": 1280,
+            "screen.height": 720,
+        }
+        saved = _loads(await agent_mirage.identity_save("pinned", fixed))
+        assert saved.get("saved") is True, saved
+
+        listed = _loads(await agent_mirage.identity_list())
+        by_name = {i.get("name"): i for i in listed.get("identities", [])}
+        assert "freshid" in by_name and "pinned" in by_name, listed
+        assert by_name["pinned"]["summary"].get("navigator.userAgent") == fixed["navigator.userAgent"], listed
+    finally:
+        await agent_mirage.identity_delete("freshid")
+        await agent_mirage.identity_delete("pinned")
+
+
+@pytest.mark.asyncio
+async def test_identity_start_pins_user_agent() -> None:
+    """browser_start(identity=...) applies the pinned fingerprint at launch.
+
+    Both the inline-config and the saved-name paths must pin
+    navigator.userAgent, proven page-side with Runtime.evaluate (the Juggler
+    set-user-agent acknowledgement is empty and proves nothing). The report
+    reflects the active identity and the runtime UA.
+    """
+    fixed = {
+        "navigator.userAgent": "Mozilla/5.0 (KAHIN-TEST) Gecko/20100101 Firefox/143.0",
+        "screen.width": 1280,
+        "screen.height": 720,
+    }
+    saved = _loads(await agent_mirage.identity_save("startpin", fixed))
+    assert saved.get("saved") is True, saved
+    await pilot.browser_stop()  # deterministic slate
+    try:
+        # 1) inline config dict
+        started = _loads(await pilot.browser_start(engine="mirage", identity=dict(fixed)))
+        assert started.get("status") == "started", started
+        tab = _loads(await trainman_mirage.mirage_tab_new())
+        assert tab.get("targetId"), tab
+        await asyncio.sleep(0.5)
+        ua = _eval_value(await pilot.evaluate(expression="navigator.userAgent"))
+        assert ua == fixed["navigator.userAgent"], ua
+        report = _loads(await agent_mirage.identity_report())
+        assert report.get("active") is True, report
+        assert report.get("identity", {}).get("name") is None, report
+        assert report.get("navigator.userAgent") == fixed["navigator.userAgent"], report
+        await pilot.browser_stop()
+
+        # 2) saved identity name through browser_start
+        started = _loads(await pilot.browser_start(engine="mirage", identity="startpin"))
+        assert started.get("status") == "started", started
+        tab = _loads(await trainman_mirage.mirage_tab_new())
+        assert tab.get("targetId"), tab
+        await asyncio.sleep(0.5)
+        ua = _eval_value(await pilot.evaluate(expression="navigator.userAgent"))
+        assert ua == fixed["navigator.userAgent"], ua
+        report = _loads(await agent_mirage.identity_report())
+        assert report.get("identity", {}).get("name") == "startpin", report
+        assert report.get("navigator.userAgent") == fixed["navigator.userAgent"], report
+        listed = _loads(await agent_mirage.identity_list())
+        assert "startpin" in [i.get("name") for i in listed.get("identities", [])], listed
+    finally:
+        await pilot.browser_stop()
+        await agent_mirage.identity_delete("startpin")

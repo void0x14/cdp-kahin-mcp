@@ -47,6 +47,7 @@ _MAX_SCREENSHOT_BYTES = 32 * 1024 * 1024
 _NAVIGATE_WAIT_UNTIL = ("commit", "domcontentloaded", "load", "networkidle")
 _NAVIGATE_IDLE_QUIET = 0.5
 _NAVIGATE_MAX_TIMEOUT = 120.0
+_MAX_IDENTITY_PAYLOAD = 16 * 1024 * 1024
 
 
 def _json_error(tool: str, message: str, code: str = "tool_error", **details: Any) -> str:
@@ -141,7 +142,12 @@ async def _engine_is_healthy(engine: Any) -> bool:
 
 
 @mcp.tool(name="kahin_browser_start", annotations=_RW)
-async def browser_start(engine: str = "mirage", headless: bool = True, port: int = 0) -> str:
+async def browser_start(
+    engine: str = "mirage",
+    headless: bool = True,
+    port: int = 0,
+    identity: str | dict[str, Any] | None = None,
+) -> str:
     """Start or reuse one browser engine.
 
     Camoufox/Mirage is the default because it is the complete visual browser
@@ -150,7 +156,9 @@ async def browser_start(engine: str = "mirage", headless: bool = True, port: int
     explicit fast CDP opt-in; a visual tool promotes it to Mirage in-process.
     Repeating a start for the active engine is idempotent; use
     ``kahin_mirage_tab_new`` for another task/page instead of booting another
-    browser.
+    browser. ``identity`` pins a Camoufox fingerprint at launch: either a
+    saved identity name (``kahin_identity_save``/``kahin_identity_new``) or
+    an inline config dict. Identity applies to Mirage only, never Shadow.
     """
     if not isinstance(engine, str):
         return _json_error("kahin_browser_start", "engine must be a string", "invalid_argument", field="engine")
@@ -165,6 +173,79 @@ async def browser_start(engine: str = "mirage", headless: bool = True, port: int
             "reserved_port",
             field="port",
         )
+    if identity is not None and not isinstance(identity, (str, dict)):
+        return _json_error(
+            "kahin_browser_start",
+            "identity must be a saved identity name (string) or an inline config object",
+            "invalid_argument",
+            field="identity",
+        )
+    if isinstance(identity, dict) and not identity:
+        return _json_error(
+            "kahin_browser_start",
+            "identity config must be a non-empty object",
+            "invalid_argument",
+            field="identity",
+        )
+
+    identity_config: dict[str, Any] | None = None
+    identity_name: str | None = None
+    if identity is not None:
+        if isinstance(identity, dict):
+            identity_config = identity
+        else:
+            from kahin.tools.agent_mirage import _identity_path  # noqa: PLC0415
+
+            path = _identity_path(identity)
+            if path is None or not path.is_file():
+                return _json_error(
+                    "kahin_browser_start",
+                    f"unknown identity: {identity!r}",
+                    "invalid_argument",
+                    field="identity",
+                )
+            try:
+                data = path.read_bytes()
+            except OSError as exc:
+                return _json_error(
+                    "kahin_browser_start",
+                    f"identity file unreadable: {exc}",
+                    "invalid_argument",
+                    field="identity",
+                )
+            if len(data) > _MAX_IDENTITY_PAYLOAD:
+                return _json_error(
+                    "kahin_browser_start",
+                    "identity file exceeds the read payload bound",
+                    "invalid_argument",
+                    field="identity",
+                    maximum=_MAX_IDENTITY_PAYLOAD,
+                )
+            try:
+                payload = orjson.loads(data)
+            except orjson.JSONDecodeError as exc:
+                return _json_error(
+                    "kahin_browser_start",
+                    f"identity file is not valid JSON: {exc}",
+                    "invalid_argument",
+                    field="identity",
+                )
+            if not isinstance(payload, dict) or not isinstance(payload.get("config"), dict):
+                return _json_error(
+                    "kahin_browser_start",
+                    "identity file must contain a JSON object with a config object",
+                    "invalid_argument",
+                    field="identity",
+                )
+            if not payload["config"]:
+                return _json_error(
+                    "kahin_browser_start",
+                    "identity file config must be a non-empty object",
+                    "invalid_argument",
+                    field="identity",
+                )
+            identity_config = payload["config"]
+            identity_name = identity
 
     if engine not in ("shadow", "mirage", "camoufox"):
         return _json_error(
@@ -224,8 +305,12 @@ async def browser_start(engine: str = "mirage", headless: bool = True, port: int
                 actual_port = 0  # Juggler pipe: no remote-debugging port
 
             try:
+                if engine == "shadow":
+                    start_kwargs: dict[str, Any] = {}
+                else:
+                    start_kwargs = {"identity": identity_config, "identity_name": identity_name}
                 await asyncio.wait_for(
-                    candidate.start(headless=headless, port=actual_port),
+                    candidate.start(headless=headless, port=actual_port, **start_kwargs),
                     timeout=_ENGINE_START_TIMEOUT,
                 )
                 if engine == "shadow":

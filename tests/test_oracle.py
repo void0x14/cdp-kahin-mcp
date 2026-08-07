@@ -54,7 +54,8 @@ def test_server_initialize_and_list_tools() -> None:
     # Faz 2 Task 2: +1 agent-native snapshot tool = 120.
     # Faz 2 Task 3: +1 fill_form tool = 121.
     # Faz 2 Task 4: +2 session state save/load tools = 123.
-    assert len(tools) == 123
+    # Faz 2 Task 5: +5 identity tools (new/save/list/delete/report) = 128.
+    assert len(tools) == 128
     assert "kahin_mirage_dom_start" in tool_names
     assert "kahin_mirage_dom_snapshot" in tool_names
     assert "kahin_mirage_dom_events" in tool_names
@@ -64,6 +65,11 @@ def test_server_initialize_and_list_tools() -> None:
     assert "kahin_mirage_fill_form" in tool_names
     assert "kahin_mirage_state_save" in tool_names
     assert "kahin_mirage_state_load" in tool_names
+    assert "kahin_identity_new" in tool_names
+    assert "kahin_identity_save" in tool_names
+    assert "kahin_identity_list" in tool_names
+    assert "kahin_identity_delete" in tool_names
+    assert "kahin_identity_report" in tool_names
     for name in [
         "kahin_mirage_query",
         "kahin_mirage_click",
