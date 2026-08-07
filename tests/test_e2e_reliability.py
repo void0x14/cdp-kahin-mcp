@@ -15,6 +15,7 @@ import threading
 import time
 from collections.abc import AsyncGenerator
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
@@ -29,6 +30,7 @@ from kahin.tools import (
     pilot,
     pilot_mirage,
     reliability_mirage,
+    storage_mirage,
     trainman_mirage,
 )
 
@@ -57,6 +59,14 @@ def _loads(text: str) -> Any:
     return json.loads(text)
 
 
+def _eval_value(text: str) -> Any:
+    """Unwrap kahin_evaluate's CDP-shaped {result: {value}} payload."""
+    payload = _loads(text)
+    if isinstance(payload, dict):
+        return (payload.get("result") or {}).get("value")
+    return payload
+
+
 @async_fixture
 async def mirage_tools() -> AsyncGenerator[None, None]:
     """Start real Camoufox through kahin_browser_start + one tab, then stop."""
@@ -78,6 +88,14 @@ class _RouteHandler(BaseHTTPRequestHandler):
                 b"<html><body><button id='load'>load</button><script>"
                 b"window.loadPage=()=>fetch('/page.html').then(r=>r.text()).then(t=>document.body.dataset.payload=t);"
                 b"</script></body></html>"
+            )
+        elif self.path.endswith("/state"):
+            body = (
+                b"<html><body>state</body><script>"
+                b"localStorage.setItem('k1', 'from-page');"
+                b"sessionStorage.setItem('s1', 'from-page');"
+                b"document.cookie = 'c1=from-page; path=/';"
+                b"</script></html>"
             )
         else:
             body = b"<html><body>origin</body></html>"
@@ -345,3 +363,80 @@ async def test_route_fulfill_inline_body(mirage_tools: None, http_server: str) -
     await reliability_mirage.mirage_wait_for_timeout(ms=300)
     content = _loads(await pilot_mirage.mirage_page_content())
     assert "MOCKED" in str(content.get("html", "")), content
+
+
+@pytest.mark.asyncio
+async def test_state_save_load_roundtrip(
+    mirage_tools: None, http_server: str, tmp_path: Path,
+) -> None:
+    """Real-origin roundtrip: save, wipe, load, and prove every section
+    (url, cookies, localStorage, sessionStorage) was genuinely restored."""
+    state_url = http_server.replace("/page.html", "/state")
+    await _navigate(state_url)
+    await reliability_mirage.mirage_wait_for_timeout(ms=250)
+    # Overwrite the page-provided markers with the values we persist, so a
+    # post-load assertion can distinguish restored data from page scripts.
+    overwritten = _eval_value(await pilot.evaluate(
+        expression=(
+            "localStorage.setItem('k1', 'v1');"
+            "sessionStorage.setItem('s1', 'sv');"
+            "document.cookie = 'c1=vv; path=/'; true"
+        ),
+    ))
+    assert overwritten is True, overwritten
+
+    save_path = str(tmp_path / "state.json")
+    saved = _loads(await agent_mirage.mirage_state_save(save_path))
+    assert saved.get("saved") is True, saved
+    assert saved.get("path") == save_path, saved
+    assert saved.get("cookies") == 1, saved
+    assert saved.get("localStorage") == 1, saved
+    assert saved.get("sessionStorage") == 1, saved
+    assert saved.get("url") == state_url, saved
+
+    payload = _loads(Path(save_path).read_text(encoding="utf-8"))
+    assert payload.get("version") == 1, payload
+    assert payload["localStorage"]["k1"] == "v1", payload
+    assert payload["sessionStorage"]["s1"] == "sv", payload
+    assert any(c.get("name") == "c1" and c.get("value") == "vv" for c in payload["cookies"]), payload
+    assert payload["url"] == state_url, payload
+
+    # Wipe the live session on the same origin, then prove it is empty.
+    await _navigate(http_server)
+    await pilot.evaluate(expression="localStorage.clear(); sessionStorage.clear(); true")
+    await storage_mirage.mirage_cookie_clear()
+    await reliability_mirage.mirage_wait_for_timeout(ms=200)
+    assert _loads(await storage_mirage.mirage_storage_local_get()) == [], "wipe failed"
+    assert _loads(await storage_mirage.mirage_storage_session_get()) == [], "wipe failed"
+    wiped_cookies = _loads(await storage_mirage.mirage_cookie_get())
+    assert wiped_cookies.get("cookies") == [], wiped_cookies
+
+    loaded = _loads(await agent_mirage.mirage_state_load(save_path))
+    assert loaded.get("loaded") is True, loaded
+    assert loaded.get("path") == save_path, loaded
+    assert loaded.get("url") == state_url, loaded
+    assert loaded.get("cookies") == 1, loaded
+    assert loaded.get("localStorage") == 1, loaded
+    assert loaded.get("sessionStorage") == 1, loaded
+
+    # url restored (navigate back to the saved origin/page)
+    href = _eval_value(await pilot.evaluate(expression="location.href"))
+    assert href == state_url, href
+    # cookies restored
+    cookies = _loads(await storage_mirage.mirage_cookie_get())
+    names = {c.get("name"): c.get("value") for c in cookies.get("cookies", [])}
+    assert names.get("c1") == "vv", cookies
+    # localStorage and sessionStorage restored (not the page-set markers)
+    local = _loads(await storage_mirage.mirage_storage_local_get())
+    assert isinstance(local, list) and {"key": "k1", "value": "v1"} in local, local
+    session = _loads(await storage_mirage.mirage_storage_session_get())
+    assert isinstance(session, list) and {"key": "s1", "value": "sv"} in session, session
+
+
+@pytest.mark.asyncio
+async def test_state_paths_reject_relative(mirage_tools: None) -> None:
+    saved = _loads(await agent_mirage.mirage_state_save("relative/state.json"))
+    assert saved.get("code") == "invalid_argument", saved
+    assert "absolute" in str(saved.get("error", "")), saved
+    loaded = _loads(await agent_mirage.mirage_state_load("relative/state.json"))
+    assert loaded.get("code") == "invalid_argument", loaded
