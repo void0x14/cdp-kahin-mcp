@@ -14,6 +14,11 @@ Checks, in order, on every tick (all inside one page evaluate):
 Only the first element lookup goes through the locator engine; everything
 else is a single page-evaluate probe, so a fast page can never block the
 poll loop behind multiple round trips.
+
+All non-ok probe states remain retryable because page actionability can change
+while an application is settling (for example, a disabled button can become
+enabled). The latest failure code and reason are retained for an actionable
+timeout response.
 """
 
 from __future__ import annotations
@@ -26,12 +31,11 @@ from kahin.locators import selector_js
 
 _DEFAULT_TIMEOUT = 10.0
 _DEFAULT_INTERVAL = 0.1
-# A fresh "ready" observation satisfies the default stability requirement, so
-# `wait_for_ready` returns on the first poll that passes every check. Callers
-# that need an animation/animation-freeze guard pass an explicit `stability`
-# (e.g. 2 = two consecutive identical rects).
-_DEFAULT_STABILITY = 1
+_DEFAULT_STABILITY = 2
 
+_TRANSIENT_CODES = frozenset({"element_not_found", "probe_error", "timeout"})
+
+# Codes that keep the poll loop running; everything else aborts immediately.
 # ${ELEMENT_JS} is replaced with the locator-derived expression. The probe
 # returns a plain dict: {ok:true, x, y, width, height} or
 # {code, reason?} on failure.
@@ -75,10 +79,6 @@ async def wait_for_ready(
     ``probe`` receives the full JS expression and must return the parsed
     value dict (or ``{"error": ...}`` — treated as not-ready).
 
-    A disabled element is a hard failure: waiting cannot enable it, so the
-    actionable code is returned immediately. ``element_not_found`` and
-    transient ``not_visible``/``obscured`` states are retried until timeout.
-
     Returns ``{"ok": True, "x", "y"}`` on success, or
     ``{"ok": False, "code", "reason", "selector", "timeout"}``.
     """
@@ -86,6 +86,7 @@ async def wait_for_ready(
     deadline = loop.time() + max(0.0, timeout)
     expression = _build_probe_js(selector)
     last: dict[str, Any] = {"code": "element_not_found"}
+    last_failure: dict[str, Any] | None = None
     stable_hits = 0
     last_point: tuple[float, float, float, float] | None = None
     while True:
@@ -96,30 +97,38 @@ async def wait_for_ready(
         if not isinstance(last, dict):
             last = {"code": "probe_error"}
         if (
-            not last.get("ok")
-            and last.get("code") == "element_not_actionable"
-            and last.get("reason") == "disabled"
+            last.get("ok")
+            and isinstance(last.get("x"), (int, float))
+            and isinstance(last.get("y"), (int, float))
         ):
-            return {
-                "ok": False,
-                "code": "element_not_actionable",
-                "reason": "disabled",
-                "selector": selector,
-                "timeout": timeout,
-            }
-        if last.get("ok") and isinstance(last.get("x"), (int, float)) and isinstance(last.get("y"), (int, float)):
-            point = (float(last["x"]), float(last["y"]), float(last.get("width", 0.0)), float(last.get("height", 0.0)))
+            point = (
+                float(last["x"]),
+                float(last["y"]),
+                float(last.get("width", 0.0)),
+                float(last.get("height", 0.0)),
+            )
             stable_hits = stable_hits + 1 if point == last_point else 1
             last_point = point
             if stability <= 0 or stable_hits >= stability:
                 return {"ok": True, "x": point[0], "y": point[1], "selector": selector}
+        else:
+            # Actionability can change while the page is settling: a hidden,
+            # disabled, or obscured control may become usable on a later tick.
+            # Keep polling every non-ok state, but retain the latest useful
+            # failure so a timeout remains actionable instead of becoming a
+            # generic ``element_not_found`` after a transient probe result.
+            code = str(last.get("code") or "timeout")
+            previous_code = str((last_failure or {}).get("code") or "")
+            if code not in _TRANSIENT_CODES or previous_code in _TRANSIENT_CODES or last_failure is None:
+                last_failure = last
         if loop.time() > deadline:
             break
         await asyncio.sleep(max(0.0, interval))
+    failure = last_failure or last
     return {
         "ok": False,
-        "code": str(last.get("code") or "timeout"),
-        "reason": last.get("reason"),
+        "code": str(failure.get("code") or "timeout"),
+        "reason": failure.get("reason"),
         "selector": selector,
         "timeout": timeout,
     }

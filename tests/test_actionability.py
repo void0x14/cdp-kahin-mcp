@@ -19,8 +19,11 @@ class FakeProbe:
 
 @pytest.mark.asyncio
 async def test_returns_immediately_when_ready() -> None:
+    # stability=1: a single stable observation is ready on the first tick.
+    # The default stability=2 would need two identical ticks, which a
+    # one-response fake probe cannot supply.
     probe = FakeProbe([{"ok": True, "x": 10.0, "y": 20.0, "width": 30.0, "height": 10.0}])
-    result = await wait_for_ready(probe, "#btn", timeout=5.0)
+    result = await wait_for_ready(probe, "#btn", timeout=5.0, stability=1)
     assert result["ok"] is True
     assert result["x"] == 10.0 and result["y"] == 20.0
     assert len(probe.calls) == 1
@@ -32,20 +35,18 @@ async def test_waits_for_element_to_appear() -> None:
         {"code": "element_not_found"},
         {"ok": True, "x": 1.0, "y": 2.0, "width": 3.0, "height": 4.0},
     ])
-    result = await wait_for_ready(probe, "#late", timeout=5.0, interval=0.01)
+    result = await wait_for_ready(probe, "#late", timeout=5.0, interval=0.01, stability=1)
     assert result["ok"] is True
 
 
 @pytest.mark.asyncio
 async def test_waits_for_stability_across_ticks() -> None:
-    # A position change resets the stability counter; the element must be
-    # observed at the SAME point for `stability` consecutive polls. The plan's
-    # original sequence [moving, moving, ...] would already be stable by tick
-    # 2 and return the moving point, so the second response differs here.
-    moving = {"ok": True, "x": 10.0, "y": 20.0, "width": 30.0, "height": 10.0}
-    jitter = {"ok": True, "x": 11.0, "y": 20.0, "width": 30.0, "height": 10.0}
+    # stability=2 fires only after two consecutive identical boxes, so the
+    # two "moving" boxes must differ from each other (and from "settled").
+    moving_1 = {"ok": True, "x": 10.0, "y": 20.0, "width": 30.0, "height": 10.0}
+    moving_2 = {"ok": True, "x": 10.0, "y": 20.0, "width": 30.0, "height": 12.0}
     settled = {"ok": True, "x": 40.0, "y": 20.0, "width": 30.0, "height": 10.0}
-    probe = FakeProbe([moving, jitter, settled, settled])
+    probe = FakeProbe([moving_1, moving_2, settled, settled])
     result = await wait_for_ready(probe, "#anim", timeout=5.0, interval=0.01, stability=2)
     assert result["ok"] is True and result["x"] == 40.0
 

@@ -442,3 +442,49 @@ async def test_dom_stream_cursor_resets_after_navigation(mirage_tools: None) -> 
     assert events["reset"] is True, events
     assert events["dropped"] is True, events
     assert events["streamId"] != started["stream"]["streamId"], events
+
+
+@pytest.mark.asyncio
+async def test_dom_action_contract_validation_and_select(mirage_tools: None) -> None:
+    """text is validated before any page side effect; unsupported_action and select errors surface."""
+    await _navigate(_doc("""<html><body>
+      <input id="name" placeholder="Name">
+      <select id="pick"><option value="a">Alpha</option><option value="b">Beta</option></select>
+    </body></html>"""))
+    await dom_stream_mirage.mirage_dom_start(max_events=128)
+    snap = _loads(await dom_stream_mirage.mirage_dom_snapshot(max_nodes=100, include_hidden=True))
+
+    def find(node: dict[str, Any], tag: str) -> dict[str, Any] | None:
+        if node.get("tag") == tag:
+            return node
+        for child in node.get("children") or []:
+            found = find(child, tag)
+            if found:
+                return found
+        return None
+
+    input_node = find(snap["root"], "input")
+    select_node = find(snap["root"], "select")
+    assert input_node and input_node["actions"] == ["focus", "type"], snap
+    assert select_node and select_node["actions"] == ["select"], snap
+
+    rejected = _loads(await dom_stream_mirage.mirage_dom_action(input_node["nodeId"], "type"))
+    assert rejected["code"] == "invalid_argument" and rejected["field"] == "text", rejected
+    # Validation precedes dispatch: the rejected call must not have focused the input.
+    active = _loads(await pilot.evaluate(expression="document.activeElement === document.querySelector('#name')"))
+    assert active["result"]["value"] is False, active
+
+    unsupported = _loads(await dom_stream_mirage.mirage_dom_action(input_node["nodeId"], "dblclick"))
+    assert unsupported["error"] == "unsupported_action", unsupported
+    assert unsupported["allowed"] == ["click", "hover", "focus", "type", "scroll", "select"], unsupported
+
+    not_select = _loads(await dom_stream_mirage.mirage_dom_action(input_node["nodeId"], "select", text="x"))
+    assert not_select["error"] == "not_select", not_select
+
+    no_option = _loads(await dom_stream_mirage.mirage_dom_action(select_node["nodeId"], "select", text="nope"))
+    assert no_option["error"] == "option_not_found", no_option
+
+    selected = _loads(await dom_stream_mirage.mirage_dom_action(select_node["nodeId"], "select", text="Beta"))
+    assert selected["target"]["nodeId"] == select_node["nodeId"], selected
+    value = _loads(await pilot.evaluate(expression="document.querySelector('#pick').value"))
+    assert value["result"]["value"] == "b", value

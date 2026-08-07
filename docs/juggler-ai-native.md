@@ -212,9 +212,14 @@ Navigation document'ı yeniler ve nodeId'leri geçersiz kılar. Her frame'in
 document'ı kendi `streamId`'sine sahiptir; `frame_id` verilirse snapshot,
 event ve action aynı frame context'inde çalışır.
 
+Not: `reset`/`dropped` tespiti, çağrıya geçtiğiniz `stream_id` ile sayfadaki
+mevcut `streamId`'yi karşılaştırır. `dom_start`'ten aldığınız `streamId`'yi
+her `dom_events` çağrısında geçirin; `stream_id` verilmezse navigation sessiz
+kalır ve eski cursor yeni document'ın event'leriyle karışabilir.
+
 ### 3.4 Live action sözleşmesi
 
-İzin verilen action'lar: `click`, `hover`, `focus`, `type`, `scroll`.
+İzin verilen action'lar: `click`, `hover`, `focus`, `type`, `scroll`, `select`.
 
 - `click` ve `hover`, node'un gerçek viewport koordinatını ölçer ve
   `Page.dispatchMouseEvent` gönderir.
@@ -222,6 +227,8 @@ event ve action aynı frame context'inde çalışır.
   `text` zorunludur.
 - `focus`, canlı node'u focus eder.
 - `scroll`, node'u görünür alana `scrollIntoView` ile getirir.
+- `select`, `<select>` üzerinde option value veya görünen metinle eşleşir ve
+  gerçek `input`/`change` event'leri gönderir. `text` zorunludur.
 - Node bağlı değilse hiçbir replacement node'a fallback yapılmaz; yapılandırılmış
   `stale_node`/`requiresSnapshot` döner.
 
@@ -412,6 +419,8 @@ dom_events(after_seq=C, stream_id=S, frame_id=F, wait_ms=5000)
 | `truncated` | Snapshot cap'i küçük | Selector veya cap daralt/genişlet |
 | `unsupported_action` | Action allow-list dışında | Yalnızca desteklenen action kullan |
 | `not_text_input` | Hedef textbox değil | Role/name/action ipuçlarını tekrar değerlendir |
+| `not_select` | `action=select` hedefi `<select>` değil | Snapshot'taki action ipuçlarını tekrar değerlendir |
+| `option_not_found` | Option value/görünen metin eşleşmedi | Snapshot/events ile option value'larını doğrula, `text`'i düzelt |
 | `Method not found` | Juggler'da CDP methodu yok/yanlış | Validate + get command/dependency; native Mirage tool seç |
 
 Hata alınca aynı hatayı körlemesine tekrarlama. Önce state'i yeniden oku,

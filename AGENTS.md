@@ -134,8 +134,8 @@ Juggler/Mirage yüzeyinin ajana dönük, uçtan uca sözleşmesi:
 | `kahin_mirage_dom_start` | Gerçek-zamanlı DOM observer'ı mevcut ve sonraki document'lara kurar |
 | `kahin_mirage_dom_snapshot` | Bounded, anlamsal, action ipuçlu canlı DOM ağacı döndürür |
 | `kahin_mirage_dom_events` | Cursor/streamId ile mutation ve input/focus/click event delta'larını okur; long-poll destekler |
-| `kahin_mirage_dom_action` | Snapshot'tan alınan canlı nodeId üzerinde click/hover/focus/type/scroll yapar |
-| `kahin_mirage_dom_stop` | Mevcut frame observer'ını durdurur ve ring'i temizler |
+| `kahin_mirage_dom_action` | Snapshot'tan alınan canlı nodeId üzerinde click/hover/focus/type/scroll/select yapar |
+| `kahin_mirage_dom_stop` | Mevcut frame observer'ını durdurur; sonraki DOM çağrısı yeni streamId ile yeniden kurar, eski nodeId/cursor geçersiz olur |
 
 #### DOM (12) — hepsinde opsiyonel `frame_id` parametresi (iframe içi erişim; listeleme: `kahin_mirage_frame_tree`)
 | Tool | Ne işe yarar? |
@@ -335,10 +335,11 @@ kahin_mirage_screencast_stop    kahin_mirage_screencast_pending
 kahin_mirage_accessibility_tree
 ```
 
-Gerçek-zamanlı DOM stream Faz 11'de eklendi. `dom_snapshot` cursor'u ile
-`dom_events` çağrısı yapılır; `reset`/`dropped`/`requiresSnapshot` durumlarında
-ajan yeni snapshot almak zorundadır. NodeId document/frame ömrüyle sınırlıdır;
-CSS selector yerine canlı nodeId ile action yapılır.
+Gerçek-zamanlı DOM stream Faz 11'de eklendi. `dom_start`'ten alınan `streamId`
+ve `dom_snapshot` cursor'u ile `dom_events` çağrısı yapılır; `streamId`
+verilmezse navigation algılanamaz. `reset`/`dropped`/`requiresSnapshot`
+durumlarında ajan yeni snapshot almak zorundadır. NodeId document/frame
+ömrüyle sınırlıdır; CSS selector yerine canlı nodeId ile action yapılır.
 
 ## Önemli Notlar
 1. CDP **case-sensitive**: `Page.navigate` ✓, `page.navigate` ✗

@@ -225,7 +225,10 @@ async def mirage_dom_events(
 
     ``wait_ms`` enables bounded long-polling. On navigation or ring overflow,
     ``reset``/``dropped`` tells the agent to request a fresh snapshot before
-    continuing; stale deltas are never treated as current truth.
+    continuing; stale deltas are never treated as current truth. Detection
+    compares the ``stream_id`` you pass against the page's current ``streamId``:
+    always pass the ``streamId`` returned by ``dom_start``, otherwise a
+    navigation is invisible and old deltas can mix with the new document's.
     """
     checked_after, error = _bounded_int(
         after_seq, "after_seq", 0, _MAX_SAFE_INTEGER, "kahin_mirage_dom_events",
@@ -283,9 +286,12 @@ async def mirage_dom_action(
 
     Allowed actions are ``click``, ``hover``, ``focus``, ``type``, ``scroll``
     and ``select``. Click/hover use real Juggler mouse dispatch; type focuses the
-    live element and uses the real Juggler ``Page.insertText`` command. A
-    removed or navigated node returns ``requiresSnapshot`` instead of acting
-    on an accidental replacement.
+    live element and uses the real Juggler ``Page.insertText`` command; select
+    matches an option by value or visible text and fires real input/change
+    events. ``text`` is required for ``type`` and ``select`` and is validated
+    before any page side effect. A removed or navigated node returns
+    ``stale_node`` with ``requiresSnapshot: true`` instead of acting on an
+    accidental replacement.
     """
     checked_node, error = _optional_text(node_id, "node_id", _MAX_FRAME_ID, "kahin_mirage_dom_action")
     if error:
@@ -296,11 +302,17 @@ async def mirage_dom_action(
         return error
     assert checked_action is not None
     if checked_action not in {"click", "hover", "focus", "type", "scroll", "select"}:
-        return _argument_error("kahin_mirage_dom_action", "action", "action is not allow-listed")
+        return _dump({
+            "error": "unsupported_action",
+            "action": checked_action,
+            "allowed": ["click", "hover", "focus", "type", "scroll", "select"],
+            "tool": "kahin_mirage_dom_action",
+            "field": "action",
+        })
     if text is not None and (not isinstance(text, str) or len(text) > _MAX_TEXT):
         return _argument_error("kahin_mirage_dom_action", "text", "text must be a string of at most 1000000 characters")
-    if checked_action == "select" and text is None:
-        return _argument_error("kahin_mirage_dom_action", "text", "text is required for action=select")
+    if checked_action in {"type", "select"} and text is None:
+        return _argument_error("kahin_mirage_dom_action", "text", f"text is required for action={checked_action}")
     checked_frame, error = _optional_text(frame_id, "frame_id", _MAX_FRAME_ID, "kahin_mirage_dom_action")
     if error:
         return error
@@ -347,8 +359,7 @@ async def mirage_dom_action(
             except Exception as exc:  # noqa: BLE001 - return tool-level error
                 return _dump({"error": "DOM action dispatch failed", "detail": str(exc)})
         elif checked_action == "type":
-            if text is None:
-                return _dump({"error": "text is required for action=type", "nodeId": node_id})
+            assert text is not None  # required-text validation ran before dispatch
             try:
                 result["typed"] = await engine.call("Page.insertText", {"text": text}, session_id=session_id)
             except Exception as exc:  # noqa: BLE001 - return tool-level error
