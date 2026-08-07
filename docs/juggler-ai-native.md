@@ -283,7 +283,7 @@ script'i ayrıca evaluate eder. Observer sayfa tarafında bounded olduğu için
 
 ## 6. Juggler tool kataloğu (A-Z)
 
-Aşağıdaki liste Mirage'ın 78 Juggler-native tool'unun tamamıdır. `MIRAGE`
+Aşağıdaki liste Mirage'ın 87 Juggler-native tool'unun tamamıdır. `MIRAGE`
 tool'ları `engine="mirage"` aktifken kullanılır.
 
 ### DOM gözlem ve adaptif action (5)
@@ -302,6 +302,15 @@ tool'ları `engine="mirage"` aktifken kullanılır.
 - `kahin_mirage_set_attribute`, `kahin_mirage_focus`
 - `kahin_mirage_hover`, `kahin_mirage_get_html`
 - `kahin_mirage_wait_selector`, `kahin_mirage_get_value`
+
+### Reliability (9)
+
+- `kahin_mirage_expect`
+- `kahin_mirage_check`, `kahin_mirage_uncheck`
+- `kahin_mirage_select_option`, `kahin_mirage_dblclick`
+- `kahin_mirage_drag`
+- `kahin_mirage_wait_for_text`, `kahin_mirage_wait_for_timeout`
+- `kahin_mirage_route`
 
 ### Input (7)
 
@@ -411,8 +420,8 @@ dom_events(after_seq=C, stream_id=S, frame_id=F, wait_ms=5000)
 
 | Hata/sinyal | Sebep | Kurtarma |
 |---|---|---|
-| `Browser engine is not running` | Start yok | `kahin_browser_start()` |
-| `Browser engine is dead` | Sidecar/Camoufox öldü | `kahin_browser_stop`, sonra yeni `start` |
+| `No browser engine running. Use kahin_browser_start first.` | Start yok | `kahin_browser_start()` |
+| `Browser engine is dead (crashed). Use kahin_browser_stop, then kahin_browser_start to restart.` | Sidecar/Camoufox öldü | `kahin_browser_stop`, sonra yeni `start` |
 | `stale_node` | Node silindi veya document değişti | Snapshot + yeni nodeId |
 | `reset`/`dropped` | Stream değişti veya ring overflow | Snapshot; eski cursor'u bırak |
 | `not_found` | Selector artık yok | Event/snapshot ile yeni hedef bul |

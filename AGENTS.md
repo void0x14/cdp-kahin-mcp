@@ -66,7 +66,7 @@ kahin_pattern_query(context="doggystyle")
 kahin_pattern_suggest(partial="navig")
 ```
 
-## Tool Listesi (110 adet)
+## Tool Listesi (119 adet)
 
 Juggler/Mirage yüzeyinin ajana dönük, uçtan uca sözleşmesi:
 [docs/juggler-ai-native.md](docs/juggler-ai-native.md)
@@ -126,7 +126,7 @@ Juggler/Mirage yüzeyinin ajana dönük, uçtan uca sözleşmesi:
 | `kahin_pattern_forget` | Pattern sil |
 | `kahin_pattern_stats` | Pattern istatistikleri |
 
-### MIRAGE — Juggler Native (78) — Camoufox varsayılandır; Shadow'dan gerektiğinde otomatik yükseltilir
+### MIRAGE — Juggler Native (87) — Camoufox varsayılandır; Shadow'dan gerektiğinde otomatik yükseltilir
 
 #### DOM Stream (5) — gerçek MutationObserver + Juggler binding
 | Tool | Ne işe yarar? |
@@ -152,6 +152,18 @@ Juggler/Mirage yüzeyinin ajana dönük, uçtan uca sözleşmesi:
 | `kahin_mirage_get_html` | Elementin outerHTML'ini al |
 | `kahin_mirage_wait_selector` | Seçici görünene kadar bekle (timeout) |
 | `kahin_mirage_get_value` | Input elementinin değerini al |
+
+#### Reliability (9) — locator, assertion, verified input ve route araçları
+| Tool | Ne işe yarar? |
+|------|---------------|
+| `kahin_mirage_expect` | Web-first assertion'ı retry ile doğrular |
+| `kahin_mirage_check` / `kahin_mirage_uncheck` | Checkbox/radio durumunu değiştirir ve doğrular |
+| `kahin_mirage_select_option` | Gerçek `<select>` option'ını seçer ve doğrular |
+| `kahin_mirage_dblclick` | Gerçek çift tıklama gönderir |
+| `kahin_mirage_drag` | Bounded mouse adımlarıyla drag-and-drop yapar |
+| `kahin_mirage_wait_for_text` | Sayfa metni görünene kadar bekler |
+| `kahin_mirage_wait_for_timeout` | Bounded millisecond bekleme yapar |
+| `kahin_mirage_route` | Glob/regex ile tek sonraki isteği abort/continue/fulfill eder |
 
 #### Input (7)
 | Tool | Ne işe yarar? |

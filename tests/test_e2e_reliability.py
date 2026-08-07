@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 import time
 from collections.abc import AsyncGenerator
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
 from urllib.parse import quote
 
@@ -20,7 +22,7 @@ import pytest
 from pytest_asyncio import fixture as async_fixture
 
 from kahin.the_twins import mirage as mirage_mod
-from kahin.tools import pilot, pilot_mirage, reliability_mirage, trainman_mirage
+from kahin.tools import dejavu_mirage, pilot, pilot_mirage, reliability_mirage, trainman_mirage
 
 
 def _real_available() -> bool:
@@ -59,6 +61,38 @@ async def mirage_tools() -> AsyncGenerator[None, None]:
         yield
     finally:
         await pilot.browser_stop()
+
+
+class _RouteHandler(BaseHTTPRequestHandler):
+    def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
+        if self.path.endswith("/form"):
+            body = (
+                b"<html><body><button id='load'>load</button><script>"
+                b"window.loadPage=()=>fetch('/page.html').then(r=>r.text()).then(t=>document.body.dataset.payload=t);"
+                b"</script></body></html>"
+            )
+        else:
+            body = b"<html><body>origin</body></html>"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, _format: str, *args: Any) -> None:
+        del args
+
+
+@async_fixture
+async def http_server() -> AsyncGenerator[str, None]:
+    server = HTTPServer(("127.0.0.1", 0), _RouteHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}/page.html"
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 async def _navigate(url: str) -> None:
@@ -206,3 +240,37 @@ async def test_drag_and_wait_helpers(mirage_tools: None) -> None:
     started = time.monotonic()
     waited = _loads(await reliability_mirage.mirage_wait_for_timeout(ms=150))
     assert waited.get("waited_ms") == 150 and time.monotonic() - started >= 0.12, waited
+
+
+@pytest.mark.asyncio
+async def test_route_abort_matches_pattern(mirage_tools: None, http_server: str) -> None:
+    await pilot.navigate(url=http_server.replace("/page.html", "/form"))
+    intercepted = _loads(await dejavu_mirage.mirage_intercept_requests())
+    assert not intercepted.get("error"), intercepted
+    route_task = asyncio.create_task(reliability_mirage.mirage_route("*/page.html", action="abort", wait_ms=8_000))
+    await pilot.evaluate(expression="window.loadPage(); true")
+    route = _loads(await asyncio.wait_for(route_task, timeout=8.0))
+    assert route.get("matched") is True, route
+    assert route.get("action") == "abort", route
+    assert "/page.html" in route.get("url", ""), route
+
+
+@pytest.mark.asyncio
+async def test_route_fulfill_inline_body(mirage_tools: None, http_server: str) -> None:
+    await pilot.navigate(url=http_server.replace("/page.html", "/form"))
+    intercepted = _loads(await dejavu_mirage.mirage_intercept_requests())
+    assert not intercepted.get("error"), intercepted
+    route_task = asyncio.create_task(reliability_mirage.mirage_route(
+        "*/page.html",
+        action="fulfill",
+        body="MOCKED",
+        status=200,
+        headers={"X-Kahin": "route"},
+        wait_ms=8_000,
+    ))
+    await pilot.evaluate(expression="window.loadPage(); true")
+    route = _loads(await asyncio.wait_for(route_task, timeout=8.0))
+    assert route.get("matched") is True, route
+    await reliability_mirage.mirage_wait_for_timeout(ms=300)
+    content = _loads(await pilot_mirage.mirage_page_content())
+    assert "MOCKED" in str(content.get("html", "")), content

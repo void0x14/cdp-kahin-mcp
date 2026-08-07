@@ -3,6 +3,12 @@
 ## Unreleased
 
 ### Eklenen
+- `kahin_mirage_expect` / `kahin_mirage_check` / `kahin_mirage_uncheck` /
+  `kahin_mirage_select_option` / `kahin_mirage_dblclick` / `kahin_mirage_drag` /
+  `kahin_mirage_wait_for_text` / `kahin_mirage_wait_for_timeout` /
+  `kahin_mirage_route` eklendi: retry'li web-first assertion, doğrulamalı
+  checkbox/radio/select eylemleri, gerçek çift tıklama, sınırlı drag-and-drop,
+  metin/süre bekleme ve tek sonraki istek için abort/continue/fulfill route.
 - `kahin_mirage_wait_selector` artık `state=attached|visible|enabled`
   (varsayılan `visible`) destekler; timeout yanıtı `code:"timeout"` ve son
   `reason` ile döner.

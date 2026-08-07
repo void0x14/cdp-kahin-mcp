@@ -318,6 +318,13 @@ class Mirage(BrowserEngine):
         self._dom_binding_installed = False
         self._dom_init_script_installed = False
         self._dom_signal = asyncio.Event()
+        # Network interception is surfaced by Network.requestWillBeSent with
+        # params.isIntercepted=true in this Juggler build. Keep a bounded,
+        # engine-local queue so a route decision cannot consume another tab's
+        # request from the global diagnostic buffer.
+        self._network_events: deque[dict[str, Any]] = deque(maxlen=2_000)
+        self._network_signal = asyncio.Event()
+        self._network_routed_ids: set[str] = set()
 
     def _reset_capture_state(self, *, wake_waiters: bool) -> None:
         """Drop capture/chooser state that belongs to the old browser.
@@ -335,12 +342,16 @@ class Mirage(BrowserEngine):
         self._screencast_session_id = None
         self._screencast_starting = False
         self._screencast_starting_session_id = None
+        self._network_events.clear()
+        self._network_routed_ids.clear()
         if wake_waiters:
             self._chooser_event.set()
             self._screencast_event.set()
+            self._network_signal.set()
         else:
             self._chooser_event.clear()
             self._screencast_event.clear()
+            self._network_signal.clear()
 
     async def start(self, headless: bool = True, port: int = 0, **kwargs: Any) -> EngineContext:
         del port  # Juggler pipe: no port.
@@ -356,6 +367,9 @@ class Mirage(BrowserEngine):
         self._dom_binding_installed = False
         self._dom_init_script_installed = False
         self._dom_signal.clear()
+        self._network_events.clear()
+        self._network_routed_ids.clear()
+        self._network_signal.clear()
         self._reset_capture_state(wake_waiters=False)
         # BrowserForge fingerprint -> CAMOU_CONFIG_* env (master plan §2.1.5).
         # Every start() draws a fresh identity; the sidecar passes our
@@ -447,6 +461,7 @@ class Mirage(BrowserEngine):
                         self._track_chooser(data)
                         self._track_screencast(data)
                         self._track_dom_binding(data)
+                        self._track_network_event(data)
                         evt = EventData(
                             method=data["method"],
                             params=data.get("params", {}),
@@ -553,6 +568,58 @@ class Mirage(BrowserEngine):
         params = data.get("params", {}) or {}
         if params.get("name") == DOM_STREAM_BINDING_NAME:
             self._dom_signal.set()
+
+    def _track_network_event(self, data: dict[str, Any]) -> None:
+        """Buffer bounded Network events for one-shot route decisions.
+
+        The sidecar schema deliberately has no ``requestIntercepted`` event;
+        interception is marked on ``Network.requestWillBeSent``. The raw
+        params are retained so the native continuation helpers receive the
+        exact request/session identifiers emitted by the browser.
+        """
+        method = data.get("method")
+        params = data.get("params")
+        if not isinstance(method, str) or not method.startswith("Network.") or not isinstance(params, dict):
+            return
+        self._network_events.append({
+            "method": method,
+            "params": params,
+            "session_id": data.get("sessionId"),
+        })
+        self._network_signal.set()
+
+    async def wait_for_intercepted(
+        self, predicate: Callable[[dict[str, Any]], bool], timeout: float,
+    ) -> dict[str, Any] | None:
+        """Wait for the next intercepted Network event matching predicate."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(0.0, timeout)
+        while True:
+            events = list(self._network_events)
+            for event in events:
+                if event.get("method") != "Network.requestWillBeSent":
+                    continue
+                params = event.get("params") or {}
+                request_id = params.get("requestId")
+                if not isinstance(request_id, str) or request_id in self._network_routed_ids:
+                    continue
+                if params.get("isIntercepted") is True and predicate(event):
+                    self._network_routed_ids.add(request_id)
+                    # Keep the dedupe set in step with the bounded deque:
+                    # once the window is full, older events are stale anyway.
+                    if len(self._network_routed_ids) > self._network_events.maxlen:
+                        self._network_events.clear()
+                        self._network_routed_ids.clear()
+                    return event
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return None
+            try:
+                await asyncio.wait_for(self._network_signal.wait(), timeout=min(remaining, 0.25))
+            except asyncio.TimeoutError:
+                pass
+            finally:
+                self._network_signal.clear()
 
     def _track_chooser(self, data: dict[str, Any]) -> None:
         """Record Page.fileChooserOpened (file input clicked while

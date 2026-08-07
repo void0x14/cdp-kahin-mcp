@@ -7,6 +7,9 @@ shared locator, actionability, and retrying assertion primitives.
 from __future__ import annotations
 
 import asyncio
+import base64
+import fnmatch
+import re
 from typing import Any, Callable
 
 import orjson
@@ -26,7 +29,7 @@ from kahin.expect import (
     visible,
 )
 from kahin.locators import selector_js
-from kahin.tools._common import _DW, _RO, _RW, _healer_ref
+from kahin.tools._common import _DW, _RO, _RW, _healer_ref, _mirage_engine
 from kahin.tools.pilot_mirage import (
     _MAX_INPUT_TEXT_LENGTH,
     _MAX_SELECTOR_LENGTH,
@@ -468,3 +471,131 @@ async def mirage_wait_for_timeout(ms: int = 1000) -> str:
         await asyncio.sleep(ms / 1000.0)
     return orjson.dumps({"waited_ms": ms}, option=orjson.OPT_INDENT_2).decode()
 
+
+_ROUTE_PATTERN_MAX = 8_192
+_ROUTE_WAIT_MAX = 60_000.0
+
+
+def _route_matcher(pattern: str) -> Callable[[str], bool]:
+    if pattern.startswith("re:"):
+        try:
+            compiled = re.compile(pattern[3:])
+        except re.error as exc:
+            raise ValueError(f"invalid regex pattern: {exc}") from exc
+        return lambda url: bool(compiled.search(url or ""))
+    return lambda url: fnmatch.fnmatchcase(url or "", pattern)
+
+
+@mcp.tool(name="kahin_mirage_route", annotations=_RW)
+async def mirage_route(
+    pattern: str,
+    action: str = "abort",
+    method: str | None = None,
+    body: str | None = None,
+    status: int = 200,
+    headers: dict[str, str] | None = None,
+    content_type: str = "text/plain",
+    wait_ms: float = 10_000.0,
+    frame_id: str | None = None,
+) -> str:
+    """Apply one abort/continue/fulfill decision to the next matching request."""
+    pattern_value, error = _text_arg("" if pattern is None else pattern, tool="kahin_mirage_route", field="pattern", maximum=_ROUTE_PATTERN_MAX)
+    if error:
+        return error
+    assert pattern_value is not None
+    if not pattern_value:
+        return _json_error("kahin_mirage_route", "pattern must not be empty", "invalid_argument", field="pattern")
+    if action not in {"abort", "continue", "fulfill"}:
+        return _json_error("kahin_mirage_route", "action must be abort|continue|fulfill", "invalid_argument", field="action", received=action)
+    if action == "fulfill" and not isinstance(body, str):
+        return _json_error("kahin_mirage_route", "fulfill requires a body string", "invalid_argument", field="body")
+    if isinstance(status, bool) or not isinstance(status, int) or not 100 <= status <= 599:
+        return _json_error("kahin_mirage_route", "status must be an integer in 100..599", "invalid_argument", field="status")
+    if headers is not None and (not isinstance(headers, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in headers.items())):
+        return _json_error("kahin_mirage_route", "headers must be an object of string values", "invalid_argument", field="headers")
+    if method is not None and (not isinstance(method, str) or any(char.isspace() for char in method)):
+        return _json_error("kahin_mirage_route", "method must be a non-whitespace string", "invalid_argument", field="method")
+    checked_content_type, error = _text_arg(content_type, tool="kahin_mirage_route", field="content_type", maximum=256)
+    if error:
+        return error
+    wait_value = _bounded_float(wait_ms, minimum=0.0, maximum=_ROUTE_WAIT_MAX, default=10_000.0) / 1000.0
+    try:
+        matcher = _route_matcher(pattern_value)
+    except ValueError as exc:
+        return _json_error("kahin_mirage_route", str(exc), "invalid_argument", field="pattern")
+    async with _healer_ref.safe("kahin_mirage_route", pattern=pattern_value[:80], action=action, wait_ms=wait_value * 1000, frame_id=frame_id):
+        session_id, capture_error = await _capture_page_session("kahin_mirage_route")
+        if capture_error:
+            return capture_error
+        assert session_id is not None
+        engine = _mirage_engine()
+        # The route is one-shot but self-sufficient: make sure the page pauses
+        # requests before waiting, so a caller does not need a separate
+        # mirage_intercept_requests() first (Faz 1 Task 11 Step 4).
+        try:
+            await engine.call("Network.setRequestInterception", {"enabled": True}, session_id=session_id)
+        except Exception as exc:  # noqa: BLE001 - public tool returns JSON
+            return _json_error(
+                "kahin_mirage_route",
+                f"could not enable request interception: {exc}",
+                "route_interception_failed",
+            )
+
+        def matches(event: dict[str, Any]) -> bool:
+            if event.get("session_id") not in {None, session_id}:
+                return False
+            params = event.get("params") or {}
+            request = params.get("request") or {}
+            url = params.get("url") or request.get("url")
+            request_method = params.get("method") or request.get("method")
+            return matcher(str(url or "")) and (method is None or str(request_method or "").upper() == method.upper())
+
+        event = await engine.wait_for_intercepted(matches, wait_value)
+        if event is None:
+            return orjson.dumps({"matched": False, "code": "timeout", "timeout": wait_value * 1000, "pattern": pattern_value}, option=orjson.OPT_INDENT_2).decode()
+        params = event.get("params") or {}
+        request = params.get("request") or {}
+        request_id = params.get("requestId")
+        url = params.get("url") or request.get("url") or ""
+        owner_session = event.get("session_id") or session_id
+        if not isinstance(request_id, str) or not request_id:
+            return _json_error("kahin_mirage_route", "intercepted event has no requestId", "invalid_engine_response")
+        call_params: dict[str, Any] = {"requestId": request_id}
+        try:
+            if action == "abort":
+                await engine.call(
+                    "Network.abortInterceptedRequest",
+                    {"requestId": request_id, "errorCode": "NS_ERROR_ABORT"},
+                    session_id=owner_session,
+                )
+            elif action == "continue":
+                if method is not None:
+                    call_params["method"] = method
+                await engine.call("Network.resumeInterceptedRequest", call_params, session_id=owner_session)
+            else:
+                response_headers = [{"name": "Content-Type", "value": checked_content_type or "text/plain"}]
+                response_headers.extend({"name": name, "value": value} for name, value in (headers or {}).items())
+                fulfill_params = {
+                    "requestId": request_id,
+                    "status": status,
+                    "statusText": "OK" if status < 400 else "Kahin route",
+                    "headers": response_headers,
+                    "base64body": base64.b64encode((body or "").encode("utf-8")).decode("ascii"),
+                }
+                await engine.call("Network.fulfillInterceptedRequest", fulfill_params, session_id=owner_session)
+        except Exception as exc:  # noqa: BLE001 - public tool returns JSON
+            return orjson.dumps({
+                "matched": True,
+                "requestId": request_id,
+                "url": url,
+                "action": action,
+                "error": f"{type(exc).__name__}: {exc}",
+                "code": "route_action_failed",
+            }, option=orjson.OPT_INDENT_2).decode()
+        return orjson.dumps({
+            "matched": True,
+            "url": url,
+            "requestId": request_id,
+            "action": action,
+            "method": request.get("method") or params.get("method"),
+        }, option=orjson.OPT_INDENT_2).decode()
