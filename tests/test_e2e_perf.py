@@ -163,13 +163,19 @@ async def test_engine_stats_live_monotonic() -> None:
         assert first["engine"] == "mirage"
         assert first["uptime_s"] > 0.0
         assert first["tool_calls"] >= 1
+        # The healer tracker is process-global and top_slow is capped at 10
+        # entries ranked by average duration, so a specific fast tool (e.g.
+        # engine_health) is not guaranteed to appear in a full-suite run.
+        # What is guaranteed: non-empty, shape-valid rollup entries carrying
+        # real recorded durations (the recording itself is proven by the
+        # tool_calls assertion above).
         entries = {t["tool"]: t for t in first["top_slow"]}
-        assert "kahin_engine_health" in entries
-        entry = entries["kahin_engine_health"]
-        assert entry["count"] >= 1
-        assert entry["avg_ms"] >= 0.0
-        # avg_ms rounds to 1 decimal and max_ms to 3; allow rounding slack.
-        assert entry["max_ms"] + 0.1 >= entry["avg_ms"]
+        assert entries
+        for entry in entries.values():
+            assert entry["count"] >= 1
+            assert entry["avg_ms"] >= 0.0
+            # avg_ms rounds to 1 decimal and max_ms to 3; allow rounding slack.
+            assert entry["max_ms"] + 0.1 >= entry["avg_ms"]
         await asyncio.sleep(0.05)
         second = _loads(await engine_mod.engine_stats())
         # Uptime only moves forward (monotonic clock), and it tracks real
