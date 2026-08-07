@@ -52,13 +52,15 @@ def test_server_initialize_and_list_tools() -> None:
     # Faz 1 reliability: +8 expect/check/select/dblclick/drag/wait tools = 118.
     # Task 11 route adds one native network tool = 119.
     # Faz 2 Task 2: +1 agent-native snapshot tool = 120.
-    assert len(tools) == 120
+    # Faz 2 Task 3: +1 fill_form tool = 121.
+    assert len(tools) == 121
     assert "kahin_mirage_dom_start" in tool_names
     assert "kahin_mirage_dom_snapshot" in tool_names
     assert "kahin_mirage_dom_events" in tool_names
     assert "kahin_mirage_dom_action" in tool_names
     assert "kahin_mirage_dom_stop" in tool_names
     assert "kahin_mirage_snapshot" in tool_names
+    assert "kahin_mirage_fill_form" in tool_names
     for name in [
         "kahin_mirage_query",
         "kahin_mirage_click",

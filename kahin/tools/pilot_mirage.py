@@ -521,11 +521,13 @@ async def mirage_query_all(selector: str, limit: int = 100, frame_id: str | None
 
 
 @mcp.tool(name="kahin_mirage_click", annotations=_DW)
-async def mirage_click(selector: str, timeout: float = 10.0, frame_id: str | None = None) -> str:
+async def mirage_click(selector: str, timeout: float = 10.0, return_snapshot: bool = False, frame_id: str | None = None) -> str:
     """Mirage: click an element by locator (css=/text=/role=/xpath=, >> chain).
     Waits for actionability (visible, enabled, stable, unobscured) up to
     ``timeout`` seconds, then dispatches real mousedown+mouseup at the element
-    center. frame_id: target an iframe (kahin_mirage_frame_tree); main frame
+    center. ``return_snapshot`` appends a fresh ``kahin_mirage_snapshot`` to
+    the result so the agent sees the post-action DOM without an extra round
+    trip. frame_id: target an iframe (kahin_mirage_frame_tree); main frame
     default."""
     selector_value, error = _text_arg(
         selector, tool="kahin_mirage_click", field="selector", maximum=_MAX_SELECTOR_LENGTH,
@@ -559,13 +561,17 @@ async def mirage_click(selector: str, timeout: float = 10.0, frame_id: str | Non
             "clicked": selector_value, "x": x, "y": y, "waited": True,
             "mousedown": down, "mouseup": up,
         }
+        if return_snapshot:
+            from kahin.tools.agent_mirage import mirage_snapshot  # noqa: PLC0415
+            result["snapshot"] = orjson.loads(await mirage_snapshot(max_tokens=1500, frame_id=frame_id))
         return orjson.dumps(result, option=orjson.OPT_INDENT_2).decode()
 
 
 @mcp.tool(name="kahin_mirage_type", annotations=_RW)
-async def mirage_type(selector: str, text: str, frame_id: str | None = None) -> str:
+async def mirage_type(selector: str, text: str, return_snapshot: bool = False, frame_id: str | None = None) -> str:
     """Mirage: focus an element and type text via Page.insertText (Juggler's
-    real text-insertion method). frame_id: target an iframe
+    real text-insertion method). ``return_snapshot`` appends a fresh
+    ``kahin_mirage_snapshot`` to the result. frame_id: target an iframe
     (kahin_mirage_frame_tree); main frame default."""
     selector_value, error = _text_arg(
         selector, tool="kahin_mirage_type", field="selector", maximum=_MAX_SELECTOR_LENGTH,
@@ -653,16 +659,17 @@ async def mirage_type(selector: str, text: str, frame_id: str | None = None) -> 
                 "kahin_mirage_type", "browser did not change the editable element", "input_not_changed",
                 selector=selector_value,
             )
-        return orjson.dumps(
-            {
-                "typed": len(text_value),
-                "selector": selector_value,
-                "changed": bool(verified.get("changed")),
-                "valueLength": verified.get("afterLength"),
-                "result": native_value,
-            },
-            option=orjson.OPT_INDENT_2,
-        ).decode()
+        payload = {
+            "typed": len(text_value),
+            "selector": selector_value,
+            "changed": bool(verified.get("changed")),
+            "valueLength": verified.get("afterLength"),
+            "result": native_value,
+        }
+        if return_snapshot:
+            from kahin.tools.agent_mirage import mirage_snapshot  # noqa: PLC0415
+            payload["snapshot"] = orjson.loads(await mirage_snapshot(max_tokens=1500, frame_id=frame_id))
+        return orjson.dumps(payload, option=orjson.OPT_INDENT_2).decode()
 
 
 @mcp.tool(name="kahin_mirage_get_text", annotations=_RO)

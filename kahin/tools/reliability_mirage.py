@@ -275,25 +275,39 @@ async def _session_tool(tool: str, selector: str, timeout: float, frame_id: str 
 
 
 @mcp.tool(name="kahin_mirage_check", annotations=_RW)
-async def mirage_check(selector: str, timeout: float = 10.0, frame_id: str | None = None) -> str:
-    """Check a checkbox or radio input and verify its final state."""
+async def mirage_check(selector: str, timeout: float = 10.0, return_snapshot: bool = False, frame_id: str | None = None) -> str:
+    """Check a checkbox or radio input and verify its final state.
+    ``return_snapshot`` appends a fresh ``kahin_mirage_snapshot`` to the result."""
     selector_value, error, session_id, timeout_value = await _session_tool("kahin_mirage_check", selector, timeout, frame_id)
     if error:
         return error
     assert selector_value is not None and session_id is not None
     async with _healer_ref.safe("kahin_mirage_check", selector=selector_value[:80], timeout=timeout_value, frame_id=frame_id):
-        return orjson.dumps(await _check_flow("kahin_mirage_check", selector_value, True, timeout=timeout_value, frame_id=frame_id, session_id=session_id), option=orjson.OPT_INDENT_2).decode()
+        payload = await _check_flow("kahin_mirage_check", selector_value, True, timeout=timeout_value, frame_id=frame_id, session_id=session_id)
+        if not isinstance(payload, dict) or payload.get("error"):
+            return orjson.dumps(payload, option=orjson.OPT_INDENT_2).decode()
+        if return_snapshot:
+            from kahin.tools.agent_mirage import mirage_snapshot  # noqa: PLC0415
+            payload["snapshot"] = orjson.loads(await mirage_snapshot(max_tokens=1500, frame_id=frame_id))
+        return orjson.dumps(payload, option=orjson.OPT_INDENT_2).decode()
 
 
 @mcp.tool(name="kahin_mirage_uncheck", annotations=_RW)
-async def mirage_uncheck(selector: str, timeout: float = 10.0, frame_id: str | None = None) -> str:
-    """Uncheck a checkbox and verify its final state."""
+async def mirage_uncheck(selector: str, timeout: float = 10.0, return_snapshot: bool = False, frame_id: str | None = None) -> str:
+    """Uncheck a checkbox and verify its final state.
+    ``return_snapshot`` appends a fresh ``kahin_mirage_snapshot`` to the result."""
     selector_value, error, session_id, timeout_value = await _session_tool("kahin_mirage_uncheck", selector, timeout, frame_id)
     if error:
         return error
     assert selector_value is not None and session_id is not None
     async with _healer_ref.safe("kahin_mirage_uncheck", selector=selector_value[:80], timeout=timeout_value, frame_id=frame_id):
-        return orjson.dumps(await _check_flow("kahin_mirage_uncheck", selector_value, False, timeout=timeout_value, frame_id=frame_id, session_id=session_id), option=orjson.OPT_INDENT_2).decode()
+        payload = await _check_flow("kahin_mirage_uncheck", selector_value, False, timeout=timeout_value, frame_id=frame_id, session_id=session_id)
+        if not isinstance(payload, dict) or payload.get("error"):
+            return orjson.dumps(payload, option=orjson.OPT_INDENT_2).decode()
+        if return_snapshot:
+            from kahin.tools.agent_mirage import mirage_snapshot  # noqa: PLC0415
+            payload["snapshot"] = orjson.loads(await mirage_snapshot(max_tokens=1500, frame_id=frame_id))
+        return orjson.dumps(payload, option=orjson.OPT_INDENT_2).decode()
 
 
 @mcp.tool(name="kahin_mirage_select_option", annotations=_RW)
@@ -303,9 +317,11 @@ async def mirage_select_option(
     label: str | None = None,
     index: int | None = None,
     timeout: float = 10.0,
+    return_snapshot: bool = False,
     frame_id: str | None = None,
 ) -> str:
-    """Select an option by value, exact visible label, or zero-based index."""
+    """Select an option by value, exact visible label, or zero-based index.
+    ``return_snapshot`` appends a fresh ``kahin_mirage_snapshot`` to the result."""
     selector_value, error = _text_arg(selector, tool="kahin_mirage_select_option", field="selector", maximum=_MAX_SELECTOR_LENGTH)
     if error:
         return error
@@ -353,12 +369,17 @@ async def mirage_select_option(
         if parsed.get("code"):
             code = str(parsed["code"])
             return _json_error("kahin_mirage_select_option", code, code, selector=selector_value, wanted=parsed.get("wanted"))
-        return orjson.dumps({"selected": parsed.get("selected"), "label": parsed.get("label"), "selector": selector_value}, option=orjson.OPT_INDENT_2).decode()
+        payload = {"selected": parsed.get("selected"), "label": parsed.get("label"), "selector": selector_value}
+        if return_snapshot:
+            from kahin.tools.agent_mirage import mirage_snapshot  # noqa: PLC0415
+            payload["snapshot"] = orjson.loads(await mirage_snapshot(max_tokens=1500, frame_id=frame_id))
+        return orjson.dumps(payload, option=orjson.OPT_INDENT_2).decode()
 
 
 @mcp.tool(name="kahin_mirage_dblclick", annotations=_DW)
-async def mirage_dblclick(selector: str, timeout: float = 10.0, frame_id: str | None = None) -> str:
-    """Double-click a live, actionable element with real mouse events."""
+async def mirage_dblclick(selector: str, timeout: float = 10.0, return_snapshot: bool = False, frame_id: str | None = None) -> str:
+    """Double-click a live, actionable element with real mouse events.
+    ``return_snapshot`` appends a fresh ``kahin_mirage_snapshot`` to the result."""
     selector_value, error, session_id, timeout_value = await _session_tool("kahin_mirage_dblclick", selector, timeout, frame_id)
     if error:
         return error
@@ -381,12 +402,17 @@ async def mirage_dblclick(selector: str, timeout: float = 10.0, frame_id: str | 
             up = await _dispatch_mouse("mouseup", x, y, button=0, buttons=0, click_count=click_count, session_id=session_id)
             if _is_error_response(up):
                 return up
-        return orjson.dumps({"dblclicked": selector_value, "x": x, "y": y}, option=orjson.OPT_INDENT_2).decode()
+        payload = {"dblclicked": selector_value, "x": x, "y": y}
+        if return_snapshot:
+            from kahin.tools.agent_mirage import mirage_snapshot  # noqa: PLC0415
+            payload["snapshot"] = orjson.loads(await mirage_snapshot(max_tokens=1500, frame_id=frame_id))
+        return orjson.dumps(payload, option=orjson.OPT_INDENT_2).decode()
 
 
 @mcp.tool(name="kahin_mirage_drag", annotations=_DW)
-async def mirage_drag(selector_from: str, selector_to: str, timeout: float = 10.0, steps: int = 10, frame_id: str | None = None) -> str:
-    """Drag from one actionable element to another with bounded mouse steps."""
+async def mirage_drag(selector_from: str, selector_to: str, timeout: float = 10.0, steps: int = 10, return_snapshot: bool = False, frame_id: str | None = None) -> str:
+    """Drag from one actionable element to another with bounded mouse steps.
+    ``return_snapshot`` appends a fresh ``kahin_mirage_snapshot`` to the result."""
     source, error = _text_arg(selector_from, tool="kahin_mirage_drag", field="selector_from", maximum=_MAX_SELECTOR_LENGTH)
     if error:
         return error
@@ -430,7 +456,11 @@ async def mirage_drag(selector_from: str, selector_to: str, timeout: float = 10.
         up = await _dispatch_mouse("mouseup", last_x, last_y, button=0, buttons=0, session_id=session_id)
         if _is_error_response(up):
             return up
-        return orjson.dumps({"dragged": source, "to": target, "steps": steps_value, "x": last_x, "y": last_y}, option=orjson.OPT_INDENT_2).decode()
+        payload = {"dragged": source, "to": target, "steps": steps_value, "x": last_x, "y": last_y}
+        if return_snapshot:
+            from kahin.tools.agent_mirage import mirage_snapshot  # noqa: PLC0415
+            payload["snapshot"] = orjson.loads(await mirage_snapshot(max_tokens=1500, frame_id=frame_id))
+        return orjson.dumps(payload, option=orjson.OPT_INDENT_2).decode()
 
 
 @mcp.tool(name="kahin_mirage_wait_for_text", annotations=_RO)

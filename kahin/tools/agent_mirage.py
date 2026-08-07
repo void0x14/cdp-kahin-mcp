@@ -1,10 +1,11 @@
-"""agent_mirage.py — Agent-native observation tools (Faz 2, Task 2).
+"""agent_mirage.py — Agent-native observation tools (Faz 2, Tasks 2-3).
 
 ``kahin_mirage_snapshot`` wraps the live DOM snapshot (nodeId-carrying tree)
 into the compact ref-carrying line format agents act on, with explicit token
 accounting. Every emitted ref is a live DOM nodeId valid for
 ``kahin_mirage_dom_action`` until the document/frame lifecycle ends; after a
 navigation or reset the agent must request a fresh snapshot before acting.
+``kahin_mirage_fill_form`` types several live fields by ref in one call.
 """
 
 from __future__ import annotations
@@ -15,20 +16,93 @@ import orjson
 
 from kahin._mcp import mcp
 from kahin.agent_snapshot import format_snapshot
-from kahin.tools._common import _RO, _healer_ref
-from kahin.tools.dom_stream_mirage import mirage_dom_snapshot
+from kahin.tools._common import _RO, _RW, _healer_ref
+from kahin.tools.dom_stream_mirage import mirage_dom_action, mirage_dom_snapshot
 from kahin.tools.pilot_mirage import (
     _MAX_SELECTOR_LENGTH,
+    _MAX_WAIT_TIMEOUT,
+    _bounded_float,
     _bounded_int,
     _json_error,
     _text_arg,
 )
 
 _MAX_TOKEN_BUDGET = 100_000
+_FILL_FIELDS_MAX = 100
 
 
 def _loads(text: str) -> Any:
     return orjson.loads(text)
+
+
+@mcp.tool(name="kahin_mirage_fill_form", annotations=_RW)
+async def mirage_fill_form(
+    fields: list[dict[str, Any]],
+    timeout: float = 10.0,
+    frame_id: str | None = None,
+) -> str:
+    """Mirage: fill several live fields in one call.
+
+    ``fields`` is a list of ``{ref, text}`` objects; each ``ref`` must be a
+    live nodeId from ``kahin_mirage_snapshot``/``kahin_mirage_dom_snapshot``.
+    Every field is typed through ``kahin_mirage_dom_action(action="type")`` so
+    no stale selector is ever trusted. Returns ``{filled, results[]}`` where
+    each result is the corresponding dom_action payload; a field that went
+    stale returns ``requiresSnapshot: true`` and never pretends the form
+    completed.
+    """
+    if not isinstance(fields, list) or not fields or len(fields) > _FILL_FIELDS_MAX:
+        return _json_error(
+            "kahin_mirage_fill_form",
+            f"fields must be a list of 1..{_FILL_FIELDS_MAX} items",
+            "invalid_argument",
+            field="fields",
+        )
+    timeout_value = _bounded_float(timeout, minimum=0.0, maximum=_MAX_WAIT_TIMEOUT, default=10.0)
+    async with _healer_ref.safe(
+        "kahin_mirage_fill_form", count=len(fields), timeout=timeout_value, frame_id=frame_id,
+    ):
+        results: list[dict[str, Any]] = []
+        for field in fields:
+            if not isinstance(field, dict):
+                return _json_error(
+                    "kahin_mirage_fill_form",
+                    "each field must be an object {ref, text}",
+                    "invalid_argument",
+                )
+            ref = field.get("ref")
+            text = field.get("text")
+            if not isinstance(ref, str) or not isinstance(text, str):
+                return _json_error(
+                    "kahin_mirage_fill_form",
+                    "each field needs a string ref and a string text",
+                    "invalid_argument",
+                )
+            outcome = _loads(await mirage_dom_action(node_id=ref, action="type", text=text, frame_id=frame_id))
+            results.append(outcome)
+            if not isinstance(outcome, dict):
+                return _json_error(
+                    "kahin_mirage_fill_form",
+                    "a field action returned an invalid payload",
+                    "invalid_engine_response",
+                    filled=len(results) - 1,
+                )
+            if outcome.get("requiresSnapshot"):
+                return orjson.dumps({
+                    "error": "a field went stale mid-form",
+                    "code": "stale_node",
+                    "requiresSnapshot": True,
+                    "filled": len(results) - 1,
+                    "results": results,
+                }, option=orjson.OPT_INDENT_2).decode()
+            if outcome.get("error"):
+                return _json_error(
+                    "kahin_mirage_fill_form",
+                    str(outcome["error"]),
+                    str(outcome.get("code") or "tool_error"),
+                    filled=len(results) - 1,
+                )
+        return orjson.dumps({"filled": len(results), "results": results}, option=orjson.OPT_INDENT_2).decode()
 
 
 @mcp.tool(name="kahin_mirage_snapshot", annotations=_RO)

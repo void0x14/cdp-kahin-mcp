@@ -153,6 +153,45 @@ async def test_snapshot_refs_and_token_budget(mirage_tools: None) -> None:
 
 
 @pytest.mark.asyncio
+async def test_fill_form_by_refs(mirage_tools: None) -> None:
+    await _navigate(_doc(
+        "<html><body><input id='a' placeholder='Name'><input id='b' placeholder='Email'>"
+        "<button id='s'>Save</button></body></html>"
+    ))
+    snap = _loads(await agent_mirage.mirage_snapshot(max_tokens=800))
+    refs: dict[str, str] = {}
+    for line in snap["lines"]:
+        if "Name" in line:
+            refs["name"] = line.split("ref=")[1].split("]")[0]
+        if "Email" in line:
+            refs["email"] = line.split("ref=")[1].split("]")[0]
+    assert "name" in refs and "email" in refs, snap
+    result = _loads(await agent_mirage.mirage_fill_form(fields=[
+        {"ref": refs["name"], "text": "Ada"},
+        {"ref": refs["email"], "text": "ada@example.com"},
+    ]))
+    assert result.get("filled") == 2, result
+    assert not result.get("error"), result
+    v1 = _loads(await pilot_mirage.mirage_get_value("#a"))
+    v2 = _loads(await pilot_mirage.mirage_get_value("#b"))
+    assert v1 == "Ada" and v2 == "ada@example.com", (v1, v2)
+
+
+@pytest.mark.asyncio
+async def test_click_returns_snapshot_when_requested(mirage_tools: None) -> None:
+    await _navigate(_doc(
+        "<html><body><button id='b'>Toggle</button><div id='o'>off</div>"
+        "<script>document.getElementById('b').addEventListener('click', () => { "
+        "document.getElementById('o').textContent = 'on'; });</script></body></html>"
+    ))
+    result = _loads(await pilot_mirage.mirage_click("#b", timeout=5.0, return_snapshot=True))
+    assert not result.get("error"), result
+    assert result.get("snapshot", {}).get("lines"), result
+    joined = "\n".join(result["snapshot"]["lines"])
+    assert "on" in joined or "Toggle" in joined, joined
+
+
+@pytest.mark.asyncio
 async def test_wait_selector_text_engine_and_state(mirage_tools: None) -> None:
     await _navigate(_doc(
         "<html><body><button style='display:none' id='b1'>Hidden</button>"
