@@ -19,11 +19,16 @@
 //!
 //! All latencies in ms (measured in microseconds). Exit 0 only when every
 //! section ran; any failure prints PERF-FAIL and exits 1.
+//!
+//! Usage: perf <camoufox-bin> [profile-dir] [--sidecar <kahin-sidecar-binary>]
+//!   --sidecar is required for the Faz 4 concurrency probe, which drives
+//!   the real sidecar over its JSONL stdio protocol (see concurrent.zig).
 
 const std = @import("std");
 const linux = std.os.linux;
 
 const driver = @import("driver");
+const concurrent = @import("concurrent.zig");
 
 const eval_samples: usize = 200;
 const eval_warmup: usize = 10;
@@ -71,12 +76,30 @@ const Stats = struct {
 
 fn run(args: std.process.Init.Minimal) !void {
     const argv = args.args.vector;
-    if (argv.len < 2) {
-        std.debug.print("usage: perf <camoufox-bin> [profile-dir]\n", .{});
+    var sidecar_path: ?[]const u8 = null;
+    var pos_args: [2]?[]const u8 = .{ null, null };
+    var pos_idx: usize = 0;
+    var arg_idx: usize = 1;
+    while (arg_idx < argv.len) : (arg_idx += 1) {
+        const arg = std.mem.sliceTo(argv[arg_idx], 0);
+        if (std.mem.eql(u8, arg, "--sidecar")) {
+            arg_idx += 1;
+            if (arg_idx >= argv.len) return error.MissingSidecarArg;
+            sidecar_path = std.mem.sliceTo(argv[arg_idx], 0);
+        } else if (arg.len > 0 and arg[0] == '-') {
+            return error.UnknownFlag;
+        } else {
+            if (pos_idx >= 2) return error.TooManyArgs;
+            pos_args[pos_idx] = arg;
+            pos_idx += 1;
+        }
+    }
+    if (pos_args[0] == null) {
+        std.debug.print("usage: perf <camoufox-bin> [profile-dir] [--sidecar <kahin-sidecar-binary>]\n", .{});
         return error.MissingArgs;
     }
-    const exe = std.mem.sliceTo(argv[1], 0);
-    const profile = if (argv.len >= 3) std.mem.sliceTo(argv[2], 0) else null;
+    const exe = pos_args[0].?;
+    const profile = pos_args[1];
 
     var gpa_state = std.heap.DebugAllocator(.{}).init;
     defer _ = gpa_state.deinit();
@@ -94,7 +117,7 @@ fn run(args: std.process.Init.Minimal) !void {
     var i: usize = 0;
     while (i < cold_start_samples) : (i += 1) {
         const t0 = nowUs();
-        var drv = try driver.Driver.start(a, exe, profile, false);
+        var drv = try driver.Driver.start(a, exe, profile, false, false);
         const t1 = nowUs();
         try cold_lats.append(a, t1 - t0);
         if (i == 0) {
@@ -256,6 +279,14 @@ fn run(args: std.process.Init.Minimal) !void {
             a.free(ctxs[c]);
             a.free(tgts[c]);
         }
+    }
+
+    // ---- Runtime.evaluate concurrency (N=20, real sidecar path) ----------
+    if (sidecar_path) |sp| {
+        try concurrent.runProbe(a, sp, exe);
+    } else {
+        std.debug.print("concurrency probe skipped: --sidecar <kahin-sidecar-binary> required\n", .{});
+        return error.MissingSidecar;
     }
 
     // ---- clean shutdown ----------------------------------------------------

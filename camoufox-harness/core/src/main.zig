@@ -59,7 +59,7 @@ fn run(args: std.process.Init.Minimal) !void {
     const a = arena_state.allocator();
 
     // Start + Browser.enable handshake.
-    var d = try driver.Driver.start(a, exe, profile, true);
+    var d = try driver.Driver.start(a, exe, profile, true, false);
     defer d.deinit();
     std.debug.print("Browser.enable OK\n", .{});
 
@@ -302,7 +302,7 @@ fn run(args: std.process.Init.Minimal) !void {
 
     // ---- Faz 6: health-check (pipe gone -> instance dead) ----------------
     // A second instance, spawned directly through the process manager.
-    const inst = try pm.Instance.spawn(a, exe, null, true);
+    const inst = try pm.Instance.spawn(a, exe, null, true, true);
     defer inst.deinit(a);
     if (inst.health() != .healthy) return error.HealthCheckFailed;
     std.debug.print("health-check: instance healthy right after spawn (pid {d})\n", .{inst.child.pid});
@@ -334,7 +334,7 @@ fn run(args: std.process.Init.Minimal) !void {
     // A driver whose browser is SIGKILLed externally must surface a CLEAN
     // error on the next command (no hang), and a fresh instance must be
     // obtainable afterwards.
-    const inst2 = try pm.Instance.spawn(a, exe, null, true);
+    const inst2 = try pm.Instance.spawn(a, exe, null, true, true);
     var d2 = driver.Driver.init(a, inst2.child.read_fd, inst2.child.write_fd, false);
     d2.child = inst2.child;
     d2.instance = inst2;
@@ -372,7 +372,7 @@ fn run(args: std.process.Init.Minimal) !void {
     }
     d2.deinit();
 
-    const inst3 = try pm.Instance.spawn(a, exe, null, true);
+    const inst3 = try pm.Instance.spawn(a, exe, null, true, true);
     defer inst3.deinit(a);
     if (inst3.health() != .healthy) return error.HealthCheckFailed;
     std.debug.print("SMOKE PASS: new instance obtainable after crash (pid {d})\n", .{inst3.child.pid});
