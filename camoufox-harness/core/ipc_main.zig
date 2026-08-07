@@ -58,6 +58,10 @@ const max_sink_bytes: usize = 8 * 1024 * 1024;
 var line_buf: std.array_list.Aligned(u8, null) = .empty;
 /// Set by Browser.close; the sidecar shuts down with the browser.
 var running: bool = true;
+/// Set when stdin hit clean EOF (read 0). The sidecar keeps servicing
+/// in-flight requests after EOF (the perf probe pipelines its batch and
+/// closes stdin) and exits once none remain.
+var stdin_eof: bool = false;
 /// Raw events the driver's pump dispatched while a call was in flight,
 /// appended \x00-framed by the event sink (non-allocating call path) and
 /// flushed upward by flushSinkEvents once the call completes. Without this
@@ -67,6 +71,62 @@ var sink_buf: std.array_list.Aligned(u8, null) = .empty;
 var sink_dropped_events: usize = 0;
 /// targetId of the page the caller last created; page-scoped commands run on it.
 var current_target: ?[]u8 = null;
+
+// ---- Faz 4 Task 2: async request registry ------------------------------
+
+/// Cap on requests in flight. Bounds the browser pipe's write pressure
+/// (each wire request is a few hundred bytes; 128 stays far below the 64 KiB
+/// pipe capacity, so writes never block) and the pending map size.
+const max_inflight: usize = 128;
+
+const TaskKind = enum {
+    passthrough,
+    evaluate,
+    navigate,
+    new_page,
+    screenshot,
+    close,
+};
+
+/// The flow a task is currently driving. `none` = staging (screenshot
+/// waiting for the main frame) or an immediately-failed task.
+const Flow = union(enum) {
+    none,
+    wire: *driver_mod.WireCall,
+    eval: *driver_mod.Driver.EvalFlow,
+    nav: *driver_mod.Driver.NavFlow,
+    page: *driver_mod.Driver.NewPageFlow,
+};
+
+/// One client request from the moment it is read off stdin until its
+/// response is written. Heap-owned; freed on completion, on failure, or at
+/// shutdown. All pointer fields are owned copies (the per-turn parse arena
+/// is reset every loop iteration).
+const Task = struct {
+    ipc_id: u32,
+    kind: TaskKind,
+    deadline_ms: i64,
+    flow: Flow = .none,
+    /// Page target/session for response formatting and staging (owned).
+    target_id: ?[]u8 = null,
+    session_id: ?[]u8 = null,
+    /// Screenshot staging.
+    shot_stage: u8 = 0, // 0 = ensure main frame, 1 = measure, 2 = shoot
+    full_page: bool = false,
+    mime: []const u8 = "image/png",
+    quality: ?i64 = null,
+    omit_dsf: ?bool = null,
+    clip_payload: ?[]u8 = null, // owned; user-supplied clip JSON
+    size: ?driver_mod.Size = null,
+    done: bool = false,
+    failed: bool = false,
+    err_msg: []const u8 = "",
+
+    fn fail(self: *Task, message: []const u8) void {
+        self.failed = true;
+        self.err_msg = message;
+    }
+};
 
 pub fn main(args: std.process.Init.Minimal) u8 {
     run(args) catch |err| {
@@ -96,6 +156,7 @@ fn cleanupRun(d: *driver_mod.Driver, a: Allocator) !void {
     sink_dropped_events = 0;
     line_buf.deinit(a);
     line_buf = .empty;
+    stdin_eof = false;
     running = false;
 
     if (stop_error) |err| return err;
@@ -131,6 +192,7 @@ fn run(args: std.process.Init.Minimal) !void {
         std.fmt.bufPrint(&prof_buf, "/tmp/kahin-sidecar-{d}", .{linux.getpid()}) catch "kahin-sidecar-default";
 
     ignoreSigpipe();
+    setNonblockingStdin();
     running = true;
 
     var gpa = std.heap.DebugAllocator(.{}).init;
@@ -165,19 +227,32 @@ fn run(args: std.process.Init.Minimal) !void {
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
 
+    // Faz 4 Task 2: every request becomes a Task; the loop owns polling on
+    // both fds and advances all flows once per turn. send() is never
+    // called here, so stdin processing never blocks on a browser reply and
+    // multiple wire calls are in flight at once.
+    var inflight: std.array_list.Aligned(*Task, null) = .empty;
+    defer {
+        for (inflight.items) |t| freeTask(&d, a, t);
+        inflight.deinit(a);
+    }
+
     var pollfds = [_]linux.pollfd{
         .{ .fd = 0, .events = linux.POLL.IN, .revents = 0 },
         .{ .fd = d.reader.fd, .events = linux.POLL.IN, .revents = 0 },
     };
+    var browser_gone = false;
     while (running) {
         _ = arena.reset(.retain_capacity);
-        while (true) {
-            const rc = linux.poll(&pollfds, pollfds.len, -1); // block until stdin or browser speaks
-            switch (linux.errno(rc)) {
-                .SUCCESS => break,
-                .INTR => continue,
-                else => return error.PollFailed,
-            }
+
+        // Poll timeout = the nearest task deadline/settle, so timeouts fire
+        // even when both fds are silent; -1 blocks (no tasks in flight).
+        const poll_ms = nextPollTimeoutMs(&inflight);
+        const prc = linux.poll(&pollfds, pollfds.len, poll_ms);
+        switch (linux.errno(prc)) {
+            .SUCCESS => {},
+            .INTR => continue,
+            else => return error.PollFailed,
         }
 
         // Responses/events accumulate in `out`; flushed once per iteration
@@ -185,34 +260,93 @@ fn run(args: std.process.Init.Minimal) !void {
         var out: std.array_list.Aligned(u8, null) = .empty;
         defer out.deinit(a);
 
-        // Idle events flow upward continuously (oracle collectors are async).
+        // 1. Browser bytes: read + replay into driver state. dispatchRaw
+        // resolves in-flight wire calls by id and tees events into the sink.
         if (pollfds[1].revents & (linux.POLL.IN | linux.POLL.HUP | linux.POLL.ERR | linux.POLL.NVAL) != 0) {
-            try drainEvents(&d, a, 0, &out);
-            // Browser fd went away (HUP) or errored: the browser is gone —
-            // the sidecar shuts down WITH the browser (defer d.stop() reaps).
+            readChunk(&d, a) catch |err| switch (err) {
+                error.ReadFailed => browser_gone = true, // pipe unusable
+                else => return err,
+            };
             if (pollfds[1].revents & (linux.POLL.HUP | linux.POLL.ERR | linux.POLL.NVAL) != 0) {
-                running = false;
+                browser_gone = true;
             }
         }
-        if (pollfds[0].revents & (linux.POLL.IN | linux.POLL.HUP | linux.POLL.NVAL) != 0) {
-            const maybe_line = readLine(a) catch |err| {
-                running = false;
-                return err;
-            };
-            const line = maybe_line orelse {
-                running = false; // client stdin EOF -> take the browser down
-                break;
-            };
-            defer a.free(line);
+        try forwardFromBuf(&d);
 
-            try drainEvents(&d, a, null, &out);
-            try processRequest(&d, a, arena.allocator(), line, &out);
-            try drainEvents(&d, a, 2, &out);
+        // 2. Stdin: start as many requests as the in-flight cap allows.
+        // Poll said readable, so the reads here never block (O_NONBLOCK).
+        if (!stdin_eof and inflight.items.len < max_inflight and
+            (pollfds[0].revents & (linux.POLL.IN | linux.POLL.HUP | linux.POLL.NVAL)) != 0)
+        {
+            var live = true;
+            while (live and !stdin_eof and inflight.items.len < max_inflight) {
+                const line = nextStdinLine(a) catch |err| {
+                    running = false;
+                    return err;
+                };
+                if (line) |l| {
+                    defer a.free(l);
+                    try startTask(&d, a, arena.allocator(), l, &out, &inflight);
+                } else {
+                    live = false;
+                }
+            }
         }
+
+        // 3. Service in-flight tasks. Browser death fails everything with
+        // the same per-kind messages the synchronous handlers produced.
+        if (browser_gone) {
+            for (inflight.items) |t| {
+                try respondErr(a, &out, t.ipc_id, -32000, failureMessage(t));
+                freeTask(&d, a, t);
+            }
+            inflight.clearRetainingCapacity();
+            running = false;
+        } else {
+            // Advance until no task makes progress: a stage transition
+            // (screenshot measure -> shoot) must drive its next wire call
+            // in the same turn, not after the next poll wakeup.
+            var progressed = true;
+            while (progressed) {
+                progressed = false;
+                var i: usize = 0;
+                while (i < inflight.items.len) {
+                    const t = inflight.items[i];
+                    const before = taskFingerprint(t);
+                    advanceTask(&d, t);
+                    if (t.done) {
+                        try formatTaskOk(&d, a, t, &out);
+                        freeTask(&d, a, t);
+                        _ = inflight.swapRemove(i);
+                        progressed = true;
+                        continue;
+                    }
+                    if (t.failed) {
+                        try respondErr(a, &out, t.ipc_id, -32000, t.err_msg);
+                        freeTask(&d, a, t);
+                        _ = inflight.swapRemove(i);
+                        progressed = true;
+                        continue;
+                    }
+                    if (taskFingerprint(t) != before) progressed = true;
+                    i += 1;
+                }
+            }
+        }
+
+        // 4. Emit events the driver dispatched this turn (sink path), keep
+        // the current-target bookkeeping fresh, then flush everything once.
+        try flushSinkEvents(a, &out);
+        refreshCurrentTarget(&d, a);
         writeAllStdout(out.items) catch |err| switch (err) {
             error.BrokenPipe => return, // client went away: shut down cleanly
             else => return err,
         };
+
+        // Stdin EOF with nothing left in flight: take the browser down
+        // (the perf probe closes stdin after its pipelined batch and
+        // expects the sidecar to drain, answer, and exit 0).
+        if (stdin_eof and inflight.items.len == 0) break;
     }
 
     // Surface a failed reap/kill to main() after all process-global buffers
@@ -223,9 +357,10 @@ fn run(args: std.process.Init.Minimal) !void {
     try cleanup_result;
 }
 
-/// Route one method-based request. Responses are appended to `out` (the
-/// caller flushes to stdout once per turn).
-fn processRequest(d: *driver_mod.Driver, a: Allocator, aa: Allocator, line: []const u8, out: *std.array_list.Aligned(u8, null)) !void {
+/// Route one method-based request. Sidecar-local methods (health, close,
+/// frame tree) answer synchronously; everything else becomes an in-flight
+/// Task whose response is produced by the main loop once its flow resolves.
+fn startTask(d: *driver_mod.Driver, a: Allocator, aa: Allocator, line: []const u8, out: *std.array_list.Aligned(u8, null), inflight: *std.array_list.Aligned(*Task, null)) !void {
     const parsed = std.json.parseFromSlice(std.json.Value, aa, line, .{}) catch {
         try respondErr(a, out, 0, -32700, "parse error");
         return;
@@ -278,27 +413,16 @@ fn processRequest(d: *driver_mod.Driver, a: Allocator, aa: Allocator, line: []co
     // === Sidecar-local / driver-specialized methods (no raw wire) ===
     if (std.mem.eql(u8, method, "Browser.health")) return handleHealth(d, a, out, id);
     if (std.mem.eql(u8, method, "Browser.close")) return handleClose(d, a, out, id);
-    if (std.mem.eql(u8, method, "Browser.newPage")) return handleNewPage(d, a, out, id, params);
-    if (std.mem.eql(u8, method, "Page.navigate")) return handleNavigate(d, a, out, id, params, session_id);
-    if (std.mem.eql(u8, method, "Page.captureScreenshot")) return handleScreenshot(d, a, out, id, params, session_id);
+    if (std.mem.eql(u8, method, "Browser.newPage")) return startNewPage(d, a, inflight, id, params);
+    if (std.mem.eql(u8, method, "Page.navigate")) return startNavigate(d, a, out, inflight, id, params, session_id);
+    if (std.mem.eql(u8, method, "Page.captureScreenshot")) return startScreenshot(d, a, out, inflight, id, params, session_id);
     if (std.mem.eql(u8, method, "Page.getFrameTree")) return handleFrameTree(d, a, out, id, session_id);
-    if (std.mem.eql(u8, method, "Runtime.evaluate")) return handleEvaluate(d, a, out, id, params, session_id);
+    if (std.mem.eql(u8, method, "Runtime.evaluate")) return startEvaluate(d, a, out, inflight, id, params, session_id);
 
     // === Default routing ===
     // Browser.* and unknown methods -> root session; page domains ->
     // request sessionId, else the current page, else -32600.
-    const target_session: ?[]const u8 = if (isPageDomain(method))
-        session_id orelse blk: {
-            const p = currentPage(d) orelse {
-                try respondErr(a, out, id, -32600, "no page session");
-                return;
-            };
-            break :blk p.session_id;
-        }
-    else
-        null;
-
-    return passthrough(d, a, out, id, target_session, method, params);
+    return startPassthrough(d, a, out, inflight, id, session_id, method, params);
 }
 
 /// Page-oriented Juggler method families: forwarded on the page session.
@@ -313,17 +437,30 @@ fn isPageDomain(method: []const u8) bool {
         std.mem.startsWith(u8, method, "Accessibility.");
 }
 
-/// Raw forward to the browser: the Juggler response (result OR its genuine
-/// error, e.g. -32601 "Method not found") is re-wrapped in the IPC envelope.
-fn passthrough(d: *driver_mod.Driver, a: Allocator, out: *std.array_list.Aligned(u8, null), id: u32, session_id: ?[]const u8, method: []const u8, params: std.json.Value) !void {
+/// Raw forward to the browser: one async wire call; the Juggler response
+/// (result OR its genuine error, e.g. -32601 "Method not found") is
+/// re-wrapped in the IPC envelope when the main loop resolves the task.
+fn startPassthrough(d: *driver_mod.Driver, a: Allocator, out: *std.array_list.Aligned(u8, null), inflight: *std.array_list.Aligned(*Task, null), id: u32, session_id: ?[]const u8, method: []const u8, params: std.json.Value) !void {
+    const target_session: ?[]const u8 = if (isPageDomain(method))
+        session_id orelse blk: {
+            const p = currentPage(d) orelse {
+                try respondErr(a, out, id, -32600, "no page session");
+                return;
+            };
+            break :blk p.session_id;
+        }
+    else
+        null;
+
     const params_json = try std.json.Stringify.valueAlloc(a, params, .{});
     defer a.free(params_json);
-    var resp = d.send(session_id, method, params_json, request_timeout_ms) catch {
+    const t = try allocTask(a, id, .passthrough);
+    t.flow = .{ .wire = d.sendAsync(target_session, method, params_json, request_timeout_ms) catch {
+        a.destroy(t);
         try respondErr(a, out, id, -32000, "Juggler call failed");
         return;
-    };
-    defer resp.deinit(a);
-    try respondFromRaw(a, out, id, resp.raw);
+    } };
+    try inflight.append(a, t);
 }
 
 // === Sidecar-local handlers ===
@@ -361,30 +498,14 @@ fn handleClose(d: *driver_mod.Driver, a: Allocator, out: *std.array_list.Aligned
     running = false;
 }
 
-/// Browser.newPage — create the page through the driver (registered on
-/// attachedToTarget), record it as the current target, optionally navigate.
-fn handleNewPage(d: *driver_mod.Driver, a: Allocator, out: *std.array_list.Aligned(u8, null), id: u32, params: std.json.Value) !void {
+/// Browser.newPage — async flow: wire call, attachedToTarget wait,
+/// optional navigate; the response records the page as the current target.
+fn startNewPage(d: *driver_mod.Driver, a: Allocator, inflight: *std.array_list.Aligned(*Task, null), id: u32, params: std.json.Value) !void {
     const ctx = getStringParam(params, "browserContextId");
     const url = getStringParam(params, "url");
-    const target_id = d.newPage(ctx, url, request_timeout_ms) catch |err| switch (err) {
-        error.WaitTimeout => {
-            try respondErr(a, out, id, -32000, "newPage timed out");
-            return;
-        },
-        error.TargetNotAttached => {
-            try respondErr(a, out, id, -32000, "new page never attached");
-            return;
-        },
-        else => {
-            try respondErr(a, out, id, -32000, "newPage failed");
-            return;
-        },
-    };
-    defer a.free(target_id);
-    try setCurrentTarget(a, target_id);
-    const json = try std.json.Stringify.valueAlloc(a, .{ .targetId = target_id }, .{});
-    defer a.free(json);
-    return respondOk(a, out, id, json);
+    const t = try allocTask(a, id, .new_page);
+    t.flow = .{ .page = try driver_mod.Driver.NewPageFlow.init(d, ctx, url, request_timeout_ms) };
+    try inflight.append(a, t);
 }
 
 // === Page / Runtime specialized handlers ===
@@ -396,9 +517,9 @@ fn resolvePageFor(d: *driver_mod.Driver, session_id: ?[]const u8) ?*driver_mod.P
     return currentPage(d);
 }
 
-/// Page.navigate — driver-managed navigation (lifecycle + load wait).
-/// Response carries the CDP-compatible {frameId, loaderId} shape.
-fn handleNavigate(d: *driver_mod.Driver, a: Allocator, out: *std.array_list.Aligned(u8, null), id: u32, params: std.json.Value, session_id: ?[]const u8) !void {
+/// Page.navigate — async NavFlow (lifecycle + load gate); the response
+/// carries the CDP-compatible {frameId, loaderId} shape.
+fn startNavigate(d: *driver_mod.Driver, a: Allocator, out: *std.array_list.Aligned(u8, null), inflight: *std.array_list.Aligned(*Task, null), id: u32, params: std.json.Value, session_id: ?[]const u8) !void {
     const url = getStringParam(params, "url") orelse {
         try respondErr(a, out, id, -32602, "missing url");
         return;
@@ -407,43 +528,24 @@ fn handleNavigate(d: *driver_mod.Driver, a: Allocator, out: *std.array_list.Alig
         try respondErr(a, out, id, -32600, "no page session");
         return;
     };
-    const nav_id = d.navigate(p.target_id, url, request_timeout_ms) catch |err| switch (err) {
-        error.NavigationAborted => {
-            try respondErr(a, out, id, -32000, d.last_abort_text orelse "navigation aborted");
-            return;
-        },
-        else => {
-            try respondErr(a, out, id, -32000, "navigate failed");
-            return;
-        },
-    };
-    defer a.free(nav_id);
-    const frame_id = p.main_frame_id orelse "";
-    const json = try std.json.Stringify.valueAlloc(a, .{ .frameId = frame_id, .loaderId = nav_id }, .{});
-    defer a.free(json);
-    return respondOk(a, out, id, json);
+    const t = try allocTask(a, id, .navigate);
+    t.flow = .{ .nav = try driver_mod.Driver.NavFlow.init(d, p.target_id, p.session_id, url, request_timeout_ms) };
+    t.target_id = try a.dupe(u8, p.target_id);
+    try inflight.append(a, t);
 }
 
 /// Page.screenshot translation: {format, fullPage, clip} ->
 /// {mimeType, clip, quality, omitDeviceScaleFactor}. Juggler has no
 /// fullPage flag, so CDP fullPage=true becomes a full-content clip; the
-/// default clip is the page's REAL viewport size (measured via evaluate,
-/// driver.pageClipSize), not a hardcoded guess.
-fn handleScreenshot(d: *driver_mod.Driver, a: Allocator, out: *std.array_list.Aligned(u8, null), id: u32, params: std.json.Value, session_id: ?[]const u8) !void {
-    const p = resolvePageFor(d, session_id) orelse {
-        try respondErr(a, out, id, -32600, "no page session");
-        return;
-    };
+/// default clip is the page's REAL viewport size (measured via an async
+/// evaluate, mirroring driver.pageClipSize), not a hardcoded guess. The
+/// shot itself is an async wire call.
+fn startScreenshot(d: *driver_mod.Driver, a: Allocator, out: *std.array_list.Aligned(u8, null), inflight: *std.array_list.Aligned(*Task, null), id: u32, params: std.json.Value, session_id: ?[]const u8) !void {
     const format = getStringParam(params, "format") orelse "png";
     if (!std.mem.eql(u8, format, "png") and !std.mem.eql(u8, format, "jpeg")) {
         try respondErr(a, out, id, -32602, "format must be png or jpeg");
         return;
     }
-    const mime = if (std.mem.eql(u8, format, "jpeg")) "image/jpeg" else "image/png";
-    const quality = getIntParam(params, "quality");
-    const omit = getBoolParam(params, "omitDeviceScaleFactor");
-    const full_page = getBoolParam(params, "fullPage") orelse false;
-    const Clip = struct { x: f64, y: f64, width: f64, height: f64 };
     const clip_override = if (params == .object) params.object.get("clip") else null;
     if (clip_override) |clip| {
         if (validateScreenshotClip(clip)) |message| {
@@ -451,33 +553,21 @@ fn handleScreenshot(d: *driver_mod.Driver, a: Allocator, out: *std.array_list.Al
             return;
         }
     }
-    const payload = if (clip_override != null and clip_override.? == .object)
-        try std.json.Stringify.valueAlloc(
-            a,
-            .{ .mimeType = mime, .clip = clip_override.?, .quality = quality, .omitDeviceScaleFactor = omit },
-            .{ .emit_null_optional_fields = false },
-        )
-    else blk: {
-        const size = d.pageClipSize(p.target_id, full_page, request_timeout_ms) catch |err| switch (err) {
-            error.WaitTimeout => {
-                try respondErr(a, out, id, -32000, "measuring page size timed out");
-                return;
-            },
-            else => {
-                try respondErr(a, out, id, -32000, "could not measure page size");
-                return;
-            },
-        };
-        break :blk try std.json.Stringify.valueAlloc(
-            a,
-            .{ .mimeType = mime, .clip = Clip{ .x = 0, .y = 0, .width = size.w, .height = size.h }, .quality = quality, .omitDeviceScaleFactor = omit },
-            .{ .emit_null_optional_fields = false },
-        );
+    const p = resolvePageFor(d, session_id) orelse {
+        try respondErr(a, out, id, -32600, "no page session");
+        return;
     };
-    defer a.free(payload);
-    var resp = try d.send(p.session_id, "Page.screenshot", payload, request_timeout_ms);
-    defer resp.deinit(a);
-    return respondFromRaw(a, out, id, resp.raw);
+    const t = try allocTask(a, id, .screenshot);
+    t.mime = if (std.mem.eql(u8, format, "jpeg")) "image/jpeg" else "image/png";
+    t.quality = getIntParam(params, "quality");
+    t.omit_dsf = getBoolParam(params, "omitDeviceScaleFactor");
+    t.full_page = getBoolParam(params, "fullPage") orelse false;
+    t.target_id = try a.dupe(u8, p.target_id);
+    t.session_id = try a.dupe(u8, p.session_id);
+    if (clip_override) |clip| {
+        t.clip_payload = try std.json.Stringify.valueAlloc(a, clip, .{});
+    }
+    try inflight.append(a, t);
 }
 
 /// Page.getFrameTree — CDP name; derived from driver frame state (Juggler
@@ -505,8 +595,10 @@ fn handleFrameTree(d: *driver_mod.Driver, a: Allocator, out: *std.array_list.Ali
     return respondOk(a, out, id, tree);
 }
 
-/// Runtime.evaluate — keeps the evaluateWithRetry context-race handling.
-fn handleEvaluate(d: *driver_mod.Driver, a: Allocator, out: *std.array_list.Aligned(u8, null), id: u32, params: std.json.Value, session_id: ?[]const u8) !void {
+/// Runtime.evaluate — async EvalFlow (context wait + one retry, mirroring
+/// the removed evaluateWithRetry); response formatting happens in
+/// formatTaskOk once the flow resolves.
+fn startEvaluate(d: *driver_mod.Driver, a: Allocator, out: *std.array_list.Aligned(u8, null), inflight: *std.array_list.Aligned(*Task, null), id: u32, params: std.json.Value, session_id: ?[]const u8) !void {
     const expr = getStringParam(params, "expression") orelse {
         try respondErr(a, out, id, -32602, "missing expression");
         return;
@@ -515,48 +607,276 @@ fn handleEvaluate(d: *driver_mod.Driver, a: Allocator, out: *std.array_list.Alig
         try respondErr(a, out, id, -32600, "no page session");
         return;
     };
-    var res = evaluateWithRetry(d, p.target_id, expr) catch |err| switch (err) {
-        error.NoExecutionContext => {
-            try respondErr(a, out, id, -32000, "no execution context");
-            return;
-        },
-        else => {
-            try respondErr(a, out, id, -32000, "evaluate failed");
-            return;
-        },
-    };
-    defer res.deinit(a);
-
-    if (res.exception_text) |et| {
-        const json = try std.json.Stringify.valueAlloc(
-            a,
-            .{
-                .result = .{ .type = "undefined" },
-                .exceptionDetails = .{ .text = et, .stack = res.exception_stack orelse "" },
-            },
-            .{ .emit_null_optional_fields = false },
-        );
-        defer a.free(json);
-        return respondOk(a, out, id, json);
-    }
-    const json = if (res.value_json.len == 0)
-        try a.dupe(u8, "{\"result\":{\"type\":\"undefined\"}}")
-    else
-        try std.fmt.allocPrint(a, "{{\"result\":{{\"type\":\"{s}\",\"value\":{s}}}}}", .{ jsonType(res.value_json), res.value_json });
-    defer a.free(json);
-    return respondOk(a, out, id, json);
+    const t = try allocTask(a, id, .evaluate);
+    t.flow = .{ .eval = try driver_mod.Driver.EvalFlow.init(d, p.target_id, p.session_id, expr, request_timeout_ms, 1) };
+    try inflight.append(a, t);
 }
 
-/// Context destroy/create events race evaluate on a navigating page; let
-/// pending events settle (pump), then retry once with a fresh context.
-fn evaluateWithRetry(d: *driver_mod.Driver, tid: []const u8, expr: []const u8) @TypeOf(d.evaluate(tid, expr, 0)) {
-    return d.evaluate(tid, expr, request_timeout_ms) catch |err| switch (err) {
-        error.JugglerError, error.WaitTimeout => blk: {
-            d.pump(100) catch {};
-            break :blk d.evaluate(tid, expr, request_timeout_ms);
+// === Async task servicing (Faz 4 Task 2) ===
+
+fn allocTask(a: Allocator, ipc_id: u32, kind: TaskKind) !*Task {
+    const t = try a.create(Task);
+    t.* = .{ .ipc_id = ipc_id, .kind = kind, .deadline_ms = nowMs() + request_timeout_ms };
+    return t;
+}
+
+/// Advance one task's flow one step. Called after the loop drained browser
+/// data, so resolved wire calls are visible.
+fn advanceTask(d: *driver_mod.Driver, t: *Task) void {
+    switch (t.kind) {
+        .passthrough => {
+            const call = t.flow.wire;
+            if (nowMs() >= call.deadline_ms) {
+                d.cancelWireCall(call);
+                t.flow = .none;
+                t.fail("Juggler call failed");
+                return;
+            }
+            if (call.done) t.done = true;
         },
-        else => return err,
+        .evaluate => {
+            const f = t.flow.eval;
+            f.poll();
+            if (f.done) {
+                t.done = true;
+            } else if (f.failed) {
+                t.err_msg = if (f.err == error.NoExecutionContext) "no execution context" else "evaluate failed";
+                t.failed = true;
+            }
+        },
+        .navigate => {
+            const f = t.flow.nav;
+            f.poll();
+            if (f.done) {
+                t.done = true;
+            } else if (f.failed) {
+                t.err_msg = if (f.err == error.NavigationAborted) (f.abort_text orelse "navigation aborted") else "navigate failed";
+                t.failed = true;
+            }
+        },
+        .new_page => {
+            const f = t.flow.page;
+            f.poll();
+            if (f.done) {
+                t.done = true;
+            } else if (f.failed) {
+                t.err_msg = if (f.err == error.WaitTimeout)
+                    "newPage timed out"
+                else if (f.err == error.TargetNotAttached)
+                    "new page never attached"
+                else
+                    "newPage failed";
+                t.failed = true;
+            }
+        },
+        .screenshot => advanceScreenshot(d, t),
+        .close => unreachable,
+    }
+    t.deadline_ms = taskDeadline(t);
+}
+
+/// Screenshot staging: ensure the main frame, measure the clip size via an
+/// async evaluate, then fire the Page.screenshot wire call.
+fn advanceScreenshot(d: *driver_mod.Driver, t: *Task) void {
+    switch (t.shot_stage) {
+        0 => {
+            const p = d.pages.get(t.target_id.?) orelse return t.fail("screenshot failed");
+            if (p.main_frame_id == null) return; // wait for the frame
+            if (t.clip_payload != null) {
+                t.shot_stage = 2;
+            } else {
+                const expr = if (t.full_page)
+                    "[document.documentElement.scrollWidth, document.documentElement.scrollHeight]"
+                else
+                    "[window.innerWidth, window.innerHeight]";
+                const f = driver_mod.Driver.EvalFlow.init(d, t.target_id.?, t.session_id.?, expr, request_timeout_ms, 0) catch return t.fail("could not measure page size");
+                t.flow = .{ .eval = f };
+                t.shot_stage = 1;
+            }
+        },
+        1 => {
+            const f = t.flow.eval;
+            f.poll();
+            if (f.failed) {
+                t.err_msg = if (f.err == error.WaitTimeout) "measuring page size timed out" else "could not measure page size";
+                t.failed = true;
+                return;
+            }
+            if (!f.done) return;
+            var res = f.takeResult() catch {
+                f.deinit();
+                t.flow = .none;
+                return t.fail("could not measure page size");
+            };
+            defer res.deinit(d.allocator);
+            const size = driver_mod.sizeFromJson(d.allocator, res.value_json) orelse {
+                f.deinit();
+                t.flow = .none;
+                return t.fail("could not measure page size");
+            };
+            f.deinit();
+            t.flow = .none;
+            t.size = size;
+            t.shot_stage = 2;
+        },
+        else => {
+            if (t.flow == .none) {
+                const p = d.by_session.get(t.session_id.?) orelse return t.fail("screenshot failed");
+                const payload = if (t.clip_payload) |cp|
+                    d.allocator.dupe(u8, cp) catch return t.fail("screenshot failed")
+                else blk: {
+                    const s = t.size.?;
+                    const Clip = struct { x: f64, y: f64, width: f64, height: f64 };
+                    break :blk std.json.Stringify.valueAlloc(
+                        d.allocator,
+                        .{ .mimeType = t.mime, .clip = Clip{ .x = 0, .y = 0, .width = s.w, .height = s.h }, .quality = t.quality, .omitDeviceScaleFactor = t.omit_dsf },
+                        .{ .emit_null_optional_fields = false },
+                    ) catch return t.fail("screenshot failed");
+                };
+                defer d.allocator.free(payload);
+                t.flow = .{ .wire = d.sendAsync(p.session_id, "Page.screenshot", payload, request_timeout_ms) catch return t.fail("screenshot failed") };
+                return;
+            }
+            const call = t.flow.wire;
+            if (nowMs() >= call.deadline_ms) {
+                d.cancelWireCall(call);
+                t.flow = .none;
+                return t.fail("screenshot failed");
+            }
+            if (call.done) t.done = true;
+        },
+    }
+}
+
+/// Write the success response for a completed task.
+fn formatTaskOk(d: *driver_mod.Driver, a: Allocator, t: *Task, out: *std.array_list.Aligned(u8, null)) !void {
+    switch (t.kind) {
+        .passthrough => {
+            const call = t.flow.wire;
+            return respondFromRaw(a, out, t.ipc_id, call.raw.?);
+        },
+        .evaluate => {
+            const f = t.flow.eval;
+            var res = try f.takeResult();
+            defer res.deinit(a);
+            if (res.exception_text) |et| {
+                const json = try std.json.Stringify.valueAlloc(
+                    a,
+                    .{
+                        .result = .{ .type = "undefined" },
+                        .exceptionDetails = .{ .text = et, .stack = res.exception_stack orelse "" },
+                    },
+                    .{ .emit_null_optional_fields = false },
+                );
+                defer a.free(json);
+                return respondOk(a, out, t.ipc_id, json);
+            }
+            const json = if (res.value_json.len == 0)
+                try a.dupe(u8, "{\"result\":{\"type\":\"undefined\"}}")
+            else
+                try std.fmt.allocPrint(a, "{{\"result\":{{\"type\":\"{s}\",\"value\":{s}}}}}", .{ jsonType(res.value_json), res.value_json });
+            defer a.free(json);
+            return respondOk(a, out, t.ipc_id, json);
+        },
+        .navigate => {
+            const f = t.flow.nav;
+            const nav_id = try f.takeNavId();
+            defer a.free(nav_id);
+            const frame_id: []const u8 = if (d.pages.get(t.target_id.?)) |p| (p.main_frame_id orelse "") else "";
+            const json = try std.json.Stringify.valueAlloc(a, .{ .frameId = frame_id, .loaderId = nav_id }, .{});
+            defer a.free(json);
+            return respondOk(a, out, t.ipc_id, json);
+        },
+        .new_page => {
+            const f = t.flow.page;
+            const target_id = try f.takeTargetId();
+            defer a.free(target_id);
+            try setCurrentTarget(a, target_id);
+            const json = try std.json.Stringify.valueAlloc(a, .{ .targetId = target_id }, .{});
+            defer a.free(json);
+            return respondOk(a, out, t.ipc_id, json);
+        },
+        .screenshot => {
+            const call = t.flow.wire;
+            return respondFromRaw(a, out, t.ipc_id, call.raw.?);
+        },
+        .close => unreachable,
+    }
+}
+
+/// Release a task: cancel its wire call / flows and free owned buffers.
+fn freeTask(d: *driver_mod.Driver, a: Allocator, t: *Task) void {
+    switch (t.flow) {
+        .none => {},
+        .wire => |c| d.cancelWireCall(c),
+        .eval => |f| f.deinit(),
+        .nav => |f| f.deinit(),
+        .page => |f| f.deinit(),
+    }
+    if (t.target_id) |x| a.free(x);
+    if (t.session_id) |x| a.free(x);
+    if (t.clip_payload) |x| a.free(x);
+    a.destroy(t);
+}
+
+/// The nearest deadline the loop must wake up for (wire deadlines, flow
+/// deadlines, evaluate retry settles).
+fn nextPollTimeoutMs(inflight: *std.array_list.Aligned(*Task, null)) i32 {
+    var best: ?i64 = null;
+    for (inflight.items) |t| {
+        var dl = taskDeadline(t);
+        if (t.flow == .eval) {
+            const settle = t.flow.eval.settle_until_ms;
+            if (settle != 0 and settle < dl) dl = settle;
+        }
+        if (best == null or dl < best.?) best = dl;
+    }
+    const now = nowMs();
+    if (best) |b| {
+        const rem = b - now;
+        if (rem <= 0) return 0;
+        if (rem > 2147483647) return 2147483647;
+        return @intCast(rem);
+    }
+    return -1; // block until fd activity
+}
+
+fn taskDeadline(t: *Task) i64 {
+    return switch (t.flow) {
+        .none => t.deadline_ms,
+        .wire => |c| c.deadline_ms,
+        .eval => |f| f.deadline_ms,
+        .nav => |f| f.deadline_ms,
+        .page => |f| f.deadline_ms,
     };
+}
+
+/// Progress fingerprint: which flow the task drives and (for screenshots)
+/// which stage, packed. The service loop re-advances while it changes, so
+/// a stage transition that can immediately send its wire call does so in
+/// the same turn instead of waiting for the next poll wakeup.
+fn taskFingerprint(t: *Task) u16 {
+    return (@as(u16, @intCast(@intFromEnum(std.meta.activeTag(t.flow)))) << 8) | t.shot_stage;
+}
+
+/// Per-kind -32000 message when the browser dies with tasks in flight
+/// (matches what each synchronous handler produced on a send failure).
+fn failureMessage(t: *Task) []const u8 {
+    return switch (t.kind) {
+        .passthrough => "Juggler call failed",
+        .evaluate => "evaluate failed",
+        .navigate => "navigate failed",
+        .new_page => "newPage failed",
+        .screenshot => "screenshot failed",
+        .close => "close failed",
+    };
+}
+
+/// Monotonic time in ms (raw syscall; std.time removed in 0.16).
+fn nowMs() i64 {
+    var ts: linux.timespec = undefined;
+    _ = linux.clock_gettime(linux.CLOCK.MONOTONIC, &ts);
+    return @as(i64, @intCast(ts.sec)) * std.time.ms_per_s + @divTrunc(@as(i64, @intCast(ts.nsec)), std.time.ns_per_ms);
 }
 
 // === Shared plumbing ===
@@ -635,30 +955,11 @@ fn respondErr(a: Allocator, out: *std.array_list.Aligned(u8, null), id: u32, cod
     try writeOut(a, out, line);
 }
 
-/// Idle event drain: pull buffered browser data off the fd, replay every
-/// complete message into the driver state (so the driver's
-/// session/frame/context state stays consistent) and flush the event sink
-/// upward. `poll_ms` > 0 also waits briefly for events arriving right
-/// after the previous response; 0 = nonblocking read (fd already readable).
-fn drainEvents(d: *driver_mod.Driver, a: Allocator, poll_ms: ?i32, out: *std.array_list.Aligned(u8, null)) !void {
-    if (poll_ms) |t| {
-        if (t > 0) {
-            var pfd = [_]linux.pollfd{.{ .fd = d.reader.fd, .events = linux.POLL.IN, .revents = 0 }};
-            while (true) {
-                const rc = linux.poll(&pfd, pfd.len, t);
-                switch (linux.errno(rc)) {
-                    .SUCCESS => break,
-                    .INTR => continue,
-                    else => return error.PollFailed,
-                }
-            }
-            if (pfd[0].revents & (linux.POLL.IN | linux.POLL.HUP | linux.POLL.ERR | linux.POLL.NVAL) != 0) {
-                try readChunk(d, a);
-            }
-        } else {
-            try readChunk(d, a); // fd already readable (EAGAIN when drained)
-        }
-    }
+/// One idle-drain step: read buffered browser data, replay complete
+/// messages into the driver state, flush the event sink upward. Shared by
+/// the main loop (browser-fd readable) and the router tests.
+fn drainIdle(d: *driver_mod.Driver, a: Allocator, out: *std.array_list.Aligned(u8, null)) !void {
+    try readChunk(d, a);
     try forwardFromBuf(d);
     try flushSinkEvents(a, out);
     refreshCurrentTarget(d, a);
@@ -868,8 +1169,12 @@ fn jsonType(v: []const u8) []const u8 {
 // === stdin/stdout plumbing ===
 
 /// Read one newline-terminated line from stdin (raw syscalls; no stdio
-/// buffering). Returns null on clean EOF.
-fn readLine(a: Allocator) !?[]u8 {
+/// buffering). Stdin is O_NONBLOCK, so this never blocks: buffered lines
+/// are returned first; only when the buffer holds no complete line does it
+/// perform one read (EAGAIN -> null). Clean EOF sets stdin_eof and returns
+/// null; a buffered tail without a newline is returned leniently as a final
+/// line (same as the old blocking readLine).
+fn nextStdinLine(a: Allocator) !?[]u8 {
     while (true) {
         if (std.mem.indexOfScalar(u8, line_buf.items, '\n')) |idx| {
             const line = try a.dupe(u8, line_buf.items[0..idx]);
@@ -886,6 +1191,7 @@ fn readLine(a: Allocator) !?[]u8 {
             .SUCCESS => {
                 const len: usize = @intCast(n);
                 if (len == 0) {
+                    stdin_eof = true;
                     if (line_buf.items.len > 0) {
                         const line = try a.dupe(u8, line_buf.items);
                         line_buf.clearRetainingCapacity();
@@ -895,9 +1201,21 @@ fn readLine(a: Allocator) !?[]u8 {
                 }
                 try line_buf.appendSlice(a, chunk[0..len]);
             },
-            .INTR => {},
+            .INTR => continue,
+            .AGAIN => return null, // no data right now (O_NONBLOCK)
             else => return error.ReadFailed,
         }
+    }
+}
+
+/// Put stdin into non-blocking mode so the main loop can drain every
+/// pipelined line without ever blocking on a partial read.
+fn setNonblockingStdin() void {
+    const flags = linux.fcntl(0, linux.F.GETFL, 0);
+    if (linux.errno(flags) == .SUCCESS) {
+        var oflags: linux.O = @bitCast(@as(u32, @intCast(flags)));
+        oflags.NONBLOCK = true;
+        _ = linux.fcntl(0, linux.F.SETFL, @as(usize, @intCast(@as(u32, @bitCast(oflags)))));
     }
 }
 
@@ -1044,13 +1362,65 @@ fn seedPage(d: *driver_mod.Driver, resp: [2]i32, target_id: []const u8, session_
     }
 }
 
-/// Run one request through processRequest, return the buffered response line.
+/// Run one request through the async pipeline (startTask + pump + advance
+/// until the response is produced). Test-only driver of the same state
+/// machine the main loop runs: responses are formatted by formatTaskOk,
+/// and the sink is deliberately NOT flushed (the sink tests flush it
+/// themselves).
 fn runRequest(d: *driver_mod.Driver, line: []const u8) ![]const u8 {
     var out: std.array_list.Aligned(u8, null) = .empty;
     defer out.deinit(testing.allocator);
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    try processRequest(d, testing.allocator, arena.allocator(), line, &out);
+    var inflight: std.array_list.Aligned(*Task, null) = .empty;
+    defer {
+        for (inflight.items) |t| freeTask(d, testing.allocator, t);
+        inflight.deinit(testing.allocator);
+    }
+    try startTask(d, testing.allocator, arena.allocator(), line, &out, &inflight);
+    const deadline = nowMs() + request_timeout_ms;
+    while (inflight.items.len > 0) {
+        if (nowMs() >= deadline) return error.WaitTimeout;
+        // Advance until no task makes progress: flows start their wire
+        // calls here (so the request is in the pipe before the pump below
+        // waits for the reply), and screenshot stage transitions drive
+        // their next wire call in the same pass.
+        var progressed = true;
+        while (progressed) {
+            progressed = false;
+            var i: usize = 0;
+            while (i < inflight.items.len) {
+                const t = inflight.items[i];
+                const before = taskFingerprint(t);
+                advanceTask(d, t);
+                if (t.done) {
+                    try formatTaskOk(d, testing.allocator, t, &out);
+                    freeTask(d, testing.allocator, t);
+                    _ = inflight.swapRemove(i);
+                    progressed = true;
+                    continue;
+                }
+                if (t.failed) {
+                    try respondErr(testing.allocator, &out, t.ipc_id, -32000, t.err_msg);
+                    freeTask(d, testing.allocator, t);
+                    _ = inflight.swapRemove(i);
+                    progressed = true;
+                    continue;
+                }
+                if (taskFingerprint(t) != before) progressed = true;
+                i += 1;
+            }
+        }
+        if (inflight.items.len == 0) break;
+        var rem = nextPollTimeoutMs(&inflight);
+        if (rem < 0) rem = 1000;
+        const overall = deadline - nowMs();
+        if (@as(i64, rem) > overall) rem = @intCast(@max(overall, 1));
+        d.pump(rem) catch |err| switch (err) {
+            error.WaitTimeout => {}, // flow still settling/waiting
+            else => return err,
+        };
+    }
     return testing.allocator.dupe(u8, out.items);
 }
 
@@ -1631,7 +2001,7 @@ test "router: idle events drain through the shared read buffer (drainEvents)" {
     );
     var out: std.array_list.Aligned(u8, null) = .empty;
     defer out.deinit(testing.allocator);
-    try drainEvents(&d, testing.allocator, 0, &out);
+    try drainIdle(&d, testing.allocator, &out);
     try testing.expectEqualStrings("{\"method\":\"Runtime.console\",\"params\":{\"type\":\"warning\",\"text\":\"w\"},\"sessionId\":\"s1\"}\n", out.items);
     // forwarded exactly once
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, out.items, "Runtime.console"));
@@ -1665,7 +2035,7 @@ test "router: detachedFromTarget clears a stale current_target" {
     );
     var out: std.array_list.Aligned(u8, null) = .empty;
     defer out.deinit(testing.allocator);
-    try drainEvents(&d, testing.allocator, 0, &out);
+    try drainIdle(&d, testing.allocator, &out);
     try testing.expect(current_target == null);
 
     // After the kill, a session-less Page call errors cleanly.

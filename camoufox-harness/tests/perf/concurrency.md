@@ -84,6 +84,53 @@ latency is dominated by the request/reply round trip through the sidecar
 (mean ≈ 3.7 – 5.7 ms; the browser-side evaluate itself is ≈ 0.3 ms per the
 direct-driver section of the same harness).
 
+## Task 2 results (non-blocking sidecar, `perf(sidecar)` commit)
+
+Same probe binary, same machine/browser, same pinned Zig 0.16.0. The
+sidecar main loop now owns polling on both fds; `send()` is replaced by
+`sendAsync` wire calls registered in a task registry, so the browser has
+all 20 evaluates in flight at once and stdin processing never blocks on a
+browser reply.
+
+### Full harness run (deliverable, `PERF PASS`)
+
+```
+=== Runtime.evaluate concurrency (N=20, real sidecar JSONL path) ===
+  data page: data:text/html,<h1>bench</h1>
+  serial wall:   28.56 ms  (n=20 min=0.67 mean=1.43 p50=0.81 p95=3.96 max=8.14)
+  parallel wall: 8.71 ms  (20 requests pipelined in one write, stdin closed after)
+  ratio serial/parallel: 3.281
+```
+
+vs. the Task 1 baseline: serial 74.78 ms -> 28.56 ms, parallel 56.89 ms ->
+8.71 ms (**6.5x drop in the parallel wall — the true in-flight signal**),
+ratio 1.314 -> **3.281** (plan gate: ratio > 1.5; parallel < 2/3 of serial).
+
+### Repeat runs (standalone probe, Task 2 binary)
+
+| run | serial wall | parallel wall | ratio |
+|---|---|---|---|
+| 1 | 28.82 ms | 10.99 ms | 2.622 |
+| 2 | 31.07 ms | 6.79 ms | 4.575 |
+| 3 | 23.54 ms | 5.75 ms | 4.092 |
+| 4 (full harness) | 28.56 ms | 8.71 ms | 3.281 |
+
+Task 2 range: ratio **2.62 – 4.58** — no overlap with the Task 1 baseline
+range (1.22 – 1.84). Per-request serial latency dropped with it (mean
+≈ 1.2 – 1.6 ms vs ≈ 3.7 – 5.7 ms): the per-request loop overhead is gone
+because the sidecar no longer round-trips through a blocking send per
+request.
+
+## Interpretation (Task 2)
+
+The batch is now genuinely concurrent server-side: the loop drains the
+pipelined stdin lines into 20 pending wire calls before any reply arrives,
+the browser processes them back-to-back, and the replies resolve their
+owners by id as they stream in. The batch-then-EOF probe constraint no
+longer reflects a sidecar limitation (the loop also drains pipelined input
+without EOF); the probe binary was deliberately left unchanged so the
+baseline comparison is byte-identical.
+
 ## Interpretation
 
 Today's sidecar processes requests strictly one at a time (blocking

@@ -52,11 +52,24 @@ pub const SendResult = struct {
     }
 };
 
-const Pending = struct {
+/// A wire request in flight (Faz 4 Task 2). Heap-owned by the caller; the
+/// router's pending map resolves it by id when the matching browser reply
+/// arrives. `raw` is an owned copy of the Juggler response on resolution.
+/// The same struct backs the synchronous `send` (registered + pumped by the
+/// caller) and the sidecar's non-blocking `sendAsync` (resolved by the main
+/// loop's drain).
+pub const WireCall = struct {
+    wire_id: u32,
+    deadline_ms: i64,
     done: bool = false,
     is_error: bool = false,
     raw: ?[]u8 = null,
 };
+
+/// Settle delay between evaluate retries (mirrors the removed
+/// evaluateWithRetry pump(100) grace so context create/destroy events land
+/// before the retry).
+const eval_retry_settle_ms: i64 = 100;
 
 const ContextInfo = struct {
     id: []u8,
@@ -69,7 +82,7 @@ const ContextInfo = struct {
 };
 
 /// Viewport / full-content size measured from the page itself (Faz 9).
-const Size = struct { w: f64, h: f64 };
+pub const Size = struct { w: f64, h: f64 };
 
 /// One frame of the frame registry (Faz 3): id is the map key, parent/url
 /// are owned copies. `parent_id == null` marks the main frame.
@@ -256,6 +269,10 @@ pub const Driver = struct {
 
     /// CDP-shaped call: send one request (optionally to a session), pump
     /// until the matching response. Returns an owned copy of the response.
+    /// Synchronous convenience over sendAsync: registers the wire call and
+    /// pumps until the reply (or deadline). Direct-driver consumers (perf
+    /// harness, smoke driver) keep this blocking form; the sidecar uses
+    /// sendAsync and drives the same pump state from its main loop.
     pub fn send(
         self: *Driver,
         session_id: ?[]const u8,
@@ -263,9 +280,37 @@ pub const Driver = struct {
         params_json: []const u8,
         timeout_ms: i32,
     ) !SendResult {
+        const call = try self.sendAsync(session_id, method, params_json, timeout_ms);
+        defer self.cancelWireCall(call);
+        while (!call.done) {
+            const rem = remainingMs(call.deadline_ms) orelse return error.WaitTimeout;
+            try self.pump(rem);
+        }
+        const raw = call.raw.?;
+        call.raw = null;
+        return .{ .is_error = call.is_error, .raw = raw };
+    }
+
+    /// Non-blocking wire call (Faz 4 Task 2): register a heap pending and
+    /// write the request, then return immediately. The caller polls
+    /// `call.done`/`call.deadline_ms` from its own event loop; dispatchRaw
+    /// resolves the call by id when the browser replies. The returned
+    /// pointer is owned by the caller and must be released with
+    /// cancelWireCall (which also pops the router entry and frees any
+    /// resolved raw, so late replies become .invalid and are dropped).
+    pub fn sendAsync(
+        self: *Driver,
+        session_id: ?[]const u8,
+        method: []const u8,
+        params_json: []const u8,
+        timeout_ms: i32,
+    ) !*WireCall {
         const id = self.router.nextId();
-        var pend = Pending{};
-        try self.router.registerPending(id, @ptrCast(&pend));
+        const call = try self.allocator.create(WireCall);
+        errdefer self.allocator.destroy(call);
+        call.* = .{ .wire_id = id, .deadline_ms = nowMs() + timeout_ms };
+
+        try self.router.registerPending(id, @ptrCast(call));
         errdefer _ = self.router.pending.fetchRemove(id);
 
         const req = try buildRequest(self.allocator, id, session_id, method, params_json);
@@ -276,13 +321,16 @@ pub const Driver = struct {
             error.BrokenPipe, error.WriteZero => return error.BrowserDead,
             else => return err,
         };
+        return call;
+    }
 
-        const deadline = nowMs() + timeout_ms;
-        while (!pend.done) {
-            const rem = remainingMs(deadline) orelse return error.WaitTimeout;
-            try self.pump(rem);
-        }
-        return .{ .is_error = pend.is_error, .raw = pend.raw.? };
+    /// Release an in-flight wire call: pop the router entry (a late reply
+    /// then resolves as .invalid and is dropped — same as the sync path's
+    /// timeout), free a resolved raw, destroy the call.
+    pub fn cancelWireCall(self: *Driver, call: *WireCall) void {
+        _ = self.router.pending.fetchRemove(call.wire_id);
+        if (call.raw) |raw| self.allocator.free(raw);
+        self.allocator.destroy(call);
     }
 
     /// Read + route one message. Responses resolve pending callers; events
@@ -305,10 +353,10 @@ pub const Driver = struct {
     pub fn dispatchRaw(self: *Driver, raw: []const u8) !void {
         switch (try self.router.dispatch(raw)) {
             .response => |resp| {
-                const pend: *Pending = @ptrCast(@alignCast(resp.context));
-                pend.done = true;
-                pend.is_error = resp.is_error;
-                if (pend.raw == null) pend.raw = try self.allocator.dupe(u8, resp.raw);
+                const call: *WireCall = @ptrCast(@alignCast(resp.context));
+                call.done = true;
+                call.is_error = resp.is_error;
+                if (call.raw == null) call.raw = try self.allocator.dupe(u8, resp.raw);
             },
             .event => |ev| {
                 if (self.verbose) std.debug.print("EVENT: {s} session={?s}\n", .{ ev.method, ev.session_id });
@@ -318,6 +366,357 @@ pub const Driver = struct {
             .invalid => {},
         }
     }
+
+    // ---- Faz 4 Task 2: non-blocking flows ------------------------------
+    //
+    // The sidecar's main loop owns polling; these flows are small state
+    // machines that the loop advances once per turn after draining browser
+    // data. Each poll() either makes progress (starts a wire call, absorbs
+    // a reply, fails) or returns pending. No threads, no locks: the
+    // router's id->WireCall map is the single rendezvous point, exactly as
+    // in the synchronous path.
+
+    /// Async Runtime.evaluate: wait for an execution context, fire the wire
+    /// call, parse the result; on JugglerError/WaitTimeout settle briefly
+    /// and retry once (mirrors the removed evaluateWithRetry).
+    pub const EvalFlow = struct {
+        driver: *Driver,
+        /// Owned copies; the page map may mutate while the flow waits.
+        session_id: []u8,
+        target_id: []u8,
+        expr: []u8,
+        timeout_ms: i32,
+        deadline_ms: i64,
+        call: ?*WireCall = null,
+        retry_left: u8 = 1,
+        settle_until_ms: i64 = 0,
+        done: bool = false,
+        failed: bool = false,
+        err: anyerror = error.UnknownTarget,
+        result: ?runtime.EvaluateResult = null,
+
+        /// `retry_left` 0 disables the settle-and-retry (the screenshot size
+        /// probe must not retry — the driver's synchronous evalSize never
+        /// did).
+        pub fn init(d: *Driver, target_id: []const u8, session_id: []const u8, expr: []const u8, timeout_ms: i32, retry_left: u8) !*EvalFlow {
+            const f = try d.allocator.create(EvalFlow);
+            errdefer d.allocator.destroy(f);
+            f.* = .{
+                .driver = d,
+                .session_id = try d.allocator.dupe(u8, session_id),
+                .target_id = try d.allocator.dupe(u8, target_id),
+                .expr = try d.allocator.dupe(u8, expr),
+                .timeout_ms = timeout_ms,
+                .deadline_ms = nowMs() + timeout_ms,
+                .retry_left = retry_left,
+            };
+            return f;
+        }
+
+        pub fn deinit(self: *EvalFlow) void {
+            const d = self.driver;
+            if (self.call) |c| d.cancelWireCall(c);
+            d.allocator.free(self.session_id);
+            d.allocator.free(self.target_id);
+            d.allocator.free(self.expr);
+            if (self.result) |*r| r.deinit(d.allocator);
+            d.allocator.destroy(self);
+        }
+
+        /// Advance the state machine. Call after the loop drained browser
+        /// data (dispatchRaw resolves the wire call).
+        pub fn poll(self: *EvalFlow) void {
+            const d = self.driver;
+            if (self.done or self.failed) return;
+
+            if (self.call) |call| {
+                if (!call.done) {
+                    if (nowMs() >= call.deadline_ms) {
+                        d.cancelWireCall(call);
+                        self.call = null;
+                        return self.failOrRetry(error.WaitTimeout);
+                    }
+                    return;
+                }
+                const raw = call.raw.?;
+                call.raw = null;
+                const is_error = call.is_error;
+                d.cancelWireCall(call);
+                self.call = null;
+                if (is_error) {
+                    d.allocator.free(raw);
+                    return self.failOrRetry(error.JugglerError);
+                }
+                const res = runtime.parseEvaluateResult(d.allocator, raw) catch {
+                    d.allocator.free(raw);
+                    return self.fail(error.InvalidResponse);
+                };
+                d.allocator.free(raw);
+                self.result = res;
+                self.done = true;
+                return;
+            }
+
+            // No wire call in flight: context wait, retry settle, or start.
+            if (nowMs() >= self.deadline_ms) return self.fail(error.WaitTimeout);
+            if (self.settle_until_ms != 0) {
+                if (nowMs() < self.settle_until_ms) return;
+                self.settle_until_ms = 0;
+            }
+            const p = d.pages.get(self.target_id) orelse return self.fail(error.UnknownTarget);
+            if (p.session_id.len == 0) return self.fail(error.TargetNotAttached);
+            const ctx = pickContext(p) orelse return; // wait for context events
+            const params = runtime.evaluateParams(d.allocator, ctx.id, self.expr, true) catch return self.fail(error.OutOfMemory);
+            defer d.allocator.free(params);
+            self.deadline_ms = nowMs() + self.timeout_ms;
+            self.call = d.sendAsync(p.session_id, runtime.method_evaluate, params, self.timeout_ms) catch |err| return self.fail(err);
+        }
+
+        fn failOrRetry(self: *EvalFlow, err: anyerror) void {
+            if (self.retry_left > 0) {
+                self.retry_left -= 1;
+                // Fresh window for the retry (the sync path re-issued
+                // evaluate with a full timeout).
+                self.deadline_ms = nowMs() + self.timeout_ms;
+                self.settle_until_ms = nowMs() + eval_retry_settle_ms;
+                return;
+            }
+            self.fail(err);
+        }
+
+        fn fail(self: *EvalFlow, err: anyerror) void {
+            self.failed = true;
+            self.err = err;
+        }
+
+        /// Owned EvaluateResult on success (moves out; flow then deinit-able).
+        pub fn takeResult(self: *EvalFlow) !runtime.EvaluateResult {
+            if (self.result) |r| {
+                self.result = null;
+                return r;
+            }
+            return error.NotDone;
+        }
+    };
+
+    /// Async Page.navigate: wait for the main frame, fire the wire call,
+    /// then gate on the lifecycle (load / abort / navigationSatisfied) —
+    /// the same states the synchronous navigate waits for.
+    pub const NavFlow = struct {
+        driver: *Driver,
+        session_id: []u8,
+        target_id: []u8,
+        url: []u8,
+        timeout_ms: i32,
+        deadline_ms: i64,
+        call: ?*WireCall = null,
+        nav_id: ?[]u8 = null,
+        done: bool = false,
+        failed: bool = false,
+        err: anyerror = error.UnknownTarget,
+        abort_text: ?[]u8 = null,
+
+        pub fn init(d: *Driver, target_id: []const u8, session_id: []const u8, url: []const u8, timeout_ms: i32) !*NavFlow {
+            const f = try d.allocator.create(NavFlow);
+            errdefer d.allocator.destroy(f);
+            f.* = .{
+                .driver = d,
+                .session_id = try d.allocator.dupe(u8, session_id),
+                .target_id = try d.allocator.dupe(u8, target_id),
+                .url = try d.allocator.dupe(u8, url),
+                .timeout_ms = timeout_ms,
+                .deadline_ms = nowMs() + timeout_ms,
+            };
+            return f;
+        }
+
+        pub fn deinit(self: *NavFlow) void {
+            const d = self.driver;
+            if (self.call) |c| d.cancelWireCall(c);
+            d.allocator.free(self.session_id);
+            d.allocator.free(self.target_id);
+            d.allocator.free(self.url);
+            if (self.nav_id) |n| d.allocator.free(n);
+            if (self.abort_text) |t| d.allocator.free(t);
+            d.allocator.destroy(self);
+        }
+
+        pub fn poll(self: *NavFlow) void {
+            const d = self.driver;
+            if (self.done or self.failed) return;
+            if (nowMs() >= self.deadline_ms) return self.fail(error.WaitTimeout);
+
+            if (self.call) |call| {
+                if (!call.done) return;
+                const raw = call.raw.?;
+                call.raw = null;
+                const is_error = call.is_error;
+                d.cancelWireCall(call);
+                self.call = null;
+                if (is_error) return self.fail(error.JugglerError);
+                const nav_id = page.parseNavigationId(d.allocator, raw) catch {
+                    d.allocator.free(raw);
+                    return self.fail(error.InvalidResponse);
+                };
+                d.allocator.free(raw);
+                self.nav_id = nav_id;
+                if (d.pages.get(self.target_id)) |p| {
+                    if (p.main_frame_id) |mf| p.lifecycle.setNavigationId(mf, nav_id);
+                }
+                // Fall through to the lifecycle gate.
+            } else if (self.nav_id == null) {
+                // Start: wait for the main frame, then fire Page.navigate.
+                const p = d.pages.get(self.target_id) orelse return self.fail(error.UnknownTarget);
+                if (p.session_id.len == 0) return self.fail(error.TargetNotAttached);
+                const mf = p.main_frame_id orelse return; // wait for frame attach
+                p.lifecycle.begin(mf);
+                const rem = remainingMs(self.deadline_ms) orelse return self.fail(error.WaitTimeout);
+                const params = page.navigateParams(d.allocator, mf, self.url, null) catch return self.fail(error.OutOfMemory);
+                defer d.allocator.free(params);
+                self.call = d.sendAsync(p.session_id, page.method_navigate, params, rem) catch |err| return self.fail(err);
+                return;
+            }
+
+            // Lifecycle gate (same states as the synchronous navigate).
+            const p = d.pages.get(self.target_id) orelse return self.fail(error.UnknownTarget);
+            if (p.lifecycle.state == .aborted) {
+                if (self.abort_text == null) {
+                    self.abort_text = d.allocator.dupe(u8, p.lifecycle.abort_text) catch "";
+                }
+                return self.fail(error.NavigationAborted);
+            }
+            const nav_id = self.nav_id.?;
+            if (p.lifecycle.state == .done and d.navigationSatisfied(p, nav_id, self.url)) {
+                self.done = true;
+                return;
+            }
+            // .waiting or done-but-not-satisfied: browser events will
+            // advance the lifecycle; the loop keeps draining.
+        }
+
+        fn fail(self: *NavFlow, err: anyerror) void {
+            self.failed = true;
+            self.err = err;
+        }
+
+        /// Owned navigationId on success (moves out).
+        pub fn takeNavId(self: *NavFlow) ![]u8 {
+            if (self.nav_id) |n| {
+                self.nav_id = null;
+                return n;
+            }
+            return error.NotDone;
+        }
+    };
+
+    /// Async Browser.newPage: wire call, wait for the attachedToTarget
+    /// event, optionally navigate (nested NavFlow).
+    pub const NewPageFlow = struct {
+        driver: *Driver,
+        browser_context_id: ?[]u8,
+        url: ?[]u8,
+        timeout_ms: i32,
+        deadline_ms: i64,
+        call: ?*WireCall = null,
+        target_id: ?[]u8 = null,
+        nav: ?*NavFlow = null,
+        done: bool = false,
+        failed: bool = false,
+        err: anyerror = error.UnknownTarget,
+
+        pub fn init(d: *Driver, browser_context_id: ?[]const u8, url: ?[]const u8, timeout_ms: i32) !*NewPageFlow {
+            const f = try d.allocator.create(NewPageFlow);
+            errdefer d.allocator.destroy(f);
+            f.* = .{
+                .driver = d,
+                .browser_context_id = if (browser_context_id) |b| try d.allocator.dupe(u8, b) else null,
+                .url = if (url) |u| try d.allocator.dupe(u8, u) else null,
+                .timeout_ms = timeout_ms,
+                .deadline_ms = nowMs() + timeout_ms,
+            };
+            return f;
+        }
+
+        pub fn deinit(self: *NewPageFlow) void {
+            const d = self.driver;
+            if (self.call) |c| d.cancelWireCall(c);
+            if (self.nav) |n| n.deinit();
+            if (self.browser_context_id) |b| d.allocator.free(b);
+            if (self.url) |u| d.allocator.free(u);
+            if (self.target_id) |t| d.allocator.free(t);
+            d.allocator.destroy(self);
+        }
+
+        pub fn poll(self: *NewPageFlow) void {
+            const d = self.driver;
+            if (self.done or self.failed) return;
+
+            if (self.nav) |nav| {
+                nav.poll();
+                if (nav.done) {
+                    self.done = true;
+                } else if (nav.failed) {
+                    self.fail(nav.err);
+                }
+                return;
+            }
+
+            if (self.call) |call| {
+                if (!call.done) {
+                    if (nowMs() >= self.deadline_ms) return self.fail(error.WaitTimeout);
+                    return;
+                }
+                const raw = call.raw.?;
+                call.raw = null;
+                const is_error = call.is_error;
+                d.cancelWireCall(call);
+                self.call = null;
+                if (is_error) return self.fail(error.JugglerError);
+                const target_id = browser.parseTargetId(d.allocator, raw) catch {
+                    d.allocator.free(raw);
+                    return self.fail(error.InvalidResponse);
+                };
+                d.allocator.free(raw);
+                self.target_id = target_id;
+                // Fall through to the attach wait below.
+            } else if (self.target_id == null) {
+                // Start: fire Browser.newPage.
+                if (nowMs() >= self.deadline_ms) return self.fail(error.WaitTimeout);
+                const params = browser.newPageParams(d.allocator, self.browser_context_id) catch return self.fail(error.OutOfMemory);
+                defer d.allocator.free(params);
+                self.call = d.sendAsync(null, browser.method_new_page, params, self.timeout_ms) catch |err| return self.fail(err);
+                return;
+            }
+
+            // Wait for the attachedToTarget event to register the session
+            // (matches the sync path's TargetNotAttached on expiry).
+            if (nowMs() >= self.deadline_ms) return self.fail(error.TargetNotAttached);
+            const p = d.pages.get(self.target_id.?) orelse return; // wait
+            if (p.session_id.len == 0) return; // wait
+
+            if (self.url) |u| {
+                const rem = remainingMs(self.deadline_ms) orelse return self.fail(error.WaitTimeout);
+                const nav = NavFlow.init(d, self.target_id.?, p.session_id, u, rem) catch return self.fail(error.OutOfMemory);
+                self.nav = nav;
+                return;
+            }
+            self.done = true;
+        }
+
+        fn fail(self: *NewPageFlow, err: anyerror) void {
+            self.failed = true;
+            self.err = err;
+        }
+
+        /// Owned targetId on success (moves out).
+        pub fn takeTargetId(self: *NewPageFlow) ![]u8 {
+            if (self.target_id) |t| {
+                self.target_id = null;
+                return t;
+            }
+            return error.NotDone;
+        }
+    };
 
     /// Browser.createBrowserContext -> owned browserContextId.
     pub fn newContext(self: *Driver, timeout_ms: i32) ![]u8 {
@@ -446,7 +845,7 @@ pub const Driver = struct {
     ///     previous document), or the committed URL matches the requested
     ///     one (same-document navigations).
     /// A newer navigation superseding ours passes on URL match only.
-    fn navigationSatisfied(self: *Driver, p: *Page, nav_id: []const u8, url: []const u8) bool {
+    pub fn navigationSatisfied(self: *Driver, p: *Page, nav_id: []const u8, url: []const u8) bool {
         if (p.lifecycle.state != .done) return false;
         if (p.lifecycle.navigation_id.len == 0 or std.mem.eql(u8, p.lifecycle.navigation_id, nav_id)) {
             if (p.lifecycle.nav_started) {
@@ -1412,7 +1811,7 @@ pub const Driver = struct {
 
 /// Preferred evaluate context: the latest context of the main frame; falls
 /// back to the latest context of the session.
-fn pickContext(p: *Page) ?*ContextInfo {
+pub fn pickContext(p: *Page) ?*ContextInfo {
     var chosen: ?*ContextInfo = null;
     for (p.contexts.items) |*c| {
         if (c.frame_id) |f| {
@@ -1464,6 +1863,22 @@ fn numF64(v: std.json.Value) ?f64 {
         .float => |f| f,
         else => null,
     };
+}
+
+/// `[w, h]` JSON pair -> Size with evalSize's bounds (positive, finite,
+/// <= max_screenshot_dimension); null when invalid. Shared with the
+/// sidecar's async screenshot flow (which cannot call the blocking
+/// evalSize from the event loop).
+pub fn sizeFromJson(allocator: Allocator, value_json: []const u8) ?Size {
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, value_json, .{}) catch return null;
+    defer parsed.deinit();
+    const v = parsed.value;
+    if (v != .array or v.array.items.len < 2) return null;
+    const w = numF64(v.array.items[0]) orelse return null;
+    const h = numF64(v.array.items[1]) orelse return null;
+    if (w <= 0 or h <= 0 or w != w or h != h or
+        w > max_screenshot_dimension or h > max_screenshot_dimension) return null;
+    return .{ .w = w, .h = h };
 }
 
 /// CDP Page.getFrameTree result from the frame registry: the parentless
