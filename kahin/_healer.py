@@ -7,7 +7,7 @@ import json
 import logging
 import time
 import traceback
-from collections import Counter, defaultdict
+from collections import Counter
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -20,6 +20,12 @@ logger = logging.getLogger(__name__)
 HERE = Path(__file__).resolve().parent
 LOG_DIR = HERE / "logs"
 LOG_FILE = LOG_DIR / "kahin.log"
+# Bounded per-tool performance bookkeeping (Faz 4 Task 3). Tool names come
+# from the fixed registry, but the tracker must stay bounded even if an
+# unexpected name appears: at most this many distinct tools are tracked and
+# ``top_slow`` is capped separately at read time.
+_MAX_TRACKED_TOOLS = 256
+_TOP_SLOW_LIMIT = 10
 
 
 class ErrorCode:
@@ -88,30 +94,53 @@ class ErrorTracker:
         self._by_code: Counter[str] = Counter()
         self._by_tool: Counter[str] = Counter()
         self._recent: list[ErrorEntry] = []
-        self._tool_timings: dict[str, list[float]] = defaultdict(list)
+        # Per-tool aggregate: {"calls", "errors", "total_ms", "max_ms"}.
+        # total_ms/max_ms cover successful call durations only, so the
+        # existing avg_timing_ms semantics (success average) are preserved
+        # exactly; errors are counted separately.
+        self._tool_stats: dict[str, dict[str, float | int]] = {}
+
+    def _stat(self, tool: str) -> dict[str, float | int] | None:
+        """Fetch or create the aggregate entry for a tool. Returns None when
+        the tracker already holds the maximum number of distinct tools."""
+        stat = self._tool_stats.get(tool)
+        if stat is not None:
+            return stat
+        if len(self._tool_stats) >= _MAX_TRACKED_TOOLS:
+            return None
+        stat = {"calls": 0, "errors": 0, "total_ms": 0.0, "max_ms": 0.0}
+        self._tool_stats[tool] = stat
+        return stat
 
     def record_error(self, entry: ErrorEntry) -> None:
         self._total_errors += 1
         self._by_code[entry.error_code] += 1
         self._by_tool[entry.tool] += 1
+        stat = self._stat(entry.tool)
+        if stat is not None:
+            stat["errors"] = int(stat["errors"]) + 1
         self._recent.append(entry)
         if len(self._recent) > 100:
             self._recent.pop(0)
 
     def record_success(self, tool: str, duration_ms: float) -> None:
         self._success_count += 1
-        self._tool_timings[tool].append(duration_ms)
-        if len(self._tool_timings[tool]) > 100:
-            self._tool_timings[tool].pop(0)
+        stat = self._stat(tool)
+        if stat is None:
+            return
+        stat["calls"] = int(stat["calls"]) + 1
+        stat["total_ms"] = round(float(stat["total_ms"]) + duration_ms, 3)
+        stat["max_ms"] = round(max(float(stat["max_ms"]), duration_ms), 3)
 
     def record_recovery(self) -> None:
         self._total_recoveries += 1
 
     def get_stats(self) -> dict[str, Any]:
         avg_timings = {}
-        for tool, timings in self._tool_timings.items():
-            if timings:
-                avg_timings[tool] = round(sum(timings) / len(timings), 1)
+        for tool, stat in self._tool_stats.items():
+            calls = int(stat["calls"])
+            if calls:
+                avg_timings[tool] = round(float(stat["total_ms"]) / calls, 1)
         return {
             "total_errors": self._total_errors,
             "total_successes": self._success_count,
@@ -131,6 +160,46 @@ class ErrorTracker:
             ],
         }
 
+    def engine_stats(self) -> dict[str, Any]:
+        """Bounded, agent-friendly performance rollup (Faz 4 Task 3).
+
+        Deterministic enough for agents: per-tool averages and maxima are
+        rounded, ``top_slow`` is capped, and only the most recent error is
+        reported. No unbounded per-tool data leaves the tracker.
+        """
+        def _avg_key(item: tuple[str, dict[str, float | int]]) -> tuple[float, float]:
+            _, stat = item
+            calls = int(stat["calls"])
+            avg = float(stat["total_ms"]) / calls if calls else 0.0
+            return (avg, float(stat["max_ms"]))
+
+        ranked = sorted(self._tool_stats.items(), key=_avg_key, reverse=True)[:_TOP_SLOW_LIMIT]
+        top_slow = []
+        for tool, stat in ranked:
+            calls = int(stat["calls"])
+            top_slow.append({
+                "tool": tool,
+                "count": calls,
+                "avg_ms": round(float(stat["total_ms"]) / calls, 1) if calls else 0.0,
+                "max_ms": float(stat["max_ms"]),
+            })
+        last = self._recent[-1] if self._recent else None
+        return {
+            "tool_calls": self._success_count,
+            "tool_errors": self._total_errors,
+            "top_slow": top_slow,
+            "last_error": (
+                {
+                    "tool": last.tool,
+                    "code": last.error_code,
+                    "message": last.message[:200],
+                    "time": last.timestamp,
+                    "recovery": last.recovery,
+                }
+                if last is not None
+                else None
+            ),
+        }
 
 _tracker = ErrorTracker()
 
@@ -230,14 +299,14 @@ class Healer:
     async def safe(
         self, tool: str, **context: Any
     ) -> AsyncGenerator[dict[str, Any], None]:
-        t0 = time.time()
+        t0 = time.monotonic()
         entry = ErrorEntry(tool=tool, context=context)
         try:
             yield {"ok": True}
-            duration = (time.time() - t0) * 1000
+            duration = (time.monotonic() - t0) * 1000
             _tracker.record_success(tool, duration)
         except asyncio.TimeoutError:
-            duration = (time.time() - t0) * 1000
+            duration = (time.monotonic() - t0) * 1000
             entry.level = "ERROR"
             entry.error_code = ErrorCode.ENGINE_TIMEOUT
             entry.message = f"Timeout in {tool}"
@@ -249,7 +318,7 @@ class Healer:
             recovery_msg = await self._execute_recovery(entry.recovery, tool, context)
             raise RuntimeError(f"{entry.error_code}: {entry.message}" + (f" [{recovery_msg}]" if recovery_msg else ""))
         except ConnectionError as e:
-            duration = (time.time() - t0) * 1000
+            duration = (time.monotonic() - t0) * 1000
             entry.level = "ERROR"
             entry.error_code = ErrorCode.CONNECTION_LOST
             entry.message = str(e)
@@ -261,7 +330,7 @@ class Healer:
             recovery_msg = await self._execute_recovery(entry.recovery, tool, context)
             raise RuntimeError(f"{entry.error_code}: {entry.message}" + (f" [{recovery_msg}]" if recovery_msg else ""))
         except RuntimeError as e:
-            duration = (time.time() - t0) * 1000
+            duration = (time.monotonic() - t0) * 1000
             entry.level = "ERROR"
             entry.error_code = ErrorCode.UNKNOWN
             msg = str(e)
@@ -286,7 +355,7 @@ class Healer:
                 raise RuntimeError(f"{entry.error_code}: {entry.message} [auto-recovery: {recovery_msg}]")
             raise
         except Exception as e:
-            duration = (time.time() - t0) * 1000
+            duration = (time.monotonic() - t0) * 1000
             entry.level = "ERROR"
             entry.error_code = ErrorCode.UNKNOWN
             entry.message = str(e)

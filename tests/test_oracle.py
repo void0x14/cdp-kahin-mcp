@@ -62,7 +62,8 @@ def test_server_initialize_and_list_tools() -> None:
     #   fast-path registration in place, so it is NOT double-counted.)
     # Faz 3 Task 4: +4 identity pin tools (pin/unpin/pins/for_domain) = 136.
     # Faz 3 Task 5: +2 proxy/geo + fingerprint report tools = 138.
-    assert len(tools) == 138
+    # Faz 4 Task 3: +1 engine stats tool (kahin_engine_stats) = 139.
+    assert len(tools) == 139
     assert "kahin_mirage_dom_start" in tool_names
     assert "kahin_mirage_dom_snapshot" in tool_names
     assert "kahin_mirage_dom_events" in tool_names
@@ -78,6 +79,7 @@ def test_server_initialize_and_list_tools() -> None:
     assert "kahin_identity_delete" in tool_names
     assert "kahin_identity_report" in tool_names
     assert "kahin_agent_status" in tool_names
+    assert "kahin_engine_stats" in tool_names
     assert "kahin_stealth_audit" in tool_names
     assert "kahin_mirage_mouse_trajectory" in tool_names
     assert "kahin_mirage_click_humanized" in tool_names

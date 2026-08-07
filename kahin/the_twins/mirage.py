@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import importlib.util
 import json
 import logging
@@ -49,6 +50,71 @@ _CAMOUFOX_FETCH_TIMEOUT = 120.0
 _CAMOUFOX_PROBE_TIMEOUT = 10.0
 _CAMOUFOX_OUTPUT_LIMIT = 600
 _MIRAGE_PAGE_DOMAINS = frozenset({"Page", "Runtime", "Network", "Input", "Accessibility", "Heap"})
+
+# Faz 4 Task 3 — per-identity profile pre-warm. Camoufox's launch_options()
+# deliberately injects per-launch randomness (font/voice subsets, spacing/
+# audio/canvas seeds, webgl sampling, window.history.length), so neither the
+# full options dict nor the runtime profile directory can be cached or
+# reused safely: a reused profile would restore cookies/session data, and a
+# pinned options snapshot would freeze the per-launch fingerprint rotation
+# that Faz 3's identity tests rely on. The safe seam is therefore bounded
+# preparation metadata only — a stable identity hash plus measured prep
+# timings — kept in-process and mirrored to a small per-identity file under
+# the cache dir. It never skips real launch work and never contains identity
+# payloads.
+_PREWARM_CACHE_MAX = 8
+_PREWARM_METADATA_MAX = 4096  # bytes written per identity
+_PREWARM_READ_MAX = 8192  # refuse metadata files larger than this
+_PREWARM_CACHE: dict[str, dict[str, Any]] = {}
+
+
+def _profile_cache_dir() -> Path:
+    """Bounded cache root for per-identity pre-warm metadata."""
+    env = os.environ.get("KAHIN_PROFILE_CACHE_DIR")
+    path = Path(env).expanduser() if env else (Path.home() / ".cache" / "kahin" / "profiles")
+    return path
+
+
+def _identity_hash(config: dict[str, Any]) -> str:
+    """Stable, safe key for an identity config: sha256 of canonical JSON."""
+    raw = json.dumps(config, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()[:16]
+
+
+def _prewarm_load(identity_hash: str) -> dict[str, Any] | None:
+    """In-process first, then bounded on-disk metadata lookup (never raises)."""
+    entry = _PREWARM_CACHE.get(identity_hash)
+    if entry is not None:
+        return {**entry, "source": "memory"}
+    path = _profile_cache_dir() / f"{identity_hash}.json"
+    try:
+        raw = path.read_bytes()
+        if len(raw) > _PREWARM_READ_MAX:
+            return None
+        parsed = json.loads(raw)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(parsed, dict) or parsed.get("identity_hash") != identity_hash:
+        return None
+    return {**parsed, "source": "disk"}
+
+
+def _prewarm_record(identity_hash: str, entry: dict[str, Any]) -> None:
+    """Bound the in-process cache and mirror metadata to disk (never raises)."""
+    _PREWARM_CACHE[identity_hash] = entry
+    while len(_PREWARM_CACHE) > _PREWARM_CACHE_MAX:
+        _PREWARM_CACHE.pop(next(iter(_PREWARM_CACHE)))
+    path = _profile_cache_dir() / f"{identity_hash}.json"
+    try:
+        payload = json.dumps(entry, sort_keys=True).encode("utf-8")
+        if len(payload) > _PREWARM_METADATA_MAX:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_bytes(payload)
+        tmp.replace(path)
+    except OSError:
+        pass
 
 
 def _needs_mirage_page_for_adapter(domain: str, command: str) -> bool:
@@ -285,6 +351,11 @@ class Mirage(BrowserEngine):
         self._identity_config: dict[str, Any] | None = None
         self._identity_name: str | None = None
         self._proxy_url: str | None = None
+        # Faz 4 Task 3: pre-warm metadata + monotonic uptime anchor. Kept
+        # only while this engine is running; cleared in stop().
+        self._identity_hash: str | None = None
+        self._prewarm_info: dict[str, Any] | None = None
+        self._started_monotonic: float | None = None
         self._write_lock = asyncio.Lock()
         self._page_lock = asyncio.Lock()
         # Switching the current tab is a routing operation, not browser
@@ -381,16 +452,31 @@ class Mirage(BrowserEngine):
         self._identity_config = None
         self._identity_name = None
         self._proxy_url = None
+        self._identity_hash = None
+        self._prewarm_info = None
+        self._started_monotonic = None
         identity_config = kwargs.get("identity")
         identity_name = kwargs.get("identity_name")
         self._identity_config = (
             identity_config if isinstance(identity_config, dict) and identity_config else None
         )
         self._identity_name = identity_name if isinstance(identity_name, str) and identity_name else None
+        # Per-identity profile pre-warm (Faz 4 Task 3): resolve the stable
+        # identity hash and check the bounded preparation-metadata cache.
+        # A cache hit only records that this identity was prepared before;
+        # launch_options is still called because its output is randomized
+        # per launch by design (see the module docstring on _PREWARM_CACHE).
+        prewarm: dict[str, Any] | None = None
+        identity_hash: str | None = None
+        if self._identity_config is not None:
+            identity_hash = _identity_hash(self._identity_config)
+            self._identity_hash = identity_hash
+            prewarm = _prewarm_load(identity_hash)
         # BrowserForge fingerprint -> CAMOU_CONFIG_* env (master plan §2.1.5).
         # Every start() draws a fresh identity; the sidecar passes our
         # environment through to the Camoufox child verbatim (pipe.zig
         # buildEnvp reads /proc/self/environ).
+        opts_t0 = time.monotonic()
         opts = launch_options() if launch_options is not None else {"env": {}, "firefox_user_prefs": {}}
         # Identity config (Faz 2 Task 5): merge through the same seam that
         # applies the default fingerprint. ``launch_options(config=...)``
@@ -407,6 +493,7 @@ class Mirage(BrowserEngine):
                     opts = launch_options(config=self._identity_config, i_know_what_im_doing=True)
                 except Exception:  # noqa: BLE001 - identity must not crash boot
                     logger.warning("identity config injection failed; using defaults", exc_info=True)
+        opts_ms = (time.monotonic() - opts_t0) * 1000
         env = {**os.environ, **opts["env"]}
         # Proxy (Faz 3 Task 5): merge through the same env seam the sidecar
         # passes to the Camoufox child (create_subprocess_exec env below).
@@ -433,6 +520,7 @@ class Mirage(BrowserEngine):
         # before the browser boots; the sidecar only mkdirs the profile).
         profile_dir = Path(tempfile.mkdtemp(prefix="kahin-fp-"))
         self._profile_dir = profile_dir
+        profile_t0 = time.monotonic()
         try:
             prefs = opts.get("firefox_user_prefs") or {}
             if prefs:
@@ -466,6 +554,26 @@ class Mirage(BrowserEngine):
                 raise RuntimeError(
                     "Mirage boot validation failed: Browser.health reports a dead browser"
                 )
+            # The engine is live: anchor uptime (monotonic) and update the
+            # per-identity pre-warm metadata. A failure here must never fail
+            # boot — record helpers swallow OSError, and the lookup above
+            # already tolerated corrupt cache state.
+            self._started_monotonic = time.monotonic()
+            if identity_hash is not None:
+                hits = (int(prewarm.get("hits", 0)) + 1) if prewarm is not None else 0
+                starts = (int(prewarm.get("starts", 0)) + 1) if prewarm is not None else 1
+                entry = {
+                    "identity_hash": identity_hash,
+                    "options_ms": round(opts_ms, 1),
+                    "profile_ms": round((time.monotonic() - profile_t0) * 1000, 1),
+                    "hits": hits,
+                    "starts": starts,
+                }
+                _prewarm_record(identity_hash, entry)
+                self._prewarm_info = {
+                    **entry,
+                    "cache": prewarm.get("source", "miss") if prewarm is not None else "miss",
+                }
             return EngineContext(
                 engine_name=self._engine_name,
                 ws_url="",  # IPC over stdio, not WebSocket
@@ -1625,6 +1733,9 @@ class Mirage(BrowserEngine):
         self._identity_config = None
         self._identity_name = None
         self._proxy_url = None
+        self._identity_hash = None
+        self._prewarm_info = None
+        self._started_monotonic = None
         reader, self._reader = self._reader, None
         if reader is not None:
             reader.cancel()

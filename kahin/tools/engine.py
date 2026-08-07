@@ -9,9 +9,13 @@ engine's own ``is_alive()`` plus connection metadata.
 from __future__ import annotations
 
 import asyncio
+import time
+from typing import Any
+
 import orjson
 
 from kahin import _state as state
+from kahin._healer import get_tracker
 from kahin._mcp import mcp
 from kahin.tools._common import _RO, _healer_ref
 from kahin.the_twins.capabilities import capabilities_for
@@ -57,6 +61,39 @@ async def engine_health() -> str:
             "capabilities": capabilities_for(engine_name),
             "pid": pid,
         })
+
+
+@mcp.tool(name="kahin_engine_stats", annotations=_RO)
+async def engine_stats() -> str:
+    """Bounded per-tool performance statistics for the running engine.
+    Reports uptime (monotonic), total tool calls/errors, the slowest tools
+    (top 10 by average duration) and the most recent error. With no engine
+    running it returns a structured ``engine_unavailable`` payload instead
+    of raising."""
+    async with _healer_ref.safe("kahin_engine_stats"):
+        perf = get_tracker().engine_stats()
+        engine = state._current_engine
+        if engine is None:
+            return _dump({
+                "engine": None,
+                "uptime_s": 0.0,
+                **perf,
+                "code": "engine_unavailable",
+                "hint": "Use kahin_browser_start to boot an engine.",
+            })
+        started = getattr(engine, "_started_monotonic", None)
+        uptime_s = round(time.monotonic() - started, 3) if isinstance(started, float) else 0.0
+        engine_name = "shadow" if isinstance(engine, Obscura) else "mirage"
+        payload: dict[str, Any] = {
+            "engine": engine_name,
+            "uptime_s": uptime_s,
+            **perf,
+        }
+        if isinstance(engine, Mirage):
+            prewarm = getattr(engine, "_prewarm_info", None)
+            if prewarm is not None:
+                payload["prewarm"] = prewarm
+        return _dump(payload)
 
 
 def _dump(payload: dict) -> str:
