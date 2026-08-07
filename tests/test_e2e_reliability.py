@@ -22,7 +22,15 @@ import pytest
 from pytest_asyncio import fixture as async_fixture
 
 from kahin.the_twins import mirage as mirage_mod
-from kahin.tools import dejavu_mirage, pilot, pilot_mirage, reliability_mirage, trainman_mirage
+from kahin.tools import (
+    agent_mirage,
+    dejavu_mirage,
+    dom_stream_mirage,
+    pilot,
+    pilot_mirage,
+    reliability_mirage,
+    trainman_mirage,
+)
 
 
 def _real_available() -> bool:
@@ -118,6 +126,30 @@ async def test_navigate_wait_until_timeout(mirage_tools: None) -> None:
         timeout=0.5,
     ))
     assert resp.get("code") == "navigation_timeout", resp
+
+
+@pytest.mark.asyncio
+async def test_snapshot_refs_and_token_budget(mirage_tools: None) -> None:
+    await _navigate(_doc(
+        "<html><body><h1>Todo</h1><input id='t' placeholder='What next?'>"
+        "<button id='b'>Add</button></body></html>"
+    ))
+    result = _loads(await agent_mirage.mirage_snapshot(max_tokens=800))
+    assert result.get("lines"), result
+    assert result.get("tokens_estimate", 0) > 0, result
+    assert result.get("max_tokens") == 800, result
+    assert result.get("truncated") is not None, result
+    assert result.get("streamId") and result.get("cursor") is not None, result
+    joined = "\n".join(result["lines"])
+    assert "textbox" in joined and "Add" in joined, joined
+    # refs must be action-ready: click the Add button via its live nodeId.
+    add_line = next(line for line in result["lines"] if "Add" in line)
+    ref = add_line.split("ref=")[1].split("]")[0]
+    assert ref.startswith("n"), add_line
+    action = _loads(await dom_stream_mirage.mirage_dom_action(node_id=ref, action="click"))
+    assert not action.get("error"), action
+    assert action.get("action") == "click", action
+    assert isinstance(action.get("target"), dict), action
 
 
 @pytest.mark.asyncio

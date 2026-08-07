@@ -12,6 +12,7 @@ engine-specific placeholder modules are retained only as package boundaries
 and do not register pretend tools.
 """
 
+from kahin.tools import agent_mirage  # noqa: F401
 from kahin.tools import accessibility_mirage  # noqa: F401
 from kahin.tools import dejavu  # noqa: F401
 from kahin.tools import dejavu_mirage  # noqa: F401
@@ -36,6 +37,7 @@ from kahin.tools import trainman_obscura  # noqa: F401
 from kahin.tools import upload_mirage  # noqa: F401
 
 __all__ = [
+    "agent_mirage",
     "accessibility_mirage",
     "dejavu",
     "dejavu_mirage",
