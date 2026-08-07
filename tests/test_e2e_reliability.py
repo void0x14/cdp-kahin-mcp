@@ -67,6 +67,26 @@ async def _navigate(url: str) -> None:
 
 
 @pytest.mark.asyncio
+async def test_navigate_wait_until_domcontentloaded(mirage_tools: None) -> None:
+    resp = _loads(await pilot.navigate(
+        url=_doc("<html><body><p id='x'>hi</p></body></html>"),
+        wait_until="domcontentloaded",
+    ))
+    assert resp.get("frameId"), resp
+    assert resp.get("wait_until") == "domcontentloaded", resp
+
+
+@pytest.mark.asyncio
+async def test_navigate_wait_until_timeout(mirage_tools: None) -> None:
+    resp = _loads(await pilot.navigate(
+        url=_doc("<html><body>x</body></html>"),
+        wait_until="networkidle",
+        timeout=0.5,
+    ))
+    assert resp.get("code") == "navigation_timeout", resp
+
+
+@pytest.mark.asyncio
 async def test_wait_selector_text_engine_and_state(mirage_tools: None) -> None:
     await _navigate(_doc(
         "<html><body><button style='display:none' id='b1'>Hidden</button>"

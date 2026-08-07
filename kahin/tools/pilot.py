@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import time
 from typing import Any
 
 import orjson
@@ -43,6 +44,9 @@ _MAX_ATTRIBUTE_LENGTH = 1_024
 _MAX_EXTRACT_LENGTH = 100_000
 _MAX_EVALUATE_LENGTH = 1_000_000
 _MAX_SCREENSHOT_BYTES = 32 * 1024 * 1024
+_NAVIGATE_WAIT_UNTIL = ("commit", "domcontentloaded", "load", "networkidle")
+_NAVIGATE_IDLE_QUIET = 0.5
+_NAVIGATE_MAX_TIMEOUT = 120.0
 
 
 def _json_error(tool: str, message: str, code: str = "tool_error", **details: Any) -> str:
@@ -306,16 +310,153 @@ async def browser_stop() -> str:
             return '{"status": "stopped"}'
 
 
+async def _navigation_wait(
+    tool: str,
+    *,
+    wait_until: str,
+    timeout: float,
+    frame_id: str | None,
+    session_id: str | None,
+    started_at: float,
+) -> dict[str, Any] | None:
+    """Wait for a bounded document lifecycle state after navigation."""
+    if wait_until == "commit":
+        return None
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + max(0.0, timeout)
+    expression = (
+        "(() => { const rs = document.readyState; "
+        "const resources = performance.getEntriesByType('resource').length; "
+        "return {readyState: rs, resources}; })()"
+    )
+    engine = state._current_engine
+    last_event_ts = 0.0
+    while True:
+        ready_state = ""
+        if isinstance(engine, Mirage):
+            from kahin.tools.pilot_mirage import _safe_mirage_eval_result  # noqa: PLC0415
+
+            evaluated = await _safe_mirage_eval_result(
+                tool, expression, frame_id, session_id=session_id,
+            )
+        else:
+            evaluated_text = await _safe_cdp(
+                "Runtime", "evaluate", {"expression": expression, "returnByValue": True},
+            )
+            try:
+                evaluated = orjson.loads(evaluated_text)
+            except orjson.JSONDecodeError:
+                evaluated = {"error": "invalid_engine_response"}
+        if isinstance(evaluated, dict):
+            result = evaluated.get("result") or {}
+            value = result.get("value") if isinstance(result, dict) else None
+            if isinstance(value, dict):
+                ready_state = str(value.get("readyState") or "")
+
+        now = time.time()
+        if wait_until == "domcontentloaded" and ready_state in {"interactive", "complete"}:
+            return None
+        if wait_until == "load" and ready_state == "complete":
+            return None
+        if wait_until == "networkidle":
+            events = state._network_requests
+            for event in reversed(events):
+                event_ts = float(event.get("timestamp") or 0.0)
+                if event_ts >= started_at:
+                    last_event_ts = event_ts
+                    break
+            if ready_state == "complete" and last_event_ts and now - last_event_ts >= _NAVIGATE_IDLE_QUIET:
+                return None
+        if loop.time() >= deadline:
+            return {
+                "error": f"navigation did not reach {wait_until} within {timeout:g}s",
+                "code": "navigation_timeout",
+                "wait_until": wait_until,
+                "timeout": timeout,
+                "readyState": ready_state,
+            }
+        await asyncio.sleep(0.1)
+
+
 @mcp.tool(name="kahin_navigate", annotations=_RW)
-async def navigate(url: str) -> str:
-    """Navigate the current page to a URL."""
+async def navigate(
+    url: str,
+    wait_until: str = "load",
+    timeout: float = 30.0,
+    referer: str | None = None,
+) -> str:
+    """Navigate the current page and wait for a bounded lifecycle state.
+
+    ``wait_until`` accepts ``commit``, ``domcontentloaded``, ``load`` or
+    ``networkidle``. ``referer`` is forwarded when the active engine accepts
+    it; the native adapter reports a structured unsupported error otherwise.
+    """
     url_value, error = _validate_text(url, tool="kahin_navigate", field="url", maximum=_MAX_SELECTOR_LENGTH)
     if error:
         return error
     assert url_value is not None
-    async with _healer_ref.safe("kahin_navigate", url=url_value[:80]):
+    if wait_until not in _NAVIGATE_WAIT_UNTIL:
+        return _json_error(
+            "kahin_navigate",
+            f"wait_until must be one of {_NAVIGATE_WAIT_UNTIL}",
+            "invalid_argument",
+            field="wait_until",
+            received=wait_until,
+        )
+    try:
+        timeout_value = float(timeout)
+    except (TypeError, ValueError, OverflowError):
+        timeout_value = 30.0
+    if not isinstance(timeout_value, float) or not timeout_value == timeout_value or timeout_value in {float("inf"), float("-inf")}:
+        timeout_value = 30.0
+    timeout_value = max(0.0, min(_NAVIGATE_MAX_TIMEOUT, timeout_value))
+    referer_value: str | None = None
+    if referer is not None:
+        referer_value, error = _validate_text(
+            referer, tool="kahin_navigate", field="referer", maximum=_MAX_SELECTOR_LENGTH,
+        )
+        if error:
+            return error
+    async with _healer_ref.safe(
+        "kahin_navigate", url=url_value[:80], wait_until=wait_until, timeout=timeout_value,
+    ):
         await _auto_learn("Page", "navigate", {"url": url_value})
-        return await _safe_cdp("Page", "navigate", {"url": url_value})
+        params: dict[str, Any] = {"url": url_value}
+        if referer_value:
+            params["referer"] = referer_value
+        navigation_started_at = time.time()
+        navigation_result = await _safe_cdp("Page", "navigate", params)
+        try:
+            parsed_result = orjson.loads(navigation_result)
+        except orjson.JSONDecodeError:
+            return navigation_result
+        if not isinstance(parsed_result, dict) or parsed_result.get("error"):
+            return navigation_result
+
+        frame_id: str | None = None
+        session_id: str | None = None
+        engine = state._current_engine
+        if isinstance(engine, Mirage):
+            try:
+                page = await engine.ensure_page()
+            except Exception as exc:  # noqa: BLE001 - structured tool response
+                return _json_error("kahin_navigate", str(exc), "session_unavailable")
+            if isinstance(page, dict):
+                frame_id = page.get("frameId") if isinstance(page.get("frameId"), str) else None
+                session_id = page.get("sessionId") if isinstance(page.get("sessionId"), str) else None
+        wait_error = await _navigation_wait(
+            "kahin_navigate",
+            wait_until=wait_until,
+            timeout=timeout_value,
+            frame_id=frame_id,
+            session_id=session_id,
+            started_at=navigation_started_at,
+        )
+        if wait_error:
+            return orjson.dumps(wait_error, option=orjson.OPT_INDENT_2).decode()
+        parsed_result["wait_until"] = wait_until
+        parsed_result["timeout"] = timeout_value
+        return orjson.dumps(parsed_result, option=orjson.OPT_INDENT_2).decode()
 
 
 @mcp.tool(name="kahin_click", annotations=_DW)

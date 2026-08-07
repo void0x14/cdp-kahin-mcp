@@ -12,6 +12,9 @@
 - `kahin_mirage_click` / `kahin_mirage_hover` / `kahin_mirage_focus` aksiyon
   öncesi Playwright tarzı actionability bekler (görünür, enabled, stabil,
   engelsiz; retry + `timeout` parametresi).
+- `kahin_navigate` artık `wait_until=commit|domcontentloaded|load|networkidle`,
+  bounded `timeout` ve `referer` kabul eder; lifecycle beklemesi aşılırsa
+  `code:"navigation_timeout"` döner.
 
 ## [0.3.7] — 2026-08-06
 
