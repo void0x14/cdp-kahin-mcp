@@ -21,6 +21,22 @@
 - `kahin_navigate` artık `wait_until=commit|domcontentloaded|load|networkidle`,
   bounded `timeout` ve `referer` kabul eder; lifecycle beklemesi aşılırsa
   `code:"navigation_timeout"` döner.
+- Faz 2 agent-native yüzey: `kahin_mirage_snapshot` (ref'li, token bütçeli
+  satırlar; truncation asla sessiz değildir), `kahin_mirage_fill_form`
+  (ref'lerle çok alanlı doldurma; stale ref `requiresSnapshot` döner) ve
+  click/type/check/uncheck/select_option/dblclick/drag'e opsiyonel
+  `return_snapshot` kancası.
+- Oturum kalıcılığı: `kahin_mirage_state_save` / `kahin_mirage_state_load`
+  (url + cookie + local/sessionStorage; mutlak yol zorunlu, load önce
+  kaydedilen url'e döner).
+- Kimlik kalıcılığı: `kahin_identity_new` / `kahin_identity_save` /
+  `kahin_identity_list` / `kahin_identity_delete` / `kahin_identity_report` +
+  `kahin_browser_start(identity=...)` ile gerçek Camoufox fingerprint
+  pinleme; rapor canlı `navigator.userAgent`'ı sayfa-içi doğrular.
+- `kahin_agent_status`: agent döngüsü özeti — engine liveness, sayfa durumu,
+  sekme sayısı, gerçek DOM-stream bookkeeping'inden `refsLive`/`domCursor`,
+  dialog/network/console sayaçları ve identity; engine yoksa yapılandırılmış
+  idle yanıt, asla hata fırlatmaz.
 
 ## [0.3.7] — 2026-08-06
 

@@ -66,7 +66,7 @@ kahin_pattern_query(context="doggystyle")
 kahin_pattern_suggest(partial="navig")
 ```
 
-## Tool Listesi (119 adet)
+## Tool Listesi (129 adet)
 
 Juggler/Mirage yüzeyinin ajana dönük, uçtan uca sözleşmesi:
 [docs/juggler-ai-native.md](docs/juggler-ai-native.md)
@@ -126,7 +126,7 @@ Juggler/Mirage yüzeyinin ajana dönük, uçtan uca sözleşmesi:
 | `kahin_pattern_forget` | Pattern sil |
 | `kahin_pattern_stats` | Pattern istatistikleri |
 
-### MIRAGE — Juggler Native (87) — Camoufox varsayılandır; Shadow'dan gerektiğinde otomatik yükseltilir
+### MIRAGE — Juggler Native (97) — Camoufox varsayılandır; Shadow'dan gerektiğinde otomatik yükseltilir
 
 #### DOM Stream (5) — gerçek MutationObserver + Juggler binding
 | Tool | Ne işe yarar? |
@@ -260,6 +260,16 @@ Juggler/Mirage yüzeyinin ajana dönük, uçtan uca sözleşmesi:
 | Tool | Ne işe yarar? |
 |------|---------------|
 | `kahin_mirage_accessibility_tree` | Erişilebilirlik ağacı (Accessibility.getFullAXTree — Camoufox-only, CDP'de yok) |
+
+#### Agent (10) — ref'li snapshot, form doldurma, oturum/kimlik kalıcılığı ve durum özeti
+| Tool | Ne işe yarar? |
+|------|---------------|
+| `kahin_mirage_snapshot` | Canlı DOM ağacını token bütçeli, ref'li satırlara çevirir (`[ref=n9]` ile action ipuçlu) |
+| `kahin_mirage_fill_form` | Ref'lerle birden fazla alanı tek çağrıda doldurur; stale ref `requiresSnapshot` döner |
+| `kahin_mirage_state_save` / `kahin_mirage_state_load` | Oturumu (url + cookie + local/sessionStorage) mutlak yola kaydeder/geri yükler |
+| `kahin_identity_new` / `kahin_identity_save` / `kahin_identity_list` / `kahin_identity_delete` | Camoufox fingerprint kimliklerini oluştur/kaydet/listele/sil |
+| `kahin_identity_report` | Aktif engine'in kimlik özetini ve sayfa-içi canlı `navigator.userAgent`'ı raporlar |
+| `kahin_agent_status` | Agent döngüsü özeti: engine liveness, sayfa durumu, sekme sayısı, refsLive/domCursor, dialog/network/console sayaçları |
 
 ## Örnek İş Akışları
 

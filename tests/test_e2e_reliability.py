@@ -528,3 +528,50 @@ async def test_identity_start_pins_user_agent() -> None:
     finally:
         await pilot.browser_stop()
         await agent_mirage.identity_delete("startpin")
+
+
+@pytest.mark.asyncio
+async def test_agent_status_summary(mirage_tools: None) -> None:
+    """agent_status reports real engine/page/DOM-stream state and never
+    guesses refs: live after a snapshot, invalidated after dom_stop, and a
+    structured idle response with no engine."""
+    await _navigate(_doc(
+        "<html><head><title>T</title></head><body><h1>Status</h1>"
+        "<input id='a' placeholder='Name'></body></html>"
+    ))
+
+    idle = _loads(await agent_mirage.agent_status())
+    assert idle.get("engine") == "mirage", idle
+    assert idle.get("alive") is True, idle
+    assert idle.get("url", "").startswith("data:text/html"), idle
+    assert idle.get("title") == "T", idle
+    assert idle.get("readyState") in ("complete", "interactive", "loading"), idle
+    assert idle.get("tabCount", 0) >= 1, idle
+    assert idle.get("currentTab"), idle
+    # No snapshot has been taken: refs must never be reported as live.
+    assert idle.get("refsLive") is False, idle
+    assert idle.get("domCursor") is None, idle
+    assert isinstance(idle.get("pendingDialogs"), int), idle
+    assert isinstance(idle.get("networkEvents"), int), idle
+    assert isinstance(idle.get("consoleMessages"), int), idle
+    assert idle.get("identity") is None, idle
+
+    snap = _loads(await agent_mirage.mirage_snapshot(max_tokens=800))
+    assert snap.get("streamId") and snap.get("cursor") is not None, snap
+    live = _loads(await agent_mirage.agent_status())
+    assert live.get("refsLive") is True, live
+    assert isinstance(live.get("domCursor"), int), live
+
+    stopped = _loads(await dom_stream_mirage.mirage_dom_stop())
+    assert not stopped.get("error"), stopped
+    invalidated = _loads(await agent_mirage.agent_status())
+    assert invalidated.get("refsLive") is False, invalidated
+
+    # agent_status must never raise even with the engine torn down.
+    await pilot.browser_stop()
+    no_engine = _loads(await agent_mirage.agent_status())
+    assert no_engine.get("alive") is False, no_engine
+    assert no_engine.get("engine") is None, no_engine
+    assert no_engine.get("tabCount") == 0, no_engine
+    assert no_engine.get("refsLive") is False, no_engine
+    assert no_engine.get("hint") == "use kahin_browser_start", no_engine

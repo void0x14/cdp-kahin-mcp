@@ -283,7 +283,7 @@ script'i ayrıca evaluate eder. Observer sayfa tarafında bounded olduğu için
 
 ## 6. Juggler tool kataloğu (A-Z)
 
-Aşağıdaki liste Mirage'ın 87 Juggler-native tool'unun tamamıdır. `MIRAGE`
+Aşağıdaki liste Mirage'ın 97 Juggler-native tool'unun tamamıdır. `MIRAGE`
 tool'ları `engine="mirage"` aktifken kullanılır.
 
 ### DOM gözlem ve adaptif action (5)
@@ -379,6 +379,27 @@ en eski frame FIFO olarak döner.
 
 - `kahin_mirage_accessibility_tree`
 - `kahin_engine_health`
+
+### Agent-native (10)
+
+- `kahin_mirage_snapshot` — canlı DOM ağacını token bütçeli, ref'li satırlara
+  çevirir; her ref canlı `nodeId`'dir ve `dom_action` üzerinde doğrudan
+  çalışır (`truncated` asla sessiz değildir)
+- `kahin_mirage_fill_form` — `{ref, text}` listesiyle birden fazla alanı
+  doldurur; stale ref `requiresSnapshot: true` ile döner
+- `kahin_mirage_state_save` / `kahin_mirage_state_load` — url + cookie +
+  local/sessionStorage'ı mutlak yola kaydeder/geri yükler (load önce
+  kaydedilen url'e gider; storage origin'e bağlıdır)
+- `kahin_identity_new` / `kahin_identity_save` / `kahin_identity_list` /
+  `kahin_identity_delete` — Camoufox fingerprint kimlikleri (yeni/manuel/
+  listele/sil); `kahin_browser_start(identity=...)` ile başlatmada uygulanır
+- `kahin_identity_report` — aktif engine'in kimlik özeti + sayfa-içi canlı
+  `navigator.userAgent` (set_user_agent onayından uydurulmaz)
+- `kahin_agent_status` — agent döngüsü özeti: engine/alive, url/title/
+  readyState, tabCount/currentTab, `refsLive` + `domCursor` (gerçek DOM-stream
+  bookkeeping; snapshot sonrası live, reset/dropped/stale/stop sonrası geçersiz),
+  pendingDialogs, networkEvents, consoleMessages, identity; engine yoksa
+  yapılandırılmış idle yanıt döner ve asla hata fırlatmaz
 
 ## 7. Hazır akışlar
 

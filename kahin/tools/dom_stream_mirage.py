@@ -37,6 +37,51 @@ def _dump(value: Any) -> str:
     return orjson.dumps(value, option=orjson.OPT_INDENT_2).decode()
 
 
+# Real per-session DOM-stream bookkeeping for ``kahin_agent_status``. The
+# agent-facing ref/cursor state is never guessed: ``refsLive`` is set True
+# only by a successful snapshot and invalidated by the reset/dropped/stale
+# signals actually observed on the wire, so status reports whether the last
+# snapshot's refs can still be acted on. Keyed by Juggler page session id.
+_DOM_STREAM_STATE: dict[str, dict[str, Any]] = {}
+
+
+def _dom_stream_record(
+    session_id: str,
+    *,
+    stream_id: str | None = None,
+    cursor: int | None = None,
+    refs_live: bool | None = None,
+) -> None:
+    """Persist the latest observed stream state for a page session."""
+    entry = _DOM_STREAM_STATE.setdefault(
+        session_id, {"streamId": None, "cursor": None, "refsLive": False}
+    )
+    if stream_id is not None and entry.get("streamId") != stream_id:
+        # A different streamId means a new document: the previous snapshot's
+        # refs died with it, whatever the caller believes.
+        entry["streamId"] = stream_id
+        entry["refsLive"] = False
+    if cursor is not None:
+        entry["cursor"] = cursor
+    if refs_live is not None:
+        entry["refsLive"] = refs_live
+
+
+def _dom_stream_status(session_id: str | None) -> dict[str, Any] | None:
+    """Latest observed stream state for a session, or None when the page has
+    never touched the DOM-stream surface."""
+    if not isinstance(session_id, str):
+        return None
+    entry = _DOM_STREAM_STATE.get(session_id)
+    if entry is None:
+        return None
+    return {
+        "streamId": entry.get("streamId"),
+        "cursor": entry.get("cursor"),
+        "refsLive": bool(entry.get("refsLive")),
+    }
+
+
 _MAX_SELECTOR = 16_384
 _MAX_FRAME_ID = 512
 _MAX_TEXT = 1_000_000
@@ -160,6 +205,13 @@ async def mirage_dom_start(
         value, error = await _call_page("status", {}, checked_frame, session_id)
         if error:
             return error
+        if isinstance(value, dict):
+            cursor = value.get("cursor")
+            _dom_stream_record(
+                session_id,
+                stream_id=value.get("streamId"),
+                cursor=cursor if isinstance(cursor, int) else None,
+            )
         return _dump({"status": "started", "stream": value, "frame_id": checked_frame})
 
 
@@ -210,7 +262,17 @@ async def mirage_dom_snapshot(
             "includeHidden": include_hidden,
             "textLimit": checked_text,
         }, checked_frame, session_id)
-        return error or _dump(value)
+        if error:
+            return error
+        if isinstance(value, dict) and not value.get("error"):
+            cursor = value.get("cursor")
+            _dom_stream_record(
+                session_id,
+                stream_id=value.get("streamId"),
+                cursor=cursor if isinstance(cursor, int) else None,
+                refs_live=True,
+            )
+        return _dump(value)
 
 
 @mcp.tool(name="kahin_mirage_dom_events", annotations=_RO)
@@ -265,6 +327,13 @@ async def mirage_dom_events(
                 return error
             if not isinstance(value, dict):
                 return _dump({"error": "DOM stream returned an invalid event payload"})
+            cursor = value.get("cursor")
+            _dom_stream_record(
+                session_id,
+                stream_id=value.get("streamId"),
+                cursor=cursor if isinstance(cursor, int) else None,
+                refs_live=False if (value.get("reset") or value.get("dropped")) else None,
+            )
             if value.get("events") or value.get("reset") or value.get("dropped"):
                 return _dump(value)
             if checked_wait <= 0:
@@ -331,6 +400,8 @@ async def mirage_dom_action(
         if not isinstance(value, dict):
             return _dump({"error": "DOM action returned an invalid target payload"})
         if value.get("error"):
+            if value.get("requiresSnapshot"):
+                _dom_stream_record(session_id, refs_live=False)
             return _dump(value)
 
         result: dict[str, Any] = {"target": value, "action": checked_action}
@@ -379,4 +450,7 @@ async def mirage_dom_stop(frame_id: str | None = None) -> str:
             return error
         assert session_id is not None
         value, error = await _call_page("stop", {}, checked_frame, session_id)
-        return error or _dump({"status": "stopped", "stream": value, "frame_id": checked_frame})
+        if error:
+            return error
+        _dom_stream_record(session_id, refs_live=False)
+        return _dump({"status": "stopped", "stream": value, "frame_id": checked_frame})

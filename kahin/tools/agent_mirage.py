@@ -14,6 +14,7 @@ to the saved url before restoring anything.
 
 from __future__ import annotations
 
+import asyncio
 import re
 from pathlib import Path
 from typing import Any
@@ -23,7 +24,11 @@ import orjson
 from kahin._mcp import mcp
 from kahin.agent_snapshot import format_snapshot
 from kahin.tools._common import _DW, _RO, _RW, _healer_ref, _mirage_evaluate, _require_engine
-from kahin.tools.dom_stream_mirage import mirage_dom_action, mirage_dom_snapshot
+from kahin.tools.dom_stream_mirage import (
+    _dom_stream_status,
+    mirage_dom_action,
+    mirage_dom_snapshot,
+)
 from kahin.tools.pilot_mirage import (
     _MAX_SELECTOR_LENGTH,
     _MAX_WAIT_TIMEOUT,
@@ -793,3 +798,122 @@ async def identity_report() -> str:
             "identity": identity,
             "navigator.userAgent": runtime_ua,
         }, option=orjson.OPT_INDENT_2).decode()
+
+
+@mcp.tool(name="kahin_agent_status", annotations=_RO)
+async def agent_status() -> str:
+    """Agent-loop overview of the running engine and its live page.
+
+    Reports engine liveness, the current page's url/title/readyState (read
+    from the live page), tab count and current tab, whether snapshot refs are
+    still live plus the latest DOM-stream cursor, pending dialogs, and the
+    buffered network/console event counts. Never raises: with no engine this
+    returns a structured idle response, and every engine-backed field
+    degrades to a neutral value when its source is unavailable.
+    ``refsLive``/``domCursor`` come from real DOM-stream bookkeeping — refs
+    are live only after a successful snapshot and are invalidated by
+    reset/dropped/stale/stop, never guessed.
+    """
+    async with _healer_ref.safe("kahin_agent_status"):
+        from kahin import _state as state  # noqa: PLC0415
+        from kahin.the_twins.mirage import Mirage  # noqa: PLC0415
+        from kahin.the_twins.shadow import Obscura  # noqa: PLC0415
+
+        engine = state._current_engine
+        if engine is None:
+            return orjson.dumps({
+                "engine": None,
+                "alive": False,
+                "url": None,
+                "title": None,
+                "readyState": None,
+                "tabCount": 0,
+                "currentTab": None,
+                "refsLive": False,
+                "domCursor": None,
+                "pendingDialogs": 0,
+                "networkEvents": 0,
+                "consoleMessages": 0,
+                "identity": None,
+                "hint": "use kahin_browser_start",
+            }, option=orjson.OPT_INDENT_2).decode()
+
+        payload: dict[str, Any] = {
+            "engine": "mirage" if isinstance(engine, Mirage) else (
+                "shadow" if isinstance(engine, Obscura) else type(engine).__name__.lower()
+            ),
+            "alive": False,
+            "url": None,
+            "title": None,
+            "readyState": None,
+            "tabCount": 0,
+            "currentTab": None,
+            "refsLive": False,
+            "domCursor": None,
+            "pendingDialogs": 0,
+            "networkEvents": len(state._network_requests),
+            "consoleMessages": len(state._console_messages),
+            "identity": None,
+        }
+
+        identity_config = getattr(engine, "_identity_config", None)
+        identity_name = getattr(engine, "_identity_name", None)
+        if isinstance(identity_config, dict) and identity_config:
+            payload["identity"] = {
+                "name": identity_name if isinstance(identity_name, str) else None,
+                "summary": _identity_summary(identity_config),
+            }
+
+        if isinstance(engine, Mirage):
+            try:
+                payload["alive"] = bool(
+                    (await asyncio.wait_for(engine.health(), timeout=5.0)).get("alive")
+                )
+            except Exception:  # noqa: BLE001 - status must never raise
+                payload["alive"] = False
+            try:
+                pages = await engine.list_pages()
+                payload["tabCount"] = len(pages)
+            except Exception:  # noqa: BLE001
+                pass
+            payload["currentTab"] = engine._current_target
+
+            session_id = engine._sessions.get(engine._current_target or "")
+            if not isinstance(session_id, str):
+                try:
+                    page = await engine.ensure_page()
+                    session_id = page.get("sessionId") if isinstance(page, dict) else None
+                except Exception:  # noqa: BLE001
+                    session_id = None
+            if isinstance(session_id, str):
+                try:
+                    raw = _loads(await _mirage_evaluate(
+                        "JSON.stringify({url: location.href, title: document.title,"
+                        " readyState: document.readyState})",
+                        session_id=session_id,
+                    ))
+                    if isinstance(raw, str):
+                        page_state = _loads(raw)
+                        if isinstance(page_state, dict):
+                            for key in ("url", "title", "readyState"):
+                                value = page_state.get(key)
+                                if isinstance(value, str):
+                                    payload[key] = value
+                except Exception:  # noqa: BLE001
+                    pass
+                stream = _dom_stream_status(session_id)
+                if stream is not None:
+                    payload["refsLive"] = bool(stream.get("refsLive"))
+                    cursor = stream.get("cursor")
+                    payload["domCursor"] = cursor if isinstance(cursor, int) else None
+            try:
+                from kahin.tools import dialog_mirage  # noqa: PLC0415
+
+                dialogs = _loads(await dialog_mirage.mirage_dialog_list())
+                payload["pendingDialogs"] = len(dialogs) if isinstance(dialogs, list) else 0
+            except Exception:  # noqa: BLE001
+                payload["pendingDialogs"] = 0
+        else:
+            payload["alive"] = bool(engine.is_alive()) if hasattr(engine, "is_alive") else True
+
+        return orjson.dumps(payload, option=orjson.OPT_INDENT_2).decode()
