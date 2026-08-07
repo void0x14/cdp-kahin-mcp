@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Eklenen
+- `kahin_mirage_wait_selector` artık `state=attached|visible|enabled`
+  (varsayılan `visible`) destekler; timeout yanıtı `code:"timeout"` ve son
+  `reason` ile döner.
+- `kahin_mirage_query` / `kahin_mirage_query_all` / `kahin_mirage_type` /
+  `kahin_mirage_wait_selector` locator motorunu kabul eder (`css=` / `text=` /
+  `role=` / `xpath=` / `nth=` ve `>>` zincirleme).
+- `kahin_mirage_click` / `kahin_mirage_hover` / `kahin_mirage_focus` aksiyon
+  öncesi Playwright tarzı actionability bekler (görünür, enabled, stabil,
+  engelsiz; retry + `timeout` parametresi).
+
 ## [0.3.7] — 2026-08-06
 
 ### Eklenen

@@ -26,6 +26,8 @@ from typing import Any
 import orjson
 
 from kahin._mcp import mcp
+from kahin.actionability import wait_for_ready
+from kahin.locators import selector_all_js, selector_js
 from kahin.tools._common import (
     _DW,
     _RO,
@@ -311,7 +313,7 @@ async def _element_point(
     Returns ("error", msg) tuple marker or coordinates."""
     expr = (
         "(() => {"
-        f"  const el = document.querySelector({_q(selector)});"
+        f"  const el = {selector_js(selector)};"
         '  if (!el) return {"error": "not found", "code": "element_not_found"};'
         '  el.scrollIntoView({block: "center", inline: "center"});'
         "  const r = el.getBoundingClientRect();"
@@ -367,14 +369,98 @@ async def _element_point(
     )
 
 
+async def _action_ready(
+    tool: str,
+    selector: str,
+    *,
+    timeout: float,
+    frame_id: str | None,
+    session_id: str | None,
+    state: str = "visible",
+) -> tuple[float, float] | str:
+    """Actionability wait before input dispatch. Returns (x, y) or error str.
+
+    ``state="attached"`` (focus-like path) waits with a single stable
+    observation; the default ``visible`` path uses the full actionability
+    probe (visible/enabled/in-view/hit-test) with the standard stability
+    requirement. All non-ok probe states are retried until the deadline —
+    actionability can change while a page settles (e.g. a disabled button
+    becomes enabled) — so the last failure is only returned on timeout.
+    """
+
+    async def probe(expression: str) -> dict[str, Any]:
+        result = await _safe_mirage_eval_result(tool, expression, frame_id, session_id=session_id)
+        if isinstance(result, str):
+            return {"error": "probe_failed"}
+        value = result.get("result") or {}
+        probe_value = value.get("value") if isinstance(value, dict) else None
+        return probe_value if isinstance(probe_value, dict) else {"error": "probe_failed"}
+
+    if state == "attached":
+        # Focus may legitimately target a hidden element. Use a presence-only
+        # probe instead of the visible/actionable geometry check.
+        expression = (
+            "(() => {"
+            f" const el = {selector_js(selector)};"
+            " return el ? {ok: true} : {code: 'element_not_found'};"
+            "})()"
+        )
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(0.0, timeout)
+        last: dict[str, Any] = {"code": "element_not_found"}
+        while True:
+            result = await _safe_mirage_eval_result(
+                tool, expression, frame_id, session_id=session_id,
+            )
+            if isinstance(result, str):
+                return result
+            if not isinstance(result, dict):
+                last = {"code": "invalid_dom_result"}
+            else:
+                value = result.get("result") or {}
+                probe_value = value.get("value") if isinstance(value, dict) else None
+                if isinstance(probe_value, dict):
+                    last = probe_value
+                    if probe_value.get("ok"):
+                        return 0.0, 0.0
+            if loop.time() >= deadline:
+                return _json_error(
+                    tool,
+                    f"element did not become attached: {last.get('code')}",
+                    str(last.get("code") or "timeout"),
+                    selector=selector,
+                    timeout=timeout,
+                )
+            await asyncio.sleep(0.1)
+
+    ready = await wait_for_ready(probe, selector, timeout=timeout)
+    if not ready.get("ok"):
+        return _json_error(
+            tool,
+            f"element is not actionable: {ready.get('reason') or ready.get('code')}",
+            str(ready.get("code") or "timeout"),
+            selector=selector,
+            timeout=timeout,
+        )
+    # The actionability probe measures rects in the frame's own viewport; for
+    # an iframe those coordinates must be offset by the hosting <iframe>
+    # position before Page.dispatchMouseEvent. _element_point applies that
+    # mapping, so the final dispatch point is always parent-viewport absolute.
+    point = await _element_point(selector, frame_id, session_id=session_id)
+    if not isinstance(point, tuple):
+        return point
+    return point
+
+
 # ============================== DOM (12) ===================================
 
 
 @mcp.tool(name="kahin_mirage_query", annotations=_RO)
 async def mirage_query(selector: str, frame_id: str | None = None) -> str:
-    """Mirage: info about the first element matching a CSS selector (tag, id,
-    class, text, visibility, rect) via Runtime.evaluate. frame_id: target an
-    iframe (kahin_mirage_frame_tree); main frame is the default."""
+    """Mirage: info about the first element matching a locator (tag, id,
+    class, text, visibility, rect) via Runtime.evaluate. Locator engines:
+    css=/text=/role=/xpath=, nth=, >> chaining; bare strings stay CSS.
+    frame_id: target an iframe (kahin_mirage_frame_tree); main frame default."""
     selector_value, error = _text_arg(
         selector, tool="kahin_mirage_query", field="selector", maximum=_MAX_SELECTOR_LENGTH,
     )
@@ -385,7 +471,7 @@ async def mirage_query(selector: str, frame_id: str | None = None) -> str:
     async with _healer_ref.safe("kahin_mirage_query", selector=selector_value[:80]):
         expr = (
             "(() => {"
-            f"  const el = document.querySelector({_q(selector_value)});"
+            f"  const el = {selector_js(selector_value)};"
             "  if (!el) return null;"
             "  const r = el.getBoundingClientRect();"
             "  return {"
@@ -404,6 +490,7 @@ async def mirage_query(selector: str, frame_id: str | None = None) -> str:
 @mcp.tool(name="kahin_mirage_query_all", annotations=_RO)
 async def mirage_query_all(selector: str, limit: int = 100, frame_id: str | None = None) -> str:
     """Mirage: list matching elements (tag, id, text, visibility), capped.
+    Locator engines: css=/text=/role=/xpath=, >> chaining (no trailing nth=).
     frame_id: target an iframe (kahin_mirage_frame_tree); main frame default."""
     selector_value, error = _text_arg(
         selector, tool="kahin_mirage_query_all", field="selector", maximum=_MAX_SELECTOR_LENGTH,
@@ -418,7 +505,7 @@ async def mirage_query_all(selector: str, limit: int = 100, frame_id: str | None
     ):
         expr = (
             "(() => {"
-            f"  const els = [...document.querySelectorAll({_q(selector_value)})].slice(0, {limit_value});"
+            f"  const els = [...({selector_all_js(selector_value)})].slice(0, {limit_value});"
             "  return els.map(el => {"
             "    const r = el.getBoundingClientRect();"
             "    return {"
@@ -434,10 +521,12 @@ async def mirage_query_all(selector: str, limit: int = 100, frame_id: str | None
 
 
 @mcp.tool(name="kahin_mirage_click", annotations=_DW)
-async def mirage_click(selector: str, frame_id: str | None = None) -> str:
-    """Mirage: click an element by CSS selector — real mouse events
-    (Page.dispatchMouseEvent mousedown+mouseup at the element center).
-    frame_id: target an iframe (kahin_mirage_frame_tree); main frame default."""
+async def mirage_click(selector: str, timeout: float = 10.0, frame_id: str | None = None) -> str:
+    """Mirage: click an element by locator (css=/text=/role=/xpath=, >> chain).
+    Waits for actionability (visible, enabled, stable, unobscured) up to
+    ``timeout`` seconds, then dispatches real mousedown+mouseup at the element
+    center. frame_id: target an iframe (kahin_mirage_frame_tree); main frame
+    default."""
     selector_value, error = _text_arg(
         selector, tool="kahin_mirage_click", field="selector", maximum=_MAX_SELECTOR_LENGTH,
     )
@@ -445,22 +534,31 @@ async def mirage_click(selector: str, frame_id: str | None = None) -> str:
         return error
     if not selector_value:
         return _json_error("kahin_mirage_click", "selector must not be empty", "invalid_argument", field="selector")
-    async with _healer_ref.safe("kahin_mirage_click", selector=selector_value[:80], frame_id=frame_id):
+    timeout_value = _bounded_float(timeout, minimum=0.0, maximum=_MAX_WAIT_TIMEOUT, default=10.0)
+    async with _healer_ref.safe(
+        "kahin_mirage_click", selector=selector_value[:80], timeout=timeout_value, frame_id=frame_id,
+    ):
         session_id, capture_error = await _capture_page_session("kahin_mirage_click")
         if capture_error:
             return capture_error
         assert session_id is not None
-        point = await _element_point(selector_value, frame_id, session_id=session_id)
-        if not isinstance(point, tuple):
-            return point
-        x, y = point
+        ready = await _action_ready(
+            "kahin_mirage_click", selector_value,
+            timeout=timeout_value, frame_id=frame_id, session_id=session_id,
+        )
+        if isinstance(ready, str):
+            return ready
+        x, y = ready
         down = await _dispatch_mouse("mousedown", x, y, button=0, buttons=1, session_id=session_id)
         if _is_error_response(down):
             return down
         up = await _dispatch_mouse("mouseup", x, y, button=0, buttons=0, session_id=session_id)
         if _is_error_response(up):
             return up
-        result = {"clicked": selector_value, "x": x, "y": y, "mousedown": down, "mouseup": up}
+        result = {
+            "clicked": selector_value, "x": x, "y": y, "waited": True,
+            "mousedown": down, "mouseup": up,
+        }
         return orjson.dumps(result, option=orjson.OPT_INDENT_2).decode()
 
 
@@ -490,7 +588,7 @@ async def mirage_type(selector: str, text: str, frame_id: str | None = None) -> 
         assert session_id is not None
         expr = (
             "(() => {"
-            f"  const el = document.querySelector({_q(selector_value)});"
+            f"  const el = {selector_js(selector_value)};"
             '  if (!el) return {"error": "not found", "code": "element_not_found"};'
             "  const tag = String(el.tagName || '').toLowerCase();"
             "  const inputType = String(el.type || '').toLowerCase();"
@@ -532,7 +630,16 @@ async def mirage_type(selector: str, text: str, frame_id: str | None = None) -> 
         native_value = orjson.loads(native)
         verify = await _safe_mirage_eval_result(
             "kahin_mirage_type",
-            "(() => { const el = document.querySelector(" + _q(selector_value) + "); if (!el) return {error: 'not found'}; const value = el.isContentEditable ? String(el.textContent || '') : String(el.value || ''); const beforeLength = " + str(focused.get("beforeLength", 0)) + "; const beforePrefix = " + _q(str(focused.get("beforePrefix", ""))) + "; return {afterLength: value.length, changed: value.length !== beforeLength || value.slice(0, 4096) !== beforePrefix}; })()",
+            (
+                "(() => {"
+                f"  const el = {selector_js(selector_value)};"
+                "  if (!el) return {error: 'not found'};"
+                "  const value = el.isContentEditable ? String(el.textContent || '') : String(el.value || '');"
+                f"  const beforeLength = {focused.get('beforeLength', 0)};"
+                f"  const beforePrefix = {_q(str(focused.get('beforePrefix', '')))};"
+                "  return {afterLength: value.length, changed: value.length !== beforeLength || value.slice(0, 4096) !== beforePrefix};"
+                "})()"
+            ),
             frame_id,
             session_id=session_id,
         )
@@ -648,9 +755,10 @@ async def mirage_set_attribute(selector: str, name: str, value: str, frame_id: s
 
 
 @mcp.tool(name="kahin_mirage_focus", annotations=_RW)
-async def mirage_focus(selector: str, frame_id: str | None = None) -> str:
-    """Mirage: focus the first matching element.
-    frame_id: target an iframe (kahin_mirage_frame_tree); main frame default."""
+async def mirage_focus(selector: str, timeout: float = 10.0, frame_id: str | None = None) -> str:
+    """Mirage: wait for the element to be present, then focus it.
+    Locator engines: css=/text=/role=/xpath=, >> chain. frame_id: target an
+    iframe (kahin_mirage_frame_tree); main frame default."""
     selector_value, error = _text_arg(
         selector, tool="kahin_mirage_focus", field="selector", maximum=_MAX_SELECTOR_LENGTH,
     )
@@ -658,23 +766,37 @@ async def mirage_focus(selector: str, frame_id: str | None = None) -> str:
         return error
     if not selector_value:
         return _json_error("kahin_mirage_focus", "selector must not be empty", "invalid_argument", field="selector")
-    async with _healer_ref.safe("kahin_mirage_focus", selector=selector_value[:80], frame_id=frame_id):
+    timeout_value = _bounded_float(timeout, minimum=0.0, maximum=_MAX_WAIT_TIMEOUT, default=10.0)
+    async with _healer_ref.safe(
+        "kahin_mirage_focus", selector=selector_value[:80], timeout=timeout_value, frame_id=frame_id,
+    ):
+        session_id, capture_error = await _capture_page_session("kahin_mirage_focus")
+        if capture_error:
+            return capture_error
+        assert session_id is not None
+        ready = await _action_ready(
+            "kahin_mirage_focus", selector_value,
+            timeout=timeout_value, frame_id=frame_id, session_id=session_id, state="attached",
+        )
+        if isinstance(ready, str):
+            return ready
         expr = (
             "(() => {"
-            f"  const el = document.querySelector({_q(selector_value)});"
+            f"  const el = {selector_js(selector_value)};"
             '  if (!el) return {"error": "not found"};'
             "  el.focus();"
             '  return "focused";'
             "})()"
         )
-        return await _safe_mirage_evaluate("kahin_mirage_focus", expr, frame_id)
+        return await _safe_mirage_evaluate("kahin_mirage_focus", expr, frame_id, session_id=session_id)
 
 
 @mcp.tool(name="kahin_mirage_hover", annotations=_RW)
-async def mirage_hover(selector: str, frame_id: str | None = None) -> str:
-    """Mirage: move the mouse over the element center (dispatchMouseEvent
-    mousemove). frame_id: target an iframe (kahin_mirage_frame_tree); main
-    frame default."""
+async def mirage_hover(selector: str, timeout: float = 10.0, frame_id: str | None = None) -> str:
+    """Mirage: wait for actionability, then move the mouse over the element
+    center (dispatchMouseEvent mousemove). Locator engines:
+    css=/text=/role=/xpath=, >> chain. frame_id: target an iframe
+    (kahin_mirage_frame_tree); main frame default."""
     selector_value, error = _text_arg(
         selector, tool="kahin_mirage_hover", field="selector", maximum=_MAX_SELECTOR_LENGTH,
     )
@@ -682,19 +804,25 @@ async def mirage_hover(selector: str, frame_id: str | None = None) -> str:
         return error
     if not selector_value:
         return _json_error("kahin_mirage_hover", "selector must not be empty", "invalid_argument", field="selector")
-    async with _healer_ref.safe("kahin_mirage_hover", selector=selector_value[:80], frame_id=frame_id):
+    timeout_value = _bounded_float(timeout, minimum=0.0, maximum=_MAX_WAIT_TIMEOUT, default=10.0)
+    async with _healer_ref.safe(
+        "kahin_mirage_hover", selector=selector_value[:80], timeout=timeout_value, frame_id=frame_id,
+    ):
         session_id, capture_error = await _capture_page_session("kahin_mirage_hover")
         if capture_error:
             return capture_error
         assert session_id is not None
-        point = await _element_point(selector_value, frame_id, session_id=session_id)
-        if not isinstance(point, tuple):
-            return point
-        x, y = point
+        ready = await _action_ready(
+            "kahin_mirage_hover", selector_value,
+            timeout=timeout_value, frame_id=frame_id, session_id=session_id,
+        )
+        if isinstance(ready, str):
+            return ready
+        x, y = ready
         move = await _dispatch_mouse("mousemove", x, y, button=0, buttons=0, session_id=session_id)
         if _is_error_response(move):
             return move
-        result = {"hovered": selector_value, "x": x, "y": y, "mousemove": move}
+        result = {"hovered": selector_value, "x": x, "y": y, "waited": True, "mousemove": move}
         return orjson.dumps(result, option=orjson.OPT_INDENT_2).decode()
 
 
@@ -740,10 +868,87 @@ async def mirage_get_html(selector: str | None = None, frame_id: str | None = No
         return await _safe_mirage_evaluate("kahin_mirage_get_html", expr, frame_id)
 
 
+_WAIT_STATES = ("attached", "visible", "enabled")
+_WAIT_STATE_JS: dict[str, str] = {
+    # Each template returns {ok:true} or {code, reason?}. ${ELEMENT_JS} is
+    # replaced with the locator-derived expression.
+    "attached": (
+        "(() => { const el = ${ELEMENT_JS};"
+        " return el ? {ok: true} : {code: 'element_not_found'}; })()"
+    ),
+    "visible": """(() => {
+        const el = ${ELEMENT_JS};
+        if (!el) return {code: "element_not_found"};
+        const r = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        if (r.width <= 0 || r.height <= 0 || style.display === "none" || style.visibility === "hidden")
+            return {code: "element_not_actionable", reason: "not_visible"};
+        return {ok: true};
+    })()""",
+    "enabled": """(() => {
+        const el = ${ELEMENT_JS};
+        if (!el) return {code: "element_not_found"};
+        if (el.disabled === true || el.getAttribute("aria-disabled") === "true")
+            return {code: "element_not_actionable", reason: "disabled"};
+        return {ok: true};
+    })()""",
+}
+
+
+async def _poll_state(
+    tool: str,
+    selector: str,
+    *,
+    timeout: float,
+    state_name: str,
+    frame_id: str | None,
+    session_id: str | None,
+    interval: float = 0.1,
+) -> dict[str, Any] | str:
+    """Poll the chosen state check until ok or deadline (never raises)."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + max(0.0, timeout)
+    template = _WAIT_STATE_JS[state_name]
+    expression = template.replace("${ELEMENT_JS}", selector_js(selector))
+    last: dict[str, Any] = {"code": "element_not_found"}
+    while True:
+        result = await _safe_mirage_eval_result(tool, expression, frame_id, session_id=session_id)
+        if isinstance(result, str):
+            return result
+        if result.get("exceptionDetails"):
+            return _json_error(
+                tool, "JavaScript evaluation failed", "javascript_error",
+                exception=result["exceptionDetails"],
+            )
+        value = result.get("result") or {}
+        probe = value.get("value") if isinstance(value, dict) else None
+        if isinstance(probe, dict):
+            last = probe
+            if probe.get("ok"):
+                return {"found": True, "state": state_name, "selector": selector, "frame_id": frame_id}
+        if loop.time() > deadline:
+            break
+        await asyncio.sleep(max(0.0, interval))
+    return {
+        "found": False,
+        "timeout": timeout,
+        "state": state_name,
+        "selector": selector,
+        "frame_id": frame_id,
+        "code": "timeout",
+        "reason": last.get("reason"),
+    }
+
+
 @mcp.tool(name="kahin_mirage_wait_selector", annotations=_RO)
-async def mirage_wait_selector(selector: str, timeout: float = 10.0, frame_id: str | None = None) -> str:
-    """Mirage: poll Runtime.evaluate until the selector matches (or timeout).
-    frame_id: target an iframe (kahin_mirage_frame_tree); main frame default."""
+async def mirage_wait_selector(
+    selector: str, timeout: float = 10.0, state: str = "visible", frame_id: str | None = None,
+) -> str:
+    """Mirage: wait until the selector matches a state (locator engines:
+    css=, text=, role=, xpath=, nth=, >> chaining). state:
+    attached|visible|enabled. Returns {found:true} or
+    {found:false, code:"timeout", reason}. frame_id: target an iframe
+    (kahin_mirage_frame_tree); main frame default."""
     selector_value, error = _text_arg(
         selector, tool="kahin_mirage_wait_selector", field="selector", maximum=_MAX_SELECTOR_LENGTH,
     )
@@ -751,50 +956,30 @@ async def mirage_wait_selector(selector: str, timeout: float = 10.0, frame_id: s
         return error
     if not selector_value:
         return _json_error("kahin_mirage_wait_selector", "selector must not be empty", "invalid_argument", field="selector")
-    timeout_value = _bounded_float(
-        timeout, minimum=0.0, maximum=_MAX_WAIT_TIMEOUT, default=10.0,
-    )
+    timeout_value = _bounded_float(timeout, minimum=0.0, maximum=_MAX_WAIT_TIMEOUT, default=10.0)
+    if state not in _WAIT_STATES:
+        return _json_error(
+            "kahin_mirage_wait_selector",
+            f"state must be one of {_WAIT_STATES}",
+            "invalid_argument",
+            field="state",
+            received=state,
+        )
     async with _healer_ref.safe(
-        "kahin_mirage_wait_selector", selector=selector_value[:80], timeout=timeout_value, frame_id=frame_id,
+        "kahin_mirage_wait_selector",
+        selector=selector_value[:80], timeout=timeout_value, state=state, frame_id=frame_id,
     ):
-        expr = f"!!document.querySelector({_q(selector_value)})"
-        deadline = asyncio.get_running_loop().time() + timeout_value
-        while True:
-            try:
-                result = await asyncio.wait_for(
-                    _safe_mirage_eval_result("kahin_mirage_wait_selector", expr, frame_id),
-                    timeout=5.0,
-                )
-            except asyncio.TimeoutError:
-                return _json_error(
-                    "kahin_mirage_wait_selector", "Selector evaluation timed out", "engine_timeout",
-                )
-            if isinstance(result, str):
-                return result
-            if result.get("exceptionDetails"):
-                return _json_error(
-                    "kahin_mirage_wait_selector",
-                    "JavaScript evaluation failed",
-                    "javascript_error",
-                    exception=result["exceptionDetails"],
-                )
-            value, has_value = _evaluate_value(result)
-            if not has_value:
-                return _json_error(
-                    "kahin_mirage_wait_selector",
-                    "Browser returned an invalid selector result",
-                    "invalid_dom_result",
-                )
-            if value is True:
-                return orjson.dumps({"found": True, "selector": selector_value, "frame_id": frame_id}).decode()
-            if asyncio.get_running_loop().time() >= deadline:
-                return orjson.dumps({
-                    "found": False,
-                    "selector": selector_value,
-                    "frame_id": frame_id,
-                    "timeout": timeout_value,
-                }).decode()
-            await asyncio.sleep(0.25)
+        session_id, capture_error = await _capture_page_session("kahin_mirage_wait_selector")
+        if capture_error:
+            return capture_error
+        assert session_id is not None
+        result = await _poll_state(
+            "kahin_mirage_wait_selector", selector_value,
+            timeout=timeout_value, state_name=state, frame_id=frame_id, session_id=session_id,
+        )
+        if isinstance(result, str):
+            return result
+        return orjson.dumps(result, option=orjson.OPT_INDENT_2).decode()
 
 
 @mcp.tool(name="kahin_mirage_get_value", annotations=_RO)
