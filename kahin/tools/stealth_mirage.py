@@ -4,8 +4,9 @@ Task 1: read-only self-audit probe (`kahin_stealth_audit`). Humanized
 input tools (Task 3): jittered Bézier mouse travel, humanized clicks and
 cadence typing. Task 4: per-domain identity rotation policy
 (`kahin_identity_pin`/`unpin`/`pins`/`for_domain`) backed by the bounded
-pin store. Proxy/geo sync and the fingerprint report land in later Faz 3
-tasks.
+pin store. Task 5: `kahin_fingerprint_report` (live page fingerprint a
+site would observe) and `kahin_proxy_resolve` (proxy exit-IP geo + sync
+recommendations); `browser_start(proxy=...)` applies the proxy env.
 """
 
 from __future__ import annotations
@@ -18,9 +19,12 @@ from kahin._mcp import mcp
 from kahin.humanize import bezier_trajectory, jittered_delay, typing_cadence
 from kahin.stealth import (
     STEALTH_PROBE_JS,
+    _redact_proxy,
     load_pins,
     normalize_domain,
     pin_identity,
+    proxy_env,
+    resolve_proxy_geo,
     score_checks,
     unpin_identity,
 )
@@ -351,4 +355,104 @@ async def identity_for_domain(domain: str) -> str:
         )
         return orjson.dumps({
             "domain": normalized, "name": name, "hint": hint,
+        }, option=orjson.OPT_INDENT_2).decode()
+
+
+_FINGERPRINT_REPORT_JS = r"""
+((tz, gl) => ({
+  userAgent: navigator.userAgent,
+  platform: navigator.platform,
+  oscpu: navigator.oscpu || "",
+  languages: navigator.languages || [],
+  hardwareConcurrency: navigator.hardwareConcurrency,
+  deviceMemory: navigator.deviceMemory,
+  timezone: tz,
+  locale: (navigator.language || ""),
+  screen: {width: screen.width, height: screen.height, colorDepth: screen.colorDepth},
+  viewport: {width: innerWidth, height: innerHeight},
+  webgl: gl,
+}))(
+  (() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone; } catch (e) { return ""; } })(),
+  (() => { try { const c = document.createElement("canvas"); const g = c.getContext("webgl") || c.getContext("experimental-webgl"); if (!g) { return {}; } const e = g.getExtension("WEBGL_debug_renderer_info"); return {vendor: e ? g.getParameter(e.UNMASKED_VENDOR_WEBGL) : "", renderer: e ? g.getParameter(e.UNMASKED_RENDERER_WEBGL) : ""}; } catch (e) { return {}; } })()
+)
+"""
+
+
+@mcp.tool(name="kahin_fingerprint_report", annotations=_RO)
+async def fingerprint_report(frame_id: str | None = None) -> str:
+    """Mirage: evaluate the REAL current page and report the fingerprint a
+    site would observe — userAgent, platform, oscpu, languages,
+    hardwareConcurrency, deviceMemory, timezone, locale, screen, viewport
+    and WebGL vendor/renderer. Evidence always comes from live page
+    evaluation, never from an emulation command acknowledgement."""
+    async with _healer_ref.safe("kahin_fingerprint_report", frame_id=frame_id):
+        session_id, capture_error = await _capture_page_session("kahin_fingerprint_report")
+        if capture_error:
+            return capture_error
+        assert session_id is not None
+        result = await _safe_mirage_eval_result(
+            "kahin_fingerprint_report", _FINGERPRINT_REPORT_JS, frame_id, session_id=session_id,
+        )
+        if isinstance(result, str):
+            return result
+        if result.get("exceptionDetails"):
+            return _json_error(
+                "kahin_fingerprint_report",
+                "JavaScript evaluation failed",
+                "javascript_error",
+            )
+        value = result.get("result") or {}
+        parsed = value.get("value") if isinstance(value, dict) else None
+        if not isinstance(parsed, dict):
+            return _json_error(
+                "kahin_fingerprint_report",
+                "report evaluate returned no value",
+                "invalid_engine_response",
+            )
+        return orjson.dumps({
+            "engine": "mirage",
+            "summary": parsed,
+        }, option=orjson.OPT_INDENT_2).decode()
+
+
+@mcp.tool(name="kahin_proxy_resolve", annotations=_RO)
+async def proxy_resolve(proxy_url: str, timeout: float = 5.0) -> str:
+    """Resolve a proxy's exit IP geo THROUGH the proxy (http/https; socks4/
+    socks5 need the optional socksio package) and recommend matching
+    timezone/locale/geolocation overrides. Credentials in the URL are never
+    echoed back. Failures are structured with code=proxy_resolve_failed."""
+    proxy_value, error = _text_arg(
+        proxy_url, tool="kahin_proxy_resolve", field="proxy_url", maximum=1_024,
+    )
+    if error:
+        return error
+    timeout_value = _bounded_float(timeout, minimum=1.0, maximum=30.0, default=5.0)
+    redacted = _redact_proxy(proxy_value)
+    async with _healer_ref.safe(
+        "kahin_proxy_resolve", proxy_url=redacted, timeout=timeout_value,
+    ):
+        try:
+            proxy_env(proxy_value)
+        except ValueError as exc:
+            return _json_error(
+                "kahin_proxy_resolve", str(exc), "invalid_argument", field="proxy_url",
+            )
+        geo = await asyncio.to_thread(resolve_proxy_geo, proxy_value, timeout_value)
+        if geo.get("error"):
+            return orjson.dumps({
+                "proxy": redacted,
+                **geo,
+            }, option=orjson.OPT_INDENT_2).decode()
+        return orjson.dumps({
+            "proxy": redacted,
+            "geo": geo,
+            "recommended": {
+                "timezone": geo.get("timezone") or None,
+                "locale": geo.get("country_code") or None,
+                "geolocation": {
+                    "latitude": geo.get("latitude"),
+                    "longitude": geo.get("longitude"),
+                },
+            },
+            "hint": "pass proxy=... to kahin_browser_start; set timezone/locale/geolocation with the emulation tools",
         }, option=orjson.OPT_INDENT_2).decode()

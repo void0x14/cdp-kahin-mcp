@@ -17,10 +17,13 @@ could mutate the page.
 
 from __future__ import annotations
 
+import importlib.util
 import re
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
+import httpx
 import orjson
 
 STEALTH_PROBE_JS = r"""
@@ -190,3 +193,127 @@ def unpin_identity(domain: str) -> dict[str, str] | None:
     pins.pop(normalized, None)
     save_pins(pins)
     return None
+
+
+# Proxy/geo sync (Faz 3 Task 5): the browser layer applies a proxy through
+# environment variables (Camoufox passes our env through to the Firefox
+# child verbatim), and geo resolution runs THROUGH the proxy so the exit IP
+# is what actually gets probed. Credentials live only inside the env dict
+# that the browser consumes; every display surface uses ``_redact_proxy``.
+_PROXY_SCHEMES = ("http", "https", "socks4", "socks5")
+_PROXY_GEO_ENDPOINT = "https://ipapi.co/json/"
+_PROXY_GEO_MAX_BYTES = 64 * 1024
+
+
+def _redact_proxy(proxy_url: str) -> str:
+    """Strip userinfo (credentials) from a proxy URL for display/logging."""
+    try:
+        parsed = urlparse(proxy_url)
+        if parsed.scheme and parsed.hostname:
+            port = parsed.port
+            netloc = f"{parsed.hostname}:{port}" if port else parsed.hostname
+            return f"{parsed.scheme}://{netloc}"
+    except ValueError:
+        pass
+    return "<proxy>"
+
+
+def proxy_env(proxy_url: str) -> dict[str, str]:
+    """Map a single proxy URL to the env variables Camoufox/Firefox respect.
+
+    Validates the URL strictly (scheme http/https/socks4/socks5, hostname
+    required, numeric port, no whitespace/control characters) and raises
+    ``ValueError`` otherwise. The message never embeds credentials.
+    ``NO_PROXY`` keeps loopback traffic out of the proxy so local calls
+    (and the sidecar itself) are never routed through it.
+    """
+    raw = (proxy_url or "").strip()
+    if not raw:
+        raise ValueError("proxy URL must not be empty")
+    if any(ch.isspace() or ord(ch) < 32 for ch in raw):
+        raise ValueError("proxy URL must not contain whitespace or control characters")
+    try:
+        parsed = urlparse(raw)
+        parsed.port  # validates numeric port range
+    except ValueError:
+        raise ValueError("proxy URL has an invalid port") from None
+    if parsed.scheme not in _PROXY_SCHEMES:
+        raise ValueError(
+            f"unsupported proxy scheme {parsed.scheme!r}; use http, https, socks4 or socks5"
+        )
+    if not parsed.hostname:
+        raise ValueError(f"proxy URL is missing a host: {_redact_proxy(raw)!r}")
+    return {
+        "HTTPS_PROXY": raw,
+        "HTTP_PROXY": raw,
+        "ALL_PROXY": raw,
+        "NO_PROXY": "localhost,127.0.0.1,::1",
+    }
+
+
+def _bounded_geo_text(value: Any, maximum: int) -> str:
+    if not isinstance(value, str):
+        return ""
+    return value[:maximum]
+
+
+def resolve_proxy_geo(proxy_url: str, timeout: float = 5.0) -> dict[str, Any]:
+    """Resolve the proxy's exit IP geo by fetching ipapi.co THROUGH it.
+
+    Returns ``{ip, timezone, country_code, country_name, city, latitude,
+    longitude}`` on success; every failure returns a structured
+    ``{"error", "code": "proxy_resolve_failed", "proxy": <redacted>}``
+    payload. SOCKS proxies need the optional ``socksio`` package
+    (``httpx[socks]``); without it the failure is deterministic and never
+    touches the network. Error text never includes proxy credentials.
+    """
+    redacted = _redact_proxy(proxy_url)
+    try:
+        proxy_env(proxy_url)
+    except ValueError as exc:
+        return {"error": str(exc), "code": "proxy_resolve_failed", "proxy": redacted}
+    scheme = urlparse(proxy_url).scheme
+    if scheme in ("socks4", "socks5") and importlib.util.find_spec("socksio") is None:
+        return {
+            "error": (
+                "SOCKS proxy geo resolution requires the optional socksio package "
+                "(pip install 'httpx[socks]'); use an http/https proxy or install socksio"
+            ),
+            "code": "proxy_resolve_failed",
+            "capability": "socks_unsupported",
+            "proxy": redacted,
+        }
+    try:
+        with httpx.Client(proxy=proxy_url, timeout=timeout) as client:
+            response = client.get(_PROXY_GEO_ENDPOINT)
+            response.raise_for_status()
+            if len(response.content) > _PROXY_GEO_MAX_BYTES:
+                return {
+                    "error": "proxy geo resolution returned an oversized payload",
+                    "code": "proxy_resolve_failed",
+                    "proxy": redacted,
+                }
+            payload = response.json()
+    except Exception as exc:  # noqa: BLE001 - structured failure contract
+        return {
+            "error": f"proxy geo resolution failed ({type(exc).__name__})",
+            "code": "proxy_resolve_failed",
+            "proxy": redacted,
+        }
+    if not isinstance(payload, dict):
+        return {
+            "error": "proxy geo resolution returned a non-object payload",
+            "code": "proxy_resolve_failed",
+            "proxy": redacted,
+        }
+    latitude = payload.get("latitude")
+    longitude = payload.get("longitude")
+    return {
+        "ip": _bounded_geo_text(payload.get("ip"), 64),
+        "timezone": _bounded_geo_text(payload.get("timezone"), 128),
+        "country_code": _bounded_geo_text(payload.get("country_code"), 8),
+        "country_name": _bounded_geo_text(payload.get("country_name"), 128),
+        "city": _bounded_geo_text(payload.get("city"), 128),
+        "latitude": latitude if isinstance(latitude, (int, float)) else None,
+        "longitude": longitude if isinstance(longitude, (int, float)) else None,
+    }

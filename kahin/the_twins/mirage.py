@@ -284,6 +284,7 @@ class Mirage(BrowserEngine):
         # ``kahin_identity_report``.
         self._identity_config: dict[str, Any] | None = None
         self._identity_name: str | None = None
+        self._proxy_url: str | None = None
         self._write_lock = asyncio.Lock()
         self._page_lock = asyncio.Lock()
         # Switching the current tab is a routing operation, not browser
@@ -379,6 +380,7 @@ class Mirage(BrowserEngine):
         self._reset_capture_state(wake_waiters=False)
         self._identity_config = None
         self._identity_name = None
+        self._proxy_url = None
         identity_config = kwargs.get("identity")
         identity_name = kwargs.get("identity_name")
         self._identity_config = (
@@ -406,6 +408,26 @@ class Mirage(BrowserEngine):
                 except Exception:  # noqa: BLE001 - identity must not crash boot
                     logger.warning("identity config injection failed; using defaults", exc_info=True)
         env = {**os.environ, **opts["env"]}
+        # Proxy (Faz 3 Task 5): merge through the same env seam the sidecar
+        # passes to the Camoufox child (create_subprocess_exec env below).
+        # Firefox honors ALL_PROXY/HTTPS_PROXY/HTTP_PROXY/NO_PROXY for its
+        # network layer; the helper validates and maps a single proxy URL.
+        # Credentials stay inside the env only — never logged. The raw URL
+        # is retained as engine metadata so a later browser_start reuse can
+        # detect a requested configuration mismatch instead of silently
+        # ignoring it. A failed merge must never crash boot.
+        proxy_url = kwargs.get("proxy")
+        if isinstance(proxy_url, str) and proxy_url.strip():
+            from kahin.stealth import proxy_env  # noqa: PLC0415 - pure helper
+
+            try:
+                env.update(proxy_env(proxy_url))
+                self._proxy_url = proxy_url
+            except ValueError:
+                logger.warning("proxy env merge skipped: invalid proxy URL")
+                self._proxy_url = None
+        else:
+            self._proxy_url = None
 
         # firefox_user_prefs -> <profile>/user.js (webgl etc. must be set
         # before the browser boots; the sidecar only mkdirs the profile).
@@ -1602,6 +1624,7 @@ class Mirage(BrowserEngine):
         self._reset_capture_state(wake_waiters=True)
         self._identity_config = None
         self._identity_name = None
+        self._proxy_url = None
         reader, self._reader = self._reader, None
         if reader is not None:
             reader.cancel()

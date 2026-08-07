@@ -141,12 +141,55 @@ async def _engine_is_healthy(engine: Any) -> bool:
     return bool(engine.is_alive())
 
 
+def _engine_config_conflict(
+    engine: Any,
+    *,
+    proxy: str | None,
+    identity_config: dict[str, Any] | None,
+    identity_name: str | None,
+) -> dict[str, Any] | None:
+    """A healthy engine reuse must never silently ignore a requested
+    identity/proxy that differs from the active configuration. Returns a
+    structured conflict payload (credentials redacted) or None when reuse
+    is safe. Only meaningful for Mirage, which records identity/proxy
+    metadata; Shadow applies neither."""
+    from kahin.stealth import _redact_proxy  # noqa: PLC0415 - pure helper
+
+    active_proxy = getattr(engine, "_proxy_url", None)
+    active_identity_name = getattr(engine, "_identity_name", None)
+    active_identity_config = getattr(engine, "_identity_config", None)
+    requested: dict[str, Any] = {}
+    active: dict[str, Any] = {}
+    if proxy is not None and proxy != active_proxy:
+        requested["proxy"] = _redact_proxy(proxy)
+        active["proxy"] = _redact_proxy(active_proxy) if active_proxy else None
+    if identity_name is not None and identity_name != active_identity_name:
+        requested["identity"] = identity_name
+        active["identity"] = active_identity_name or None
+    elif identity_config is not None and identity_config != active_identity_config:
+        requested["identity"] = identity_name or "inline config"
+        active["identity"] = active_identity_name or "inline config"
+    if not requested:
+        return None
+    return {
+        "error": (
+            "Engine already running with a different identity/proxy configuration; "
+            "the requested configuration would be silently ignored."
+        ),
+        "hint": "Stop the engine with kahin_browser_stop, then start again with the requested identity/proxy.",
+        "code": "engine_config_conflict",
+        "requested": requested,
+        "active": active,
+    }
+
+
 @mcp.tool(name="kahin_browser_start", annotations=_RW)
 async def browser_start(
     engine: str = "mirage",
     headless: bool = True,
     port: int = 0,
     identity: str | dict[str, Any] | None = None,
+    proxy: str | None = None,
 ) -> str:
     """Start or reuse one browser engine.
 
@@ -159,6 +202,11 @@ async def browser_start(
     browser. ``identity`` pins a Camoufox fingerprint at launch: either a
     saved identity name (``kahin_identity_save``/``kahin_identity_new``) or
     an inline config dict. Identity applies to Mirage only, never Shadow.
+    ``proxy`` routes the browser through a proxy URL (http/https/socks4/
+    socks5) via its environment; it applies to Mirage only, never Shadow,
+    and credentials are never echoed back. Reusing a healthy engine that
+    runs a different identity/proxy is a conflict (``engine_config_conflict``),
+    never a silent ignore — stop the engine first to change configuration.
     """
     if not isinstance(engine, str):
         return _json_error("kahin_browser_start", "engine must be a string", "invalid_argument", field="engine")
@@ -187,6 +235,29 @@ async def browser_start(
             "invalid_argument",
             field="identity",
         )
+    proxy_value: str | None = None
+    if proxy is not None:
+        if not isinstance(proxy, str):
+            return _json_error(
+                "kahin_browser_start",
+                "proxy must be a string proxy URL (http/https/socks4/socks5)",
+                "invalid_argument",
+                field="proxy",
+            )
+        stripped = proxy.strip()
+        if stripped:
+            from kahin.stealth import proxy_env  # noqa: PLC0415 - pure helper
+
+            try:
+                proxy_env(stripped)
+            except ValueError as exc:
+                return _json_error(
+                    "kahin_browser_start",
+                    str(exc),
+                    "invalid_argument",
+                    field="proxy",
+                )
+            proxy_value = stripped
 
     identity_config: dict[str, Any] | None = None
     identity_name: str | None = None
@@ -265,6 +336,18 @@ async def browser_start(
                     if current_kind == requested_kind:
                         # Same browser, same process: callers may safely make
                         # start part of their setup without leaking a child.
+                        # A requested identity/proxy that differs from the
+                        # active configuration is a conflict, never silently
+                        # ignored (Faz 3 Task 5).
+                        if current_kind == "mirage":
+                            conflict = _engine_config_conflict(
+                                current,
+                                proxy=proxy_value,
+                                identity_config=identity_config,
+                                identity_name=identity_name,
+                            )
+                            if conflict is not None:
+                                return orjson.dumps(conflict, option=orjson.OPT_INDENT_2).decode()
                         current_port = (
                             getattr(current, "port", None) if current_kind == "shadow" else 0
                         )
@@ -308,7 +391,11 @@ async def browser_start(
                 if engine == "shadow":
                     start_kwargs: dict[str, Any] = {}
                 else:
-                    start_kwargs = {"identity": identity_config, "identity_name": identity_name}
+                    start_kwargs = {
+                        "identity": identity_config,
+                        "identity_name": identity_name,
+                        "proxy": proxy_value,
+                    }
                 await asyncio.wait_for(
                     candidate.start(headless=headless, port=actual_port, **start_kwargs),
                     timeout=_ENGINE_START_TIMEOUT,

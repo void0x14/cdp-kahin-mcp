@@ -7,7 +7,9 @@ and cadence typing (real keydown/keyup pairs with jittered delays). Every
 scenario drives the same async functions the MCP server exposes, so the
 JSON-string tool contract is what gets verified. Task 4: the per-domain
 identity pin policy — pin/unpin/pins/for_domain through the public tool
-functions, with a real saved identity.
+functions, with a real saved identity. Task 5: the live fingerprint
+report, proxy_resolve validation/capability errors, and the
+browser_start(proxy=...) configuration-conflict contract on engine reuse.
 """
 
 from __future__ import annotations
@@ -165,3 +167,85 @@ async def test_identity_pin_roundtrip(
         assert _loads(await stealth_mirage.identity_pins())["pins"] == {}
     finally:
         await agent_mirage.identity_delete("pin-e2e")
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_report_live_page(mirage_tools: None) -> None:
+    await pilot.navigate(url=_doc("<html><body>fp</body></html>"))
+    await asyncio.sleep(0.2)
+    result = _loads(await stealth_mirage.fingerprint_report())
+    assert result.get("engine") == "mirage", result
+    summary = result.get("summary") or {}
+    assert summary.get("userAgent"), summary
+    assert summary.get("platform"), summary
+    assert summary.get("timezone"), summary
+    assert summary.get("locale"), summary
+    assert isinstance(summary.get("screen"), dict) and summary["screen"].get("width", 0) > 0
+    assert isinstance(summary.get("viewport"), dict) and summary["viewport"].get("width", 0) > 0
+    assert isinstance(summary.get("languages"), list) and summary["languages"]
+    assert isinstance(summary.get("webgl"), dict)
+    assert "hardwareConcurrency" in summary
+
+
+@pytest.mark.asyncio
+async def test_proxy_resolve_validation_and_capabilities(mirage_tools: None) -> None:
+    bad = _loads(await stealth_mirage.proxy_resolve("not a proxy"))
+    assert bad.get("code") == "invalid_argument", bad
+    assert "error" in bad
+    unreachable = _loads(await stealth_mirage.proxy_resolve("http://127.0.0.1:1", timeout=2.0))
+    assert unreachable.get("code") == "proxy_resolve_failed", unreachable
+    assert "error" in unreachable
+    assert unreachable.get("proxy") == "http://127.0.0.1:1"
+    creds = _loads(await stealth_mirage.proxy_resolve(
+        "http://user:pass@127.0.0.1:1", timeout=2.0,
+    ))
+    assert "user:pass" not in creds.get("proxy", ""), creds
+
+
+@pytest.mark.asyncio
+async def test_browser_start_identity_conflict(mirage_tools: None) -> None:
+    created = _loads(await agent_mirage.identity_new("conflict-e2e"))
+    assert created.get("saved"), created
+    try:
+        conflict = _loads(await pilot.browser_start(engine="mirage", identity="conflict-e2e"))
+        assert conflict.get("code") == "engine_config_conflict", conflict
+        assert conflict.get("requested") == {"identity": "conflict-e2e"}, conflict
+    finally:
+        await agent_mirage.identity_delete("conflict-e2e")
+
+
+@pytest.mark.asyncio
+async def test_browser_start_proxy_conflict_and_reuse(mirage_tools: None) -> None:
+    # mirage_tools fixture runs an engine WITHOUT proxy; requesting one
+    # must be a structured conflict, never a silent ignore.
+    conflict = _loads(await pilot.browser_start(engine="mirage", proxy="http://127.0.0.1:8080"))
+    assert conflict.get("code") == "engine_config_conflict", conflict
+    assert "kahin_browser_stop" in conflict.get("hint", ""), conflict
+    assert conflict.get("requested") == {"proxy": "http://127.0.0.1:8080"}, conflict
+    assert conflict.get("active") == {"proxy": None}, conflict
+    # no proxy requested → plain idempotent reuse
+    reuse = _loads(await pilot.browser_start(engine="mirage"))
+    assert reuse.get("status") == "reused", reuse
+
+
+@pytest.mark.asyncio
+async def test_browser_start_proxy_records_active_metadata() -> None:
+    from kahin import _state
+
+    stopped = _loads(await pilot.browser_stop())
+    # No engine is running without the fixture: engine_unavailable is fine.
+    assert stopped.get("status") == "stopped" or stopped.get("code") == "engine_unavailable", stopped
+    started = _loads(await pilot.browser_start(engine="mirage", proxy="http://127.0.0.1:1"))
+    assert started.get("status") == "started", started
+    try:
+        engine = _state._current_engine
+        assert engine is not None
+        assert getattr(engine, "_proxy_url", None) == "http://127.0.0.1:1"
+        # identical request reuses cleanly
+        reuse = _loads(await pilot.browser_start(engine="mirage", proxy="http://127.0.0.1:1"))
+        assert reuse.get("status") == "reused", reuse
+        # a different proxy is a conflict
+        conflict = _loads(await pilot.browser_start(engine="mirage", proxy="http://127.0.0.1:2"))
+        assert conflict.get("code") == "engine_config_conflict", conflict
+    finally:
+        await pilot.browser_stop()

@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
+from typing import Any
 
 import pytest
 
 from kahin.stealth import (
     STEALTH_PROBE_JS,
+    _redact_proxy,
     load_pins,
     normalize_domain,
     pin_identity,
     pins_path,
+    proxy_env,
+    resolve_proxy_geo,
     save_pins,
     score_checks,
     unpin_identity,
@@ -136,3 +141,134 @@ def test_load_pins_corrupt_or_missing_store_is_empty(tmp_path, monkeypatch) -> N
     assert load_pins() == {}
     pins_file.write_text("{not json", encoding="utf-8")
     assert load_pins() == {}
+
+
+def test_proxy_env_mapping() -> None:
+    env = proxy_env("socks5://user:pass@127.0.0.1:1080")
+    assert env["HTTPS_PROXY"] == "socks5://user:pass@127.0.0.1:1080"
+    assert env["HTTP_PROXY"] == "socks5://user:pass@127.0.0.1:1080"
+    assert env["ALL_PROXY"] == "socks5://user:pass@127.0.0.1:1080"
+    assert env["NO_PROXY"] == "localhost,127.0.0.1,::1"
+
+
+def test_proxy_env_accepts_http_https_socks4() -> None:
+    for url in (
+        "http://127.0.0.1:8080",
+        "https://proxy.example.com:443",
+        "socks4://10.0.0.1:1080",
+    ):
+        env = proxy_env(url)
+        assert env["ALL_PROXY"] == url
+
+
+def test_proxy_env_rejects_nonsense() -> None:
+    for bad in (
+        "not a proxy",
+        "",
+        "ftp://127.0.0.1:21",
+        "http://",
+        "socks5://",
+        "http://host:notaport",
+        "http://host:70000",
+        "http://host:8080/path with space",
+        "http://user:pass@\nhost:8080",
+    ):
+        with pytest.raises(ValueError):
+            proxy_env(bad)
+
+
+def test_proxy_env_errors_never_embed_credentials() -> None:
+    with pytest.raises(ValueError) as excinfo:
+        proxy_env("http://user:supersecret@:8080")
+    assert "supersecret" not in str(excinfo.value)
+
+
+def test_redact_proxy_strips_credentials() -> None:
+    assert _redact_proxy("socks5://user:pass@127.0.0.1:1080") == "socks5://127.0.0.1:1080"
+    redacted = _redact_proxy("http://user:secret@example.com:8080")
+    assert "user" not in redacted and "secret" not in redacted
+    assert _redact_proxy("garbage") == "<proxy>"
+
+
+def test_resolve_proxy_geo_http_through_proxy(monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+
+    class _FakeGeoResponse:
+        def __init__(self, payload: dict[str, Any]) -> None:
+            self.content = b"{}"
+            self._payload = payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, Any]:
+            return self._payload
+
+    class _FakeClient:
+        def __init__(self, proxy: str, timeout: float) -> None:
+            captured["proxy"] = proxy
+            captured["timeout"] = timeout
+
+        def __enter__(self) -> _FakeClient:
+            return self
+
+        def __exit__(self, *exc: Any) -> bool:
+            return False
+
+        def get(self, url: str) -> _FakeGeoResponse:
+            captured["url"] = url
+            return _FakeGeoResponse({
+                "ip": "1.2.3.4",
+                "timezone": "Europe/Istanbul",
+                "country_code": "TR",
+                "country_name": "Turkey",
+                "city": "Istanbul",
+                "latitude": 41.0,
+                "longitude": 28.9,
+            })
+
+    monkeypatch.setattr("kahin.stealth.httpx.Client", _FakeClient)
+    geo = resolve_proxy_geo("http://user:pass@127.0.0.1:8080", timeout=3.0)
+    assert geo["ip"] == "1.2.3.4"
+    assert geo["timezone"] == "Europe/Istanbul"
+    assert geo["country_code"] == "TR"
+    assert geo["latitude"] == 41.0
+    assert captured["proxy"] == "http://user:pass@127.0.0.1:8080"
+    assert captured["timeout"] == 3.0
+    assert "ipapi.co" in captured["url"]
+
+
+def test_resolve_proxy_geo_failure_is_structured(monkeypatch) -> None:
+    class _BoomClient:
+        def __init__(self, proxy: str, timeout: float) -> None:
+            pass
+
+        def __enter__(self) -> _BoomClient:
+            return self
+
+        def __exit__(self, *exc: Any) -> bool:
+            return False
+
+        def get(self, url: str) -> None:
+            raise ConnectionError("boom")
+
+    monkeypatch.setattr("kahin.stealth.httpx.Client", _BoomClient)
+    geo = resolve_proxy_geo("http://127.0.0.1:1")
+    assert geo.get("code") == "proxy_resolve_failed"
+    assert "error" in geo
+    assert geo.get("proxy") == "http://127.0.0.1:1"
+
+
+def test_resolve_proxy_geo_invalid_url_is_structured() -> None:
+    geo = resolve_proxy_geo("not a proxy")
+    assert geo.get("code") == "proxy_resolve_failed"
+    assert "error" in geo
+
+
+def test_resolve_proxy_geo_socks_capability_error() -> None:
+    if importlib.util.find_spec("socksio") is not None:
+        pytest.skip("socksio installed; capability error path not applicable")
+    geo = resolve_proxy_geo("socks5://user:pass@127.0.0.1:1080")
+    assert geo.get("code") == "proxy_resolve_failed"
+    assert geo.get("capability") == "socks_unsupported"
+    assert "user:pass" not in geo.get("proxy", "")
