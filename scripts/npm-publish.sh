@@ -72,14 +72,18 @@ npm publish --access public
 # npm registry propagation is normally quick but not instantaneous. Do not
 # report a release as complete until a fresh registry read proves the exact
 # local version is visible to consumers.
-for attempt in 1 2 3 4 5; do
+# npm's registry/CDN can take longer than the upload itself to expose the new
+# version. Keep the publish job pending until an independent registry read
+# proves synchronization, rather than turning a successful publish into a
+# false-negative CI failure.
+for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
   PUBLISHED_AFTER=$(npm view @kahinmcp/kahin version 2>/dev/null || true)
   if [ "$PUBLISHED_AFTER" = "$LOCAL" ]; then
     verify_registry_package
     echo "published $LOCAL; registry synchronized"
     exit 0
   fi
-  sleep 2
+  sleep 5
 done
 
 echo "npm registry did not expose $LOCAL after publish (found: ${PUBLISHED_AFTER:-none})" >&2
