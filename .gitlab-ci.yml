@@ -119,19 +119,92 @@ stealth-regression:
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
     - if: '$CI_COMMIT_TAG =~ /^v[0-9]+\.[0-9]+\.[0-9]+$/'
 
-release-bump:
+release-prepare:
   stage: publish
   image: ghcr.io/astral-sh/uv:python3.14-bookworm
   needs: [release-check, real-e2e, stealth-regression]
-  resource_group: release
   variables:
     GIT_DEPTH: "0"
     GIT_STRATEGY: clone
   before_script:
     - apt-get update -qq
-    - apt-get install -y -qq curl git jq nodejs npm
+    - apt-get install -y -qq git nodejs npm
   script:
-    - bash scripts/release-bump.sh
+    - RELEASE_BUMP_MODE=prepare bash scripts/release-bump.sh
+  artifacts:
+    expire_in: 1 day
+    paths:
+      - package.json
+      - pyproject.toml
+      - uv.lock
+      - kahin/__init__.py
+      - bin/setup.mjs
+      - CHANGELOG.md
+      - lib/kahin-*.whl
+      - release-version.txt
+  rules:
+    - if: '$CI_COMMIT_MESSAGE =~ /^chore\(release\): v/'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      changes:
+        - package.json
+        - pyproject.toml
+        - uv.lock
+        - kahin/**
+        - lib/**
+        - bin/setup.mjs
+        - CHANGELOG.md
+        - README.md
+        - docs/**
+        - camoufox-harness/**
+        - scripts/**
+        - .gitlab-ci.yml
+
+release-publish:
+  stage: publish
+  image: node:20
+  needs:
+    - job: release-prepare
+      artifacts: true
+  script:
+    - test -s release-version.txt
+    - bash scripts/npm-publish.sh
+  rules:
+    - if: '$CI_COMMIT_MESSAGE =~ /^chore\(release\): v/'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      changes:
+        - package.json
+        - pyproject.toml
+        - uv.lock
+        - kahin/**
+        - lib/**
+        - bin/setup.mjs
+        - CHANGELOG.md
+        - README.md
+        - docs/**
+        - camoufox-harness/**
+        - scripts/**
+        - .gitlab-ci.yml
+
+release-commit-tag:
+  stage: publish
+  image: ghcr.io/astral-sh/uv:python3.14-bookworm
+  needs:
+    - job: release-prepare
+      artifacts: true
+    - job: release-publish
+      artifacts: false
+  resource_group: release
+  interruptible: false
+  variables:
+    GIT_DEPTH: "0"
+    GIT_STRATEGY: clone
+  before_script:
+    - apt-get update -qq
+    - apt-get install -y -qq git nodejs npm python3
+  script:
+    - RELEASE_BUMP_MODE=commit-tag bash scripts/release-bump.sh
   rules:
     - if: '$CI_COMMIT_MESSAGE =~ /^chore\(release\): v/'
       when: never

@@ -5,6 +5,12 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT"
 
 DEFAULT_BRANCH="${CI_DEFAULT_BRANCH:-main}"
+MODE="${RELEASE_BUMP_MODE:-commit-tag}"
+if [[ "$MODE" != "prepare" && "$MODE" != "commit-tag" ]]; then
+  echo "release-bump: unsupported mode $MODE" >&2
+  exit 2
+fi
+
 if [[ "${CI_COMMIT_BRANCH:-}" != "$DEFAULT_BRANCH" ]]; then
   echo "release-bump: not the default branch; nothing to do"
   exit 0
@@ -17,7 +23,9 @@ fi
 
 : "${CI_PROJECT_PATH:?CI_PROJECT_PATH is required}"
 : "${CI_PROJECT_ID:?CI_PROJECT_ID is required}"
-: "${GITLAB_PUSH_TOKEN:?GITLAB_PUSH_TOKEN is required for protected main/tag writes}"
+if [[ "$MODE" == "commit-tag" ]]; then
+  : "${GITLAB_PUSH_TOKEN:?GITLAB_PUSH_TOKEN is required for protected main/tag writes}"
+fi
 
 git config user.name "Kahin Release Bot"
 git config user.email "kahin-release-bot@noreply.gitlab.com"
@@ -59,56 +67,15 @@ else:
 PY
 )
 
-wait_for_tag_pipeline() {
-  local tag="$1" sha="$2" pipeline_id="" pipeline_status=""
-  local api_root="https://${CI_SERVER_HOST:-gitlab.com}/api/v4/projects/${CI_PROJECT_ID}"
-
-  for _ in $(seq 1 180); do
-    pipeline_id=$(curl --fail --silent --show-error \
-      "$api_root/pipelines?ref=$tag&sha=$sha&per_page=20" \
-      | jq -r --arg tag "$tag" --arg sha "$sha" \
-        'if type == "array" then ([.[] | select(.ref == $tag and .sha == $sha)] | .[0].id // empty) else empty end' \
-      || true)
-    if [[ -n "$pipeline_id" ]]; then
-      break
-    fi
-    sleep 10
-  done
-
-  if [[ -z "$pipeline_id" ]]; then
-    echo "release-bump: tag pipeline for $tag did not appear" >&2
-    return 1
-  fi
-
-  for _ in $(seq 1 180); do
-    pipeline_status=$(curl --fail --silent --show-error \
-      "$api_root/pipelines/$pipeline_id" \
-      | jq -r '.status // "unknown"' || true)
-    case "$pipeline_status" in
-      success)
-        echo "release-bump: tag pipeline $pipeline_id is green; npm registry gate passed"
-        return 0
-        ;;
-      failed|canceled|skipped|manual)
-        echo "release-bump: tag pipeline $pipeline_id ended $pipeline_status" >&2
-        return 1
-        ;;
-    esac
-    sleep 10
-  done
-
-  echo "release-bump: tag pipeline $pipeline_id did not finish in time" >&2
-  return 1
-}
-
 remote_tag_sha=$(git ls-remote origin "refs/tags/v${target_version}^{}" | awk 'NR == 1 { print $1 }')
 if [[ -z "$remote_tag_sha" ]]; then
   remote_tag_sha=$(git ls-remote origin "refs/tags/v${target_version}" | awk 'NR == 1 { print $1 }')
 fi
 if [[ -n "$remote_tag_sha" ]]; then
   if [[ "$remote_tag_sha" == "$current_head" ]]; then
-    wait_for_tag_pipeline "v${target_version}" "$current_head"
-    exit $?
+    printf '%s\n' "$target_version" > release-version.txt
+    echo "release-bump: v${target_version} already points at current main"
+    exit 0
   fi
   echo "release-bump: v${target_version} already exists at another commit" >&2
   exit 1
@@ -130,6 +97,12 @@ if [[ "$needs_prepare" -eq 1 ]]; then
   bash scripts/release-prepare.sh "$target_version"
 fi
 bash scripts/release-check.sh "$target_version"
+
+if [[ "$MODE" == "prepare" ]]; then
+  printf '%s\n' "$target_version" > release-version.txt
+  echo "release-bump: prepared v${target_version} for npm publish and commit/tag"
+  exit 0
+fi
 
 git add \
   package.json \
@@ -159,5 +132,4 @@ else
 fi
 git push "$push_url" "refs/tags/v${target_version}"
 unset push_url GITLAB_PUSH_TOKEN
-
-wait_for_tag_pipeline "v${target_version}" "$release_sha"
+echo "release-bump: committed and tagged v${target_version}; tag pipeline will verify npm"
