@@ -125,6 +125,7 @@ release-bump:
   resource_group: release
   variables:
     GIT_DEPTH: "0"
+    GIT_STRATEGY: clone
   before_script:
     - apt-get update -qq
     - apt-get install -y -qq curl git jq nodejs npm
