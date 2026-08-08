@@ -363,9 +363,13 @@ async def test_identity_rotation_changes_fingerprint(mirage_tools: None) -> None
     distinctness is produced by bounded retry-until-distinct at generation
     time (max 4 draws); under KAHIN_REQUIRE_STEALTH=1 this is a hard gate."""
     require_stealth = os.environ.get("KAHIN_REQUIRE_STEALTH") == "1"
-    base = _loads(await agent_mirage.identity_new("rot-base"))
+    # Use two explicit OS families so the live browser must expose at least
+    # two observable dimensions even on runners where WebGL is unavailable.
+    # Random-vs-random generation can legitimately differ only in WebGL, which
+    # made this gate depend on the runner's graphics stack.
+    base = _loads(await agent_mirage.identity_new("rot-base", os_target="linux"))
     assert base.get("saved"), base
-    candidate = _loads(await agent_mirage.identity_new("rot-candidate"))
+    candidate = _loads(await agent_mirage.identity_new("rot-candidate", os_target="windows"))
     assert candidate.get("saved"), candidate
     draws = 1
     while draws < 4 and not _identity_draw_differs(

@@ -85,6 +85,9 @@
 - Release tag’leri stealth regression kapısından geçmeden npm publish’e
   ulaşamaz; npm publish sonrası registry’den sürüm tekrar okunarak local
   package sürümüyle birebir eşleşme kanıtlanır.
+- Identity rotation e2e gate’i Linux/Windows kimlik çiftiyle en az iki canlı
+  fingerprint boyutunu deterministik doğrular; yalnızca runner WebGL’ine
+  bağlı rastgele identity çakışması artık release’i düşürmez.
 
 ## [0.3.7] — 2026-08-06
 
