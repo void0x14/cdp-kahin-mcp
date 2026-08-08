@@ -53,23 +53,28 @@ if [ "$PUBLISHED" = "$LOCAL" ]; then
   exit 0
 fi
 
-AUTH_TOKEN="${NPM_TOKEN:-${NODE_AUTH_TOKEN:-}}"
-if [[ -n "$AUTH_TOKEN" ]]; then
-  npm config set "//registry.npmjs.org/:_authToken=$AUTH_TOKEN" >/dev/null
-fi
+if [[ -n "${NPM_ID_TOKEN:-}" ]]; then
+  # GitLab's OIDC token is the authoritative release credential.  A stale
+  # legacy NPM_TOKEN may still be injected as a protected variable; never let
+  # it override trusted publishing.
+  AUTH_TOKEN=""
+  unset NPM_TOKEN NODE_AUTH_TOKEN
+  echo "using npm GitLab OIDC trusted publishing"
+else
+  AUTH_TOKEN="${NPM_TOKEN:-${NODE_AUTH_TOKEN:-}}"
+  if [[ -n "$AUTH_TOKEN" ]]; then
+    npm config set "//registry.npmjs.org/:_authToken=$AUTH_TOKEN" >/dev/null
+  fi
 
-if [[ -z "$AUTH_TOKEN" && -z "${NPM_ID_TOKEN:-}" ]]; then
-  echo "npm authentication missing; configure NPM_ID_TOKEN trusted publishing or NPM_TOKEN/NODE_AUTH_TOKEN" >&2
-  exit 1
-fi
+  if [[ -z "$AUTH_TOKEN" ]]; then
+    echo "npm authentication missing; configure NPM_ID_TOKEN trusted publishing or NPM_TOKEN/NODE_AUTH_TOKEN" >&2
+    exit 1
+  fi
 
-if [[ -n "$AUTH_TOKEN" ]]; then
   if ! npm whoami >/dev/null 2>&1; then
     echo "configured NPM_TOKEN/NODE_AUTH_TOKEN was rejected by npm" >&2
     exit 1
   fi
-else
-  echo "using npm GitLab OIDC trusted publishing"
 fi
 
 npm publish --access public
