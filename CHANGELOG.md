@@ -88,6 +88,11 @@
 - Identity rotation e2e gate’i Linux/Windows kimlik çiftiyle en az iki canlı
   fingerprint boyutunu deterministik doğrular; yalnızca runner WebGL’ine
   bağlı rastgele identity çakışması artık release’i düşürmez.
+- CI browser image’larına Mesa/llvmpipe runtime’ı eklenerek WebGL stealth
+  probe’u gerçek software-rendered context üzerinde doğrulanır; baseline
+  gevşetilmez.
+- Runner’da Mesa’nın gerçek software renderer’ı açıkça `llvmpipe` olarak
+  seçilir; WebGL gate’i yalnızca kütüphanelerin kurulu olmasına güvenmez.
 - CI browser gate’leri artık Mesa GL kütüphanelerini kurar; sayfa-içi WebGL
   renderer probe’u runner’da da okunur ve `fingerprint_report` GL’siz
   ortamda boş `webgl` döndürmez (identity/webgl gözlemlenebilirliği runner
