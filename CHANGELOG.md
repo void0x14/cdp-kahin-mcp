@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.3.8] — 2026-08-08
+
 ### Eklenen
 - `kahin_mirage_expect` / `kahin_mirage_check` / `kahin_mirage_uncheck` /
   `kahin_mirage_select_option` / `kahin_mirage_dblclick` / `kahin_mirage_drag` /
@@ -302,3 +304,4 @@ Tüm önemli değişiklikler bu dosyada tutulur. Format: [Keep a Changelog](http
 [0.1.7]: https://gitlab.com/void0x14/kahin-mcp/-/compare/v0.1.6...v0.1.7
 [0.3.6]: https://gitlab.com/void0x14/kahin-mcp/-/compare/v0.3.5...v0.3.6
 [0.3.7]: https://gitlab.com/void0x14/kahin-mcp/-/compare/v0.3.6...v0.3.7
+[0.3.8]: https://gitlab.com/void0x14/kahin-mcp/-/compare/v0.3.7...v0.3.8

@@ -1,6 +1,6 @@
 {
   "name": "@kahinmcp/kahin",
-  "version": "0.3.7",
+  "version": "0.3.8",
   "description": "Kahin \u2014 CDP ansiklopedisi + anti-detect browser otomasyon MCP sunucusu. Kurulumda 22 AI CLI arac\u0131n\u0131 otomatik tespit edip kendini kaydeder. Camoufox g\u00f6rsel varsay\u0131land\u0131r; Obscura h\u0131zl\u0131 CDP i\u015fleri i\u00e7in opt-in'dir.",
   "bin": {
     "kahin": "bin/kahin.mjs"
