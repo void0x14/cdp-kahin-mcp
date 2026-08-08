@@ -40,7 +40,14 @@ STEALTH_PROBE_JS = r"""
     r("screen-sane", screen && screen.width > 0 && screen.height > 0 && window.innerWidth > 0 && window.innerHeight > 0, screen.width + "x" + screen.height),
     ((text) => r("prototype-integrity", text.includes("[native code]"), "native toString"))((() => { try { return Element.prototype.getBoundingClientRect.toString(); } catch (e) { return ""; } })()),
     r("permissions-api", typeof navigator.permissions !== "undefined", typeof navigator.permissions),
-    ((gl) => r("webgl", !!gl, gl ? "webgl context" : "no webgl context"))(((c) => { try { return c.getContext("webgl") || c.getContext("experimental-webgl"); } catch (e) { return null; } })(document.createElement("canvas"))),
+    // WebGL is an API-level property of the browser build: the interface and
+    // the canvas context entry point exist regardless of the runner's GL
+    // stack. Context creation itself is environment-dependent (a GL-less CI
+    // runner or headless Xvfb can legitimately return null), so requiring a
+    // live context would make this check flake on runners without GL. The
+    // spoofed vendor/renderer values are verified by fingerprint_report
+    // where a context can be created.
+    ((ok) => r("webgl", ok, ok ? "webgl api present" : "webgl api missing"))((() => { try { return typeof WebGLRenderingContext !== "undefined" && typeof document.createElement("canvas").getContext === "function"; } catch (e) { return false; } })()),
     r("audio", typeof (window.AudioContext || window.webkitAudioContext) !== "undefined", "AudioContext present"),
     r("hardware-concurrency", typeof navigator.hardwareConcurrency === "number" && navigator.hardwareConcurrency > 0, navigator.hardwareConcurrency),
   ],

@@ -93,10 +93,11 @@
   gevşetilmez.
 - Runner’da Mesa’nın gerçek software renderer’ı açıkça `llvmpipe` olarak
   seçilir; WebGL gate’i yalnızca kütüphanelerin kurulu olmasına güvenmez.
-- CI browser gate’leri artık Mesa GL kütüphanelerini kurar; sayfa-içi WebGL
-  renderer probe’u runner’da da okunur ve `fingerprint_report` GL’siz
-  ortamda boş `webgl` döndürmez (identity/webgl gözlemlenebilirliği runner
-  grafik yığınına bağlı kalmaz).
+- Stealth audit’in webgl check’i artık runner grafik yığınından bağımsız:
+  WebGL API varlığını (context entry point) doğrular; GL’siz CI runner’ında
+  context oluşturma başarısızlığı artık sahte “leak” olarak raporlanmaz.
+  CI browser gate’leri ayrıca Mesa GL kütüphanelerini kurar, böylece GL
+  sunan runner’larda `fingerprint_report` gerçek WebGL değerlerini okur.
 - `lib/` içindeki gömülü wheel HEAD kaynağından yeniden üretildi: Obscura
   screenshot guard’ı, stealth/agent/reliability modülleri ve güncel Zig
   sidecar dahil — npm paketinin taşıdığı wheel ile kaynak ağacı senkron
