@@ -112,6 +112,7 @@ git add \
   bin/setup.mjs \
   CHANGELOG.md \
   "lib/kahin-${target_version}-py3-none-any.whl"
+git add -u lib
 
 if ! git diff --cached --quiet; then
   git commit -m "chore(release): v${target_version}"
