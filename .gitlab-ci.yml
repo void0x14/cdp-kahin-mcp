@@ -26,6 +26,7 @@ release-check:
         - docs/**
         - camoufox-harness/**
         - scripts/**
+        - .gitlab-ci.yml
 
 real-e2e:
   stage: verify
@@ -147,6 +148,7 @@ release-bump:
         - docs/**
         - camoufox-harness/**
         - scripts/**
+        - .gitlab-ci.yml
 
 npm-publish:
   stage: publish
