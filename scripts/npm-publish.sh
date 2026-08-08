@@ -38,4 +38,18 @@ if ! npm whoami >/dev/null 2>&1; then
 fi
 
 npm publish --access public --provenance=false
-echo "published $LOCAL"
+
+# npm registry propagation is normally quick but not instantaneous. Do not
+# report a release as complete until a fresh registry read proves the exact
+# local version is visible to consumers.
+for attempt in 1 2 3 4 5; do
+  PUBLISHED_AFTER=$(npm view @kahinmcp/kahin version 2>/dev/null || true)
+  if [ "$PUBLISHED_AFTER" = "$LOCAL" ]; then
+    echo "published $LOCAL; registry synchronized"
+    exit 0
+  fi
+  sleep 2
+done
+
+echo "npm registry did not expose $LOCAL after publish (found: ${PUBLISHED_AFTER:-none})" >&2
+exit 1

@@ -135,3 +135,8 @@ class Obscura(BrowserEngine):
 
     def on_death(self, callback) -> None:
         self._death_callbacks.append(callback)  # type: ignore[arg-type]
+
+    async def screenshot(self, format: str = "png", full_page: bool = False) -> bytes:
+        """Reject visual capture; screenshot work belongs to the Mirage engine."""
+        del format, full_page
+        raise RuntimeError("captureScreenshot is not supported by Obscura")

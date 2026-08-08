@@ -32,13 +32,16 @@ real-e2e:
       apt-get install -y -qq curl xz-utils passwd util-linux libgtk-3-0
       libdbus-glib-1-2 libdbus-1-3 libasound2 libx11-xcb1 libxcomposite1
       libxdamage1 libxfixes3 libxrandr2 libxtst6 libxss1 libatk1.0-0
-      libpango-1.0-0 libcairo2
+      libpango-1.0-0 libcairo2 xvfb xauth
     # Camoufox/Firefox must not be launched as Docker root. Keep the build
     # setup privileged, then run the real browser gate as an unprivileged user.
     - useradd --create-home --user-group --shell /bin/bash kahin-ci
     - chown -R kahin-ci:kahin-ci "$CI_PROJECT_DIR"
   script:
-    - runuser --user kahin-ci -- env HOME=/home/kahin-ci PATH="$PATH" bash scripts/real-e2e.sh
+    - >-
+      xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24 -ac"
+      runuser --user kahin-ci -- env HOME=/home/kahin-ci TZ=Etc/UTC PATH="$PATH"
+      bash scripts/real-e2e.sh
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
     - if: '$CI_COMMIT_TAG =~ /^v[0-9]+\.[0-9]+\.[0-9]+$/'
@@ -53,7 +56,7 @@ stealth-regression:
       apt-get install -y -qq curl xz-utils passwd util-linux libgtk-3-0
       libdbus-glib-1-2 libdbus-1-3 libasound2 libx11-xcb1 libxcomposite1
       libxdamage1 libxfixes3 libxrandr2 libxtst6 libxss1 libatk1.0-0
-      libpango-1.0-0 libcairo2
+      libpango-1.0-0 libcairo2 xvfb xauth
     # Mirror real-e2e: Camoufox/Firefox must not be launched as Docker
     # root — keep the build setup privileged, run the browser gate
     # unprivileged.
@@ -61,7 +64,8 @@ stealth-regression:
     - chown -R kahin-ci:kahin-ci "$CI_PROJECT_DIR"
   script:
     - |
-      runuser --user kahin-ci -- env HOME=/home/kahin-ci PATH="$PATH" bash -c '
+      xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24 -ac" \
+      runuser --user kahin-ci -- env HOME=/home/kahin-ci TZ=Etc/UTC PATH="$PATH" bash -c '
         set -euo pipefail
         cd "$CI_PROJECT_DIR"
         # Rebuild the Zig sidecar from this checkout (mirror
@@ -101,10 +105,11 @@ stealth-regression:
   rules:
     - if: '$CI_PIPELINE_SOURCE == "schedule"'
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - if: '$CI_COMMIT_TAG =~ /^v[0-9]+\.[0-9]+\.[0-9]+$/'
 
 npm-publish:
   stage: publish
-  needs: [release-check, real-e2e]
+  needs: [release-check, real-e2e, stealth-regression]
   script:
     - bash scripts/npm-publish.sh
   rules:

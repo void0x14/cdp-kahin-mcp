@@ -36,7 +36,7 @@ STEALTH_PROBE_JS = r"""
     r("languages", Array.isArray(navigator.languages) && navigator.languages.length > 0, navigator.languages && navigator.languages.join(",")),
     r("platform", typeof navigator.platform === "string" && navigator.platform.length > 0, navigator.platform),
     r("oscpu", typeof navigator.oscpu === "string" && navigator.oscpu.length > 0, navigator.oscpu),
-    ((tz) => r("timezone-sane", typeof tz === "string" && tz.length > 0 && tz.includes("/"), tz))((() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone; } catch (e) { return ""; } })()),
+    ((tz) => r("timezone-sane", typeof tz === "string" && tz.length > 0 && (tz === "UTC" || tz.includes("/")), tz))((() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone; } catch (e) { return ""; } })()),
     r("screen-sane", screen && screen.width > 0 && screen.height > 0 && window.innerWidth > 0 && window.innerHeight > 0, screen.width + "x" + screen.height),
     ((text) => r("prototype-integrity", text.includes("[native code]"), "native toString"))((() => { try { return Element.prototype.getBoundingClientRect.toString(); } catch (e) { return ""; } })()),
     r("permissions-api", typeof navigator.permissions !== "undefined", typeof navigator.permissions),

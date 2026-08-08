@@ -75,6 +75,17 @@
   asla atlanmaz (dürüst metadata/reuse kaydı; kimlik payload'ı metadata'da
   saklanmaz).
 
+### Düzeltilen
+- Obscura/Shadow doğrudan screenshot çağrısını artık fail-closed reddeder;
+  görsel capture sözleşmesi Mirage’a ait kalır ve generic CDP yolu Mirage’a
+  doğru şekilde yükseltilir.
+- Stealth CI gate’i Xvfb ile sabit bir grafik yüzeyinde ve `TZ=Etc/UTC` ile
+  çalışır; timezone probe’u geçerli `UTC` çıktısını da kabul eder. Böylece
+  runner’ın DISPLAY/TZ farkları gerçek stealth drift’i gibi raporlanmaz.
+- Release tag’leri stealth regression kapısından geçmeden npm publish’e
+  ulaşamaz; npm publish sonrası registry’den sürüm tekrar okunarak local
+  package sürümüyle birebir eşleşme kanıtlanır.
+
 ## [0.3.7] — 2026-08-06
 
 ### Eklenen
