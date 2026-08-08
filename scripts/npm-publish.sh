@@ -58,12 +58,21 @@ if [[ -n "$AUTH_TOKEN" ]]; then
   npm config set "//registry.npmjs.org/:_authToken=$AUTH_TOKEN" >/dev/null
 fi
 
-if ! npm whoami >/dev/null 2>&1; then
-  echo "npm authentication missing; provide NPM_TOKEN/NODE_AUTH_TOKEN in CI or login locally" >&2
+if [[ -z "$AUTH_TOKEN" && -z "${NPM_ID_TOKEN:-}" ]]; then
+  echo "npm authentication missing; configure NPM_ID_TOKEN trusted publishing or NPM_TOKEN/NODE_AUTH_TOKEN" >&2
   exit 1
 fi
 
-npm publish --access public --provenance=false
+if [[ -n "$AUTH_TOKEN" ]]; then
+  if ! npm whoami >/dev/null 2>&1; then
+    echo "configured NPM_TOKEN/NODE_AUTH_TOKEN was rejected by npm" >&2
+    exit 1
+  fi
+else
+  echo "using npm GitLab OIDC trusted publishing"
+fi
+
+npm publish --access public
 
 # npm registry propagation is normally quick but not instantaneous. Do not
 # report a release as complete until a fresh registry read proves the exact

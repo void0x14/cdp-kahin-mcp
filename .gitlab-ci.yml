@@ -162,10 +162,13 @@ release-prepare:
 
 release-publish:
   stage: publish
-  image: node:20
+  image: node:24
   needs:
     - job: release-prepare
       artifacts: true
+  id_tokens:
+    NPM_ID_TOKEN:
+      aud: "npm:registry.npmjs.org"
   script:
     - test -s release-version.txt
     - bash scripts/npm-publish.sh
@@ -225,7 +228,11 @@ release-commit-tag:
 
 npm-publish:
   stage: publish
+  image: node:24
   needs: [release-check, real-e2e, stealth-regression]
+  id_tokens:
+    NPM_ID_TOKEN:
+      aud: "npm:registry.npmjs.org"
   script:
     - bash scripts/npm-publish.sh
   rules:
