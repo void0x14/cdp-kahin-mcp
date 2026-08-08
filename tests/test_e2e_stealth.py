@@ -78,9 +78,13 @@ def _summary_digest(summary: dict[str, Any]) -> str:
 
 
 def _identity_draw_differs(a: dict[str, Any], b: dict[str, Any]) -> bool:
-    """True when two identity_new generator summaries differ in any pinned
-    field (navigator.userAgent, screen, webGl renderer)."""
-    for key in ("navigator.userAgent", "screen.width", "screen.height", "webGl:renderer"):
+    """True when two identity_new generator summaries differ in a field the
+    page can observe in every environment. webGl:renderer is deliberately not
+    counted: the spoofed renderer is only readable when WebGL context creation
+    works, and the CI gate runs without a GL stack (webgl == {}), so a
+    webgl-only difference would let the gate claim rotation while the observed
+    fingerprint is unchanged."""
+    for key in ("navigator.userAgent", "screen.width", "screen.height", "navigator.hardwareConcurrency"):
         if a.get(key) != b.get(key):
             return True
     return False

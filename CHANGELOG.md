@@ -88,6 +88,14 @@
 - Identity rotation e2e gate’i Linux/Windows kimlik çiftiyle en az iki canlı
   fingerprint boyutunu deterministik doğrular; yalnızca runner WebGL’ine
   bağlı rastgele identity çakışması artık release’i düşürmez.
+- CI browser gate’leri artık Mesa GL kütüphanelerini kurar; sayfa-içi WebGL
+  renderer probe’u runner’da da okunur ve `fingerprint_report` GL’siz
+  ortamda boş `webgl` döndürmez (identity/webgl gözlemlenebilirliği runner
+  grafik yığınına bağlı kalmaz).
+- `lib/` içindeki gömülü wheel HEAD kaynağından yeniden üretildi: Obscura
+  screenshot guard’ı, stealth/agent/reliability modülleri ve güncel Zig
+  sidecar dahil — npm paketinin taşıdığı wheel ile kaynak ağacı senkron
+  kalır.
 
 ## [0.3.7] — 2026-08-06
 
