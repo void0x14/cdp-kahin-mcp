@@ -143,7 +143,7 @@ release-prepare:
       - lib/kahin-*.whl
       - release-version.txt
   rules:
-    - if: '$CI_COMMIT_MESSAGE =~ /^(chore\(release\): v|ci\(release\):)/'
+    - if: '$CI_COMMIT_MESSAGE =~ /^(chore|ci|fix)\(release\):/'
       when: never
     - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
       changes:
@@ -170,7 +170,7 @@ release-publish:
     - test -s release-version.txt
     - bash scripts/npm-publish.sh
   rules:
-    - if: '$CI_COMMIT_MESSAGE =~ /^(chore\(release\): v|ci\(release\):)/'
+    - if: '$CI_COMMIT_MESSAGE =~ /^(chore|ci|fix)\(release\):/'
       when: never
     - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
       changes:
@@ -206,7 +206,7 @@ release-commit-tag:
   script:
     - RELEASE_BUMP_MODE=commit-tag bash scripts/release-bump.sh
   rules:
-    - if: '$CI_COMMIT_MESSAGE =~ /^(chore\(release\): v|ci\(release\):)/'
+    - if: '$CI_COMMIT_MESSAGE =~ /^(chore|ci|fix)\(release\):/'
       when: never
     - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
       changes:
