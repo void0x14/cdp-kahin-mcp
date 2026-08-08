@@ -22,8 +22,34 @@ fi
 LOCAL=$(node -p "require('./package.json').version")
 echo "npm: $PUBLISHED | local: $LOCAL"
 
+if [[ -n "${CI_COMMIT_TAG:-}" && "$CI_COMMIT_TAG" != "v$LOCAL" ]]; then
+  echo "release tag $CI_COMMIT_TAG does not match package version v$LOCAL" >&2
+  exit 1
+fi
+
+verify_registry_package() {
+  local package_dir archive manifest required
+  package_dir=$(mktemp -d)
+  archive=$(npm pack "@kahinmcp/kahin@$LOCAL" --silent --pack-destination "$package_dir")
+  manifest="$package_dir/manifest"
+  tar -tzf "$package_dir/$archive" >"$manifest"
+  for required in \
+    package/package.json \
+    package/README.md \
+    package/CHANGELOG.md \
+    package/docs/juggler-ai-native.md \
+    "package/lib/kahin-${LOCAL}-py3-none-any.whl"; do
+    if ! grep -Fxq "$required" "$manifest"; then
+      echo "registry package $LOCAL is missing $required" >&2
+      exit 1
+    fi
+  done
+  echo "registry package $LOCAL contains synchronized docs and wheel"
+}
+
 if [ "$PUBLISHED" = "$LOCAL" ]; then
-  echo "version unchanged — publish atlandı"
+  verify_registry_package
+  echo "version unchanged — publish atlandı; registry already synchronized"
   exit 0
 fi
 
@@ -45,6 +71,7 @@ npm publish --access public --provenance=false
 for attempt in 1 2 3 4 5; do
   PUBLISHED_AFTER=$(npm view @kahinmcp/kahin version 2>/dev/null || true)
   if [ "$PUBLISHED_AFTER" = "$LOCAL" ]; then
+    verify_registry_package
     echo "published $LOCAL; registry synchronized"
     exit 0
   fi

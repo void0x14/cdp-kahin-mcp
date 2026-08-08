@@ -7,6 +7,11 @@ cd "$ROOT"
 VERSION="${1:-$(node -p "require('./package.json').version")}"
 export VERSION
 
+if [[ -n "${CI_COMMIT_TAG:-}" && "$CI_COMMIT_TAG" != "v$VERSION" ]]; then
+  echo "release tag $CI_COMMIT_TAG does not match package version v$VERSION" >&2
+  exit 1
+fi
+
 python3 - "$VERSION" <<'PY'
 import json
 import re
@@ -65,8 +70,16 @@ const [jsonPath, wheel] = process.argv.slice(2);
 const parsed = JSON.parse(fs.readFileSync(jsonPath, "utf8"));
 const record = Array.isArray(parsed) ? parsed[0] : Object.values(parsed)[0] ?? parsed;
 const files = record.files.map((entry) => entry.path);
-if (!files.includes(wheel)) {
-  console.error(`npm package does not contain ${wheel}`);
+const required = [
+  wheel,
+  "package.json",
+  "README.md",
+  "CHANGELOG.md",
+  "docs/juggler-ai-native.md",
+];
+const missing = required.filter((file) => !files.includes(file));
+if (missing.length > 0) {
+  console.error(`npm package is missing: ${missing.join(", ")}`);
   process.exit(1);
 }
 NODE

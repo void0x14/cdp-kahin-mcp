@@ -22,6 +22,10 @@ release-check:
         - lib/**
         - bin/setup.mjs
         - CHANGELOG.md
+        - README.md
+        - docs/**
+        - camoufox-harness/**
+        - scripts/**
 
 real-e2e:
   stage: verify
@@ -69,9 +73,10 @@ stealth-regression:
   script:
     - |
       xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24 -ac" \
-      runuser --user kahin-ci -- env HOME=/home/kahin-ci TZ=Etc/UTC
-      LIBGL_ALWAYS_SOFTWARE=1 MESA_LOADER_DRIVER_OVERRIDE=llvmpipe
-      GALLIUM_DRIVER=llvmpipe PATH="$PATH" bash -c '
+      runuser --user kahin-ci -- env \
+        HOME=/home/kahin-ci TZ=Etc/UTC \
+        LIBGL_ALWAYS_SOFTWARE=1 MESA_LOADER_DRIVER_OVERRIDE=llvmpipe \
+        GALLIUM_DRIVER=llvmpipe PATH="$PATH" bash -c '
         set -euo pipefail
         cd "$CI_PROJECT_DIR"
         # Rebuild the Zig sidecar from this checkout (mirror
@@ -112,6 +117,35 @@ stealth-regression:
     - if: '$CI_PIPELINE_SOURCE == "schedule"'
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
     - if: '$CI_COMMIT_TAG =~ /^v[0-9]+\.[0-9]+\.[0-9]+$/'
+
+release-bump:
+  stage: publish
+  image: ghcr.io/astral-sh/uv:python3.14-bookworm
+  needs: [release-check, real-e2e, stealth-regression]
+  resource_group: release
+  variables:
+    GIT_DEPTH: "0"
+  before_script:
+    - apt-get update -qq
+    - apt-get install -y -qq curl git jq nodejs npm
+  script:
+    - bash scripts/release-bump.sh
+  rules:
+    - if: '$CI_COMMIT_MESSAGE =~ /^chore\(release\): v/'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      changes:
+        - package.json
+        - pyproject.toml
+        - uv.lock
+        - kahin/**
+        - lib/**
+        - bin/setup.mjs
+        - CHANGELOG.md
+        - README.md
+        - docs/**
+        - camoufox-harness/**
+        - scripts/**
 
 npm-publish:
   stage: publish

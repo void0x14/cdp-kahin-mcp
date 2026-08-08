@@ -81,7 +81,25 @@ section = (
 marker = "# Changelog\n\n"
 if not log.startswith(marker):
     raise SystemExit("CHANGELOG.md does not start with the expected heading")
-changelog.write_text(marker + section + log[len(marker):])
+
+unreleased = re.search(r"(?ms)^## Unreleased[ \t]*\n(.*?)(?=^## |\Z)", log)
+if unreleased is not None:
+    body = unreleased.group(1).strip() or subjects
+    release_section = (
+        f"## [{version}] — {date.today().isoformat()}\n\n"
+        f"{body}\n\n"
+    )
+    # Keep an empty Unreleased section at the top and promote its complete
+    # contents into the versioned release so CI owns changelog movement.
+    log = (
+        log[: unreleased.start()]
+        + "## Unreleased\n\n"
+        + release_section
+        + log[unreleased.end() :].lstrip("\n")
+    )
+else:
+    log = marker + "## Unreleased\n\n" + section + log[len(marker) :]
+changelog.write_text(log)
 
 link = f"[{version}]: https://gitlab.com/void0x14/kahin-mcp/-/compare/v{previous_version}...v{version}"
 if link not in log:
