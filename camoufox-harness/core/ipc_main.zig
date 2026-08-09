@@ -703,7 +703,13 @@ fn advanceScreenshot(d: *driver_mod.Driver, t: *Task) void {
                     "[document.documentElement.scrollWidth, document.documentElement.scrollHeight]"
                 else
                     "[window.innerWidth, window.innerHeight]";
-                const f = driver_mod.Driver.EvalFlow.init(d, t.target_id.?, t.session_id.?, expr, request_timeout_ms, 0) catch return t.fail("could not measure page size");
+                // One settle-and-retry: the navigate grace window returns
+                // control at commit, so the main-frame execution context can
+                // still be the just-destroyed previous document's when the
+                // measure starts. The 100ms settle lets the destroy/create
+                // events land and the retry re-picks the live context; a
+                // genuinely dead page still fails after the single retry.
+                const f = driver_mod.Driver.EvalFlow.init(d, t.target_id.?, t.session_id.?, expr, request_timeout_ms, 1) catch return t.fail("could not measure page size");
                 t.flow = .{ .eval = f };
                 t.shot_stage = 1;
             }
@@ -1963,8 +1969,14 @@ test "router: screenshot size-probe failure responds -32000 (no swallowed error)
 
     const expected = [_][]const u8{
         "{\"id\":1,\"sessionId\":\"s1\",\"method\":\"Runtime.evaluate\",\"params\":{\"executionContextId\":\"ctx-9\",\"expression\":\"[window.innerWidth, window.innerHeight]\",\"returnByValue\":true}}",
+        // The size probe retries once after a JugglerError so a stale
+        // (just-destroyed) navigation context is re-picked after the settle.
+        "{\"id\":2,\"sessionId\":\"s1\",\"method\":\"Runtime.evaluate\",\"params\":{\"executionContextId\":\"ctx-9\",\"expression\":\"[window.innerWidth, window.innerHeight]\",\"returnByValue\":true}}",
     };
-    const reply = [_][]const u8{"{\"id\":1,\"error\":{\"code\":-32000,\"message\":\"evaluate failed\"}}"};
+    const reply = [_][]const u8{
+        "{\"id\":1,\"error\":{\"code\":-32000,\"message\":\"evaluate failed\"}}",
+        "{\"id\":2,\"error\":{\"code\":-32000,\"message\":\"evaluate failed\"}}",
+    };
     const thread = try std.Thread.spawn(.{}, FakePeer.thread, .{ rig.cmd[0], rig.resp[1], &expected, &reply, &[_][]const u8{} });
     defer thread.join();
 

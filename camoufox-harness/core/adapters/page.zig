@@ -144,8 +144,9 @@ pub const Lifecycle = struct {
     navigation_id: []const u8 = "",
     /// True once a navigationStarted event carried the CURRENT navigation
     /// id — proof the browser accepted our navigation (redirects included).
-    /// Reset on begin(); a stale started event (previous document) can
-    /// never set it because its id differs from the response id.
+    /// Reset on begin(); an event arriving before the response id is adopted
+    /// optimistically (grace window), and the response id then re-proves or
+    /// clears it through later events.
     nav_started: bool = false,
     /// True once a main-frame navigationCommitted carried the CURRENT
     /// navigation id — the new document is committed and its execution
@@ -221,11 +222,14 @@ pub const Lifecycle = struct {
         self.abort_text = self.allocator.dupe(u8, error_text) catch return;
     }
 
-    /// Page.navigationStarted — adopt the navigation id if not yet known and
-    /// mark the navigation as genuinely started when the event's id matches
-    /// the one we already know (from the navigate response). An unknown id
-    /// here is adopted but unproven — a stale event from the previous
-    /// document carries a different id and can never set the flag.
+    /// Page.navigationStarted — when no navigation id is known yet (the
+    /// response id from Page.navigate has not arrived), the event's id is
+    /// adopted and nav_started is set so the driver can start its grace
+    /// window instead of waiting on a possibly broken native promise. The
+    /// response id still wins when it arrives (setNavigationId replaces the
+    /// adopted id); a subsequent started event whose id differs from the
+    /// current id then clears the flag, so a stale event from the previous
+    /// document can never keep it proven.
     ///
     /// Runs in the waiting AND done states: a stale load event from the
     /// previous document can complete the lifecycle before our navigation
@@ -374,15 +378,14 @@ test "lifecycle: done state is terminal for later events" {
     try testing.expectEqual(Lifecycle.State.done, lc.state);
 }
 
-test "lifecycle: navigationStarted before any response id proves nothing and adopts nothing" {
+test "lifecycle: navigationStarted before the response id adopts the id and starts the grace window" {
     var lc = Lifecycle{ .allocator = testing.allocator };
     defer lc.deinit();
     lc.begin("f1");
     lc.onNavigationStarted("f1", "nav-x");
-    try testing.expect(!lc.nav_started);
-    try testing.expectEqualStrings("", lc.navigation_id);
-    // Only the response id is authoritative; a matching started event then
-    // proves the navigation.
+    try testing.expect(lc.nav_started);
+    try testing.expectEqualStrings("nav-x", lc.navigation_id);
+    // The response id then confirms the navigation.
     lc.setNavigationId("f1", "nav-x");
     lc.onNavigationStarted("f1", "nav-x");
     try testing.expect(lc.nav_started);
@@ -454,13 +457,19 @@ test "lifecycle: started event matching the response id marks the navigation gen
     try testing.expectEqualStrings("nav-23", lc.navigation_id);
 }
 
-test "lifecycle: stale started event (different id) never sets nav_started" {
+test "lifecycle: early started event is adopted; the response id wins and stale events clear the flag" {
     var lc = Lifecycle{ .allocator = testing.allocator };
     defer lc.deinit();
     lc.begin("f1");
-    lc.onNavigationStarted("f1", "nav-22"); // stale event from previous document
-    lc.setNavigationId("f1", "nav-23"); // response id differs
+    lc.onNavigationStarted("f1", "nav-22"); // event racing the response
+    try testing.expect(lc.nav_started);
+    try testing.expectEqualStrings("nav-22", lc.navigation_id);
+    lc.setNavigationId("f1", "nav-23"); // response id differs and wins
+    try testing.expectEqualStrings("nav-23", lc.navigation_id);
+    lc.onNavigationStarted("f1", "nav-22"); // stale event now clears the proof
     try testing.expect(!lc.nav_started);
+    lc.onNavigationStarted("f1", "nav-23"); // matching event proves the navigation
+    try testing.expect(lc.nav_started);
 }
 
 test "lifecycle: real started event after stale-load completion (done state) sets nav_started" {
@@ -503,14 +512,15 @@ test "lifecycle: commit before the response id is known is the previous document
     try testing.expect(lc.committed_current);
 }
 
-test "lifecycle: started event before the response id is known is never adopted nor proven" {
+test "lifecycle: started event before the response id is adopted; the response id replaces it" {
     var lc = Lifecycle{ .allocator = testing.allocator };
     defer lc.deinit();
     lc.begin("f1");
-    lc.onNavigationStarted("f1", "nav-22"); // stale about:blank navigation
-    try testing.expect(!lc.nav_started);
-    try testing.expectEqualStrings("", lc.navigation_id); // not adopted
-    lc.setNavigationId("f1", "nav-23");
+    lc.onNavigationStarted("f1", "nav-22"); // early event adopted, grace window may start
+    try testing.expect(lc.nav_started);
+    try testing.expectEqualStrings("nav-22", lc.navigation_id);
+    lc.setNavigationId("f1", "nav-23"); // response id replaces the adopted id
+    try testing.expectEqualStrings("nav-23", lc.navigation_id);
     lc.onNavigationStarted("f1", "nav-23");
     try testing.expect(lc.nav_started);
 }
