@@ -73,7 +73,7 @@ SIDECAR="$ROOT/camoufox-harness/vendor/bin/kahin-sidecar"
 # used by the installed MCP server.
 if command -v uv >/dev/null 2>&1; then
   uv sync --frozen --dev
-  uv run python -m camoufox fetch
+  bash scripts/camoufox-cache.sh
   CAMOUFOX_BIN="$(uv run python -c 'from kahin.the_twins.mirage import _camoufox_bin; print(_camoufox_bin())')"
   echo "==> validating Camoufox runtime: $CAMOUFOX_BIN"
   timeout 30s "$CAMOUFOX_BIN" --version

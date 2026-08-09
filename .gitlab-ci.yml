@@ -97,7 +97,7 @@ stealth-regression:
         fi
         KAHIN_ZIG_BIN="$ZIG_BIN" bash scripts/build-sidecar.sh
         uv sync --frozen --dev
-        uv run python -m camoufox fetch
+        bash scripts/camoufox-cache.sh
         KAHIN_REQUIRE_REAL_E2E=1 KAHIN_REQUIRE_STEALTH=1 uv run pytest -q tests/test_e2e_stealth.py
         KAHIN_REQUIRE_STEALTH=1 uv run python scripts/stealth-regression.py
       '
