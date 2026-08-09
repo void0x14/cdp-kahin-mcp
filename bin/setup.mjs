@@ -324,7 +324,7 @@ export function setup() {
 const KAHIN_HOME = process.env.KAHIN_HOME || join(homedir(), ".local", "share", "kahin");
 const KAHIN_VENV = join(KAHIN_HOME, "venv");
 const KAHIN_PY = process.platform === "win32" ? join(KAHIN_VENV, "Scripts", "python.exe") : join(KAHIN_VENV, "bin", "python");
-const KAHIN_WHEEL = join(dirname(fileURLToPath(import.meta.url)), "..", "lib", "kahin-0.3.9-py3-none-any.whl");
+const KAHIN_WHEEL = join(dirname(fileURLToPath(import.meta.url)), "..", "lib", "kahin-0.3.10-py3-none-any.whl");
 const KAHIN_INSTALL_MARKER = join(KAHIN_HOME, ".install-state.json");
 const SETUP_COMMAND_TIMEOUT_MS = 120_000;
 

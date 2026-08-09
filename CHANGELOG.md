@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## [0.3.10] — 2026-08-09
+
+- chore: prepare v0.3.9
+- chore: refresh packaged kahin wheel
+- fix: harden single-engine crawler runtime
+- fix: preserve crawler rotation state
+- feat: add single-engine crawler rotation
+- docs: define crawler identity rotation contract
+- fix: harden Kahin browser runtime
+- update
+- ci(release): tolerate npm registry propagation
+
 ## [0.3.9] — 2026-08-09
 
 ### Eklenen
@@ -349,3 +361,4 @@ Tüm önemli değişiklikler bu dosyada tutulur. Format: [Keep a Changelog](http
 [0.3.7]: https://gitlab.com/void0x14/kahin-mcp/-/compare/v0.3.6...v0.3.7
 [0.3.8]: https://gitlab.com/void0x14/kahin-mcp/-/compare/v0.3.7...v0.3.8
 [0.3.9]: https://gitlab.com/void0x14/kahin-mcp/-/compare/v0.3.8...v0.3.9
+[0.3.10]: https://gitlab.com/void0x14/kahin-mcp/-/compare/v0.3.9...v0.3.10
