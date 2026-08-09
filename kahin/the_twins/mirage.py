@@ -91,6 +91,28 @@ def _identity_hash(config: dict[str, Any]) -> str:
     return hashlib.sha256(raw).hexdigest()[:16]
 
 
+def _effective_identity_hash(env: dict[str, Any], policy: dict[str, Any]) -> str:
+    """Stable, bounded digest of the effective launch identity material.
+
+    Default (fresh BrowserForge) launches have no pinned config to hash, so
+    the effective identity material is the ``CAMOU_CONFIG_*`` fingerprint
+    env generated for THIS launch plus the safe launch policy (headless/
+    humanize/cache/webgl/main-world and proxy presence). The raw fingerprint
+    payload exists only inside this function — callers store and expose just
+    the 16-hex digest, never the config itself.
+    """
+    material: dict[str, Any] = {
+        "policy": policy,
+        "camou_config": {
+            key: value
+            for key, value in env.items()
+            if key.startswith("CAMOU_CONFIG_") and isinstance(value, (str, int, float, bool))
+        },
+    }
+    raw = json.dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()[:16]
+
+
 def _prewarm_load(identity_hash: str) -> dict[str, Any] | None:
     """In-process first, then bounded on-disk metadata lookup (never raises)."""
     entry = _PREWARM_CACHE.get(identity_hash)
@@ -366,6 +388,10 @@ class Mirage(BrowserEngine):
         # only while this engine is running; cleared in stop().
         self._identity_hash: str | None = None
         self._prewarm_info: dict[str, Any] | None = None
+        # Crawler/rotation Task 1: the launch policy actually bound on this
+        # start (headless/humanize/cache/webgl/main-world + proxy presence),
+        # exposed by identity/status surfaces without any fingerprint data.
+        self._launch_policy: dict[str, Any] | None = None
         self._started_monotonic: float | None = None
         self._write_lock = asyncio.Lock()
         self._page_lock = asyncio.Lock()
@@ -466,6 +492,7 @@ class Mirage(BrowserEngine):
         self._proxy_url = None
         self._identity_hash = None
         self._prewarm_info = None
+        self._launch_policy = None
         self._started_monotonic = None
         identity_config = kwargs.get("identity")
         identity_name = kwargs.get("identity_name")
@@ -479,17 +506,30 @@ class Mirage(BrowserEngine):
         # launch_options is still called because its output is randomized
         # per launch by design (see the module docstring on _PREWARM_CACHE).
         prewarm: dict[str, Any] | None = None
-        identity_hash: str | None = None
+        prewarm_hash: str | None = None
         if self._identity_config is not None:
-            identity_hash = _identity_hash(self._identity_config)
-            self._identity_hash = identity_hash
-            prewarm = _prewarm_load(identity_hash)
+            prewarm_hash = _identity_hash(self._identity_config)
+            prewarm = _prewarm_load(prewarm_hash)
+        # Real launch policy (crawler/rotation Task 1): the same fixed
+        # Camoufox options are bound on EVERY start — default and identity —
+        # so fingerprint generation, user.js prefs and args never drift from
+        # the enabled stealth policy. ``headless`` is the caller's real
+        # flag; ``main_world_eval=False`` keeps the Juggler main-world
+        # binding off (the DOM stream uses browser-level addBinding and
+        # init scripts, never allowMainWorld).
+        from kahin.stealth import launch_policy  # noqa: PLC0415 - pure helper
+
+        policy = launch_policy(headless=headless)
         # BrowserForge fingerprint -> CAMOU_CONFIG_* env (master plan §2.1.5).
         # Every start() draws a fresh identity; the sidecar passes our
         # environment through to the Camoufox child verbatim (pipe.zig
         # buildEnvp reads /proc/self/environ).
         opts_t0 = time.monotonic()
-        opts = launch_options() if launch_options is not None else {"env": {}, "firefox_user_prefs": {}}
+        opts = (
+            launch_options(**policy)
+            if launch_options is not None
+            else {"env": {}, "firefox_user_prefs": {}}
+        )
         # Identity config (Faz 2 Task 5): merge through the same seam that
         # applies the default fingerprint. ``launch_options(config=...)``
         # regenerates the full option set (env with CAMOU_CONFIG_*, user.js
@@ -502,7 +542,11 @@ class Mirage(BrowserEngine):
                 logger.warning("identity config ignored: camoufox launch_options unavailable")
             else:
                 try:
-                    opts = launch_options(config=self._identity_config, i_know_what_im_doing=True)
+                    opts = launch_options(
+                        config=self._identity_config,
+                        i_know_what_im_doing=True,
+                        **policy,
+                    )
                 except Exception:  # noqa: BLE001 - identity must not crash boot
                     logger.warning("identity config injection failed; using defaults", exc_info=True)
         opts_ms = (time.monotonic() - opts_t0) * 1000
@@ -527,6 +571,25 @@ class Mirage(BrowserEngine):
                 self._proxy_url = None
         else:
             self._proxy_url = None
+
+        # Safe launch metadata for the surfaces (never the raw fingerprint
+        # or proxy URL): the bound policy plus proxy presence only.
+        self._launch_policy = {**policy, "proxy": self._proxy_url is not None}
+        # Active identity hash (crawler/rotation Task 1): every start
+        # resolves a bounded digest of the effective launch identity
+        # material. Explicit identities hash the original (unmutated)
+        # config — stable across boots and the pre-warm store key. Default
+        # launches have no pinned config; the effective material is the
+        # BrowserForge CAMOU_CONFIG_* fingerprint env generated for THIS
+        # launch plus the safe launch policy. Raw fingerprint payloads are
+        # never logged or returned; only the 16-hex digest is
+        # stored/exposed.
+        if self._identity_config is not None:
+            self._identity_hash = prewarm_hash
+        else:
+            self._identity_hash = _effective_identity_hash(
+                opts.get("env") or {}, self._launch_policy
+            )
 
         # firefox_user_prefs -> <profile>/user.js (webgl etc. must be set
         # before the browser boots; the sidecar only mkdirs the profile).
@@ -577,17 +640,17 @@ class Mirage(BrowserEngine):
             # boot — record helpers swallow OSError, and the lookup above
             # already tolerated corrupt cache state.
             self._started_monotonic = time.monotonic()
-            if identity_hash is not None:
+            if prewarm_hash is not None:
                 hits = (int(prewarm.get("hits", 0)) + 1) if prewarm is not None else 0
                 starts = (int(prewarm.get("starts", 0)) + 1) if prewarm is not None else 1
                 entry = {
-                    "identity_hash": identity_hash,
+                    "identity_hash": prewarm_hash,
                     "options_ms": round(opts_ms, 1),
                     "profile_ms": round((time.monotonic() - profile_t0) * 1000, 1),
                     "hits": hits,
                     "starts": starts,
                 }
-                _prewarm_record(identity_hash, entry)
+                _prewarm_record(prewarm_hash, entry)
                 self._prewarm_info = {
                     **entry,
                     "cache": prewarm.get("source", "miss") if prewarm is not None else "miss",
@@ -1883,6 +1946,7 @@ class Mirage(BrowserEngine):
         self._proxy_url = None
         self._identity_hash = None
         self._prewarm_info = None
+        self._launch_policy = None
         self._started_monotonic = None
         reader, self._reader = self._reader, None
         if reader is not None:

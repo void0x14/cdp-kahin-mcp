@@ -28,6 +28,19 @@ _network_requests: deque[dict[str, Any]] = deque(maxlen=10000)
 _console_messages: deque[dict[str, Any]] = deque(maxlen=5000)
 _browser_lock_file: Any = None
 
+# --- Crawler registry ----------------------------------------------------
+# Deliberately separate from the event/network/console buffers. Engine
+# rotation and crash recovery stop/start the browser, which routes through
+# ``browser_stop``/``browser_start`` and calls ``clear_state()``; a crawl job
+# must keep its URL queue, result ledger and job state intact across those
+# lifecycle calls, so ``clear_state()`` never touches these containers.
+# The registry lock serializes job creation/pruning plus the single-active
+# job slot; per-job state transitions are guarded by the job's own lock
+# (``_CrawlJob.lock`` in kahin/tools/crawler_mirage.py).
+_crawl_jobs: dict[str, Any] = {}
+_crawl_jobs_lock = asyncio.Lock()
+_active_crawl_id: str | None = None
+
 
 def acquire_browser_lock() -> dict[str, Any] | None:
     """Claim the machine-wide browser owner slot, or report its owner.
@@ -88,6 +101,9 @@ def release_browser_lock() -> None:
 
 
 def clear_state() -> None:
+    # Event/network/console buffers only. Crawler state (_crawl_jobs and the
+    # active job slot) is intentionally preserved so rotation/recovery can
+    # stop and start the engine without losing the crawl.
     _current_event_log.clear()
     _network_requests.clear()
     _console_messages.clear()

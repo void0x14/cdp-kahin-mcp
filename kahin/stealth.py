@@ -71,6 +71,31 @@ def score_checks(checks: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+# Launch policy (crawler/rotation Task 1): the fixed Camoufox launch options
+# bound on EVERY Mirage start, default or identity-pinned. This is static,
+# payload-free policy — safe to expose in MCP surfaces:
+# - ``headless`` follows the engine's headless flag so fingerprint
+#   generation (screen/mediaDevices) matches the real headless/visible mode;
+# - ``humanize=True`` enables Camoufox's humanized input layer;
+# - ``enable_cache=True`` keeps Firefox's cache on (bounded memory cost,
+#   real crawl continuity);
+# - ``block_webgl=False`` keeps WebGL enabled with its sampled fingerprint —
+#   blocking it is a leak vector in itself and Camoufox only recommends it
+#   for special cases;
+# - ``main_world_eval=False`` keeps the Juggler main-world binding OFF, so
+#   injected bindings never land in the page's main world (the DOM stream
+#   uses browser-level addBinding/setInitScripts, not allowMainWorld).
+def launch_policy(headless: bool = True) -> dict[str, Any]:
+    """The fixed Camoufox launch policy bound on every Mirage start."""
+    return {
+        "headless": bool(headless),
+        "humanize": True,
+        "enable_cache": True,
+        "block_webgl": False,
+        "main_world_eval": False,
+    }
+
+
 # Identity rotation policy (Faz 3 Task 4): a bounded, validated pin store
 # mapping canonical domains to saved Faz 2 identity names. The store is
 # plain JSON under the user config dir, exactly like the identity files;

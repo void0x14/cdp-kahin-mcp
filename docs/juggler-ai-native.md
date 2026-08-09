@@ -249,7 +249,27 @@ birlikte gözlemler; 403/429/503 yanıtlarında `httpStatus` ve varsa
 çözümü yapmaz; ajan verilen karara uymalı ve aynı origin'i körlemesine tekrar
 çalıştırmamalıdır.
 
-### 3.4 Live action sözleşmesi
+### 3.6 Uzun süreli crawler job sözleşmesi
+
+Tek tek navigate çağrıları yerine uzun ve gözlenebilir bir crawl için şu ORBIT
+araçları kullanılır:
+
+- `kahin_crawl_start` — bounded seed/depth/page/time policy ile background job başlatır.
+- `kahin_crawl_status` — state, queue, sonuç, rotation, challenge ve engine health özetini döndürür.
+- `kahin_crawl_results` — opaque cursor ile en fazla 100 bounded sonucu döndürür.
+- `kahin_crawl_pause` / `kahin_crawl_resume` — CAPTCHA/access-denied sonrasında explicit insan/provider kararıyla devam eder.
+- `kahin_crawl_stop` — job'ı durdurur; browser'ı otomatik kapatmaz.
+
+Job varsayılan olarak aynı Mirage browser ve crawler tab'ını kullanır. 20 başarılı
+sayfa veya 900 saniyeden biri önce dolduğunda, tamamlanan sayfa ledger'a yazılır,
+engine aynı slotta yeniden başlatılır ve explicit identity verilmediyse fresh
+BrowserForge identity oluşur. Queue ve result cursor engine restart'tan etkilenmez.
+Rotation bir CAPTCHA veya rate-limit kaçış mekanizması değildir. 429/503 için
+Retry-After ve bounded exponential backoff uygulanır; CAPTCHA/access-denied
+durumunda job `paused` kalır ve `kahin_crawl_resume` çağrısı bekler. Resume
+challenge'ı çözmez, yeni origin'e kör retry yapmaz.
+
+### 3.7 Live action sözleşmesi
 
 İzin verilen action'lar: `click`, `hover`, `focus`, `type`, `scroll`, `select`.
 

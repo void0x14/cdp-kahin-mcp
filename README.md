@@ -16,7 +16,7 @@ AI modeller Chrome'un içine girip sayfa gezip kod çalıştırabilir ama CDP'yi
 
 56 domain, 667 komut, 237 event, 609 type — Chrome 148 protokolü gömülü.
 
-## 140 Tool · 4 Kategori Ailesi · 2 Engine
+## 146 Tool · 5 Kategori Ailesi · 2 Engine
 
 Tool'lar engine-ayrımlı kategori dosyalarında (`kahin/tools/`): paylaşılan çekirdek + Obscura + Camoufox aileleri.
 
@@ -30,9 +30,10 @@ Tool'lar engine-ayrımlı kategori dosyalarında (`kahin/tools/`): paylaşılan 
 |  PROPHECY — Pattern DB | Kullanım desenlerini öğren, sorgula, öner | 5 |
 |  HEALER | Hata istatistikleri | 1 |
 |  MIRAGE — Camoufox Native (104) | Juggler protokolü üstünde gerçek-zamanlı DOM stream, DOM, Reliability, Input, PageEx, Tab, Network, Storage, Emulation, Dialog/Download/Worker/WS, Upload, Screencast, Accessibility, Engine sağlığı/istatistik, Agent-native snapshot/form/state/identity/status/challenge, Stealth audit/insansı girdi/identity rotasyonu/proxy-geo | 104 |
+|  ORBIT — Long Crawler (6) | Tek Mirage browser/tab üzerinde bounded background crawl, sonuç cursor'ı, rate-limit backoff, challenge pause/resume, rotation ve cancel | 6 |
 |  OBSCURA — Ayrı kategori | Obscura'ya özel tool'lar (hazırlanıyor) | 0 |
 
-**Toplam: 140 tool.**
+**Toplam: 146 tool.**
 
 ## Bir satırda özet
 
@@ -113,6 +114,8 @@ Camoufox (Juggler native) ile:
 → kahin_mirage_snapshot (ref'li ajan görünümü) → kahin_mirage_fill_form
 → kahin_mirage_state_save/load → kahin_identity_new/save/list/delete/report
 → kahin_agent_status (agent döngüsü özeti) → kahin_challenge_status (crawl öncesi)
+→ kahin_crawl_start(seeds=[...]) → kahin_crawl_status → kahin_crawl_results(cursor=...)
+→ kahin_crawl_pause/resume/stop
 ```
 
 `kahin_browser_start` tek bir Camoufox/sidecar süreci açar. İlk sayfa işlemi
@@ -126,6 +129,15 @@ süreci ikinci browser açmak yerine owner bilgisini içeren `engine_process_con
 döndürür. Native navigation hedefi bounded response timeout'a takılırsa Kahin
 aynı browser/context içinde yalnızca hedef tab'ı yenileyebilir; başarılı recovery
 `target_recovered: true` olarak raporlanır ve browser PID'si değişmez.
+
+Uzun süreli yetkili crawl için `kahin_crawl_start` background job başlatır ve
+MCP çağrısını açık tutmaz. Job aynı Camoufox browser'ı ve crawler tab'ını yeniden
+kullanır; varsayılan rotation 20 başarılı sayfa veya 15 dakikadır. Her rotation
+sayfa ledger'a yazıldıktan sonra gerçekleşir ve yeni BrowserForge fingerprint'i
+gerçek bir Camoufox restart'ında üretilir. `kahin_crawl_results` bounded cursor
+ile sonuçları parça parça verir. 429/503 için Retry-After ve capped backoff
+uygulanır; CAPTCHA veya access-denied görülürse job pause olur. Kahin challenge
+bypass veya otomatik CAPTCHA çözümü yapmaz.
 
 Tam liste için: [AGENTS.md](AGENTS.md). Juggler'ın ajan sözleşmesi ve gerçek-zamanlı
 DOM akışı için [AI-native Juggler kılavuzuna](docs/juggler-ai-native.md) bakın.

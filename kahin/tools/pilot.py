@@ -285,14 +285,22 @@ def _engine_config_conflict(
 
 
 def _identity_start_summary(engine: Any) -> dict[str, Any] | None:
-    """Expose bounded identity metadata without returning fingerprint data."""
+    """Expose bounded identity metadata without returning fingerprint data.
+
+    Always carries the active 16-hex ``hash`` (fresh BrowserForge digest or
+    the explicit identity's config hash) and the ``stealth`` launch policy
+    actually bound on this start, whether or not an identity is configured.
+    """
     if not isinstance(engine, Mirage):
         return None
     config = getattr(engine, "_identity_config", None)
+    active_hash = getattr(engine, "_identity_hash", None)
+    stealth = getattr(engine, "_launch_policy", None)
     return {
         "name": getattr(engine, "_identity_name", None),
-        "hash": getattr(engine, "_identity_hash", None),
+        "hash": active_hash if isinstance(active_hash, str) else None,
         "configured": isinstance(config, dict) and bool(config),
+        "stealth": stealth if isinstance(stealth, dict) and stealth else None,
     }
 
 
@@ -320,6 +328,9 @@ async def browser_start(
     and credentials are never echoed back. Reusing a healthy engine that
     runs a different identity/proxy is a conflict (``engine_config_conflict``),
     never a silent ignore — stop the engine first to change configuration.
+    The summary always carries the active bounded ``identity.hash`` (fresh
+    BrowserForge digest or the pinned identity's config hash) and the
+    enabled ``identity.stealth`` launch policy, configured or not.
     """
     if not isinstance(engine, str):
         return _json_error("kahin_browser_start", "engine must be a string", "invalid_argument", field="engine")

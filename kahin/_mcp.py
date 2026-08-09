@@ -50,7 +50,11 @@ mcp = FastMCP(
         "kahin_mirage_dom_start, read kahin_mirage_dom_snapshot, then consume "
         "kahin_mirage_dom_events with its streamId/cursor; on reset or dropped "
         "take a fresh snapshot, and use kahin_mirage_dom_action only with a "
-        "live nodeId."
+        "live nodeId. For long-running authorized crawls use "
+        "kahin_crawl_start/status/results/pause/resume/stop: it reuses one "
+        "Mirage browser/tab, rotates fresh launch identity only at page "
+        "boundaries, honors bounded Retry-After backoff, and pauses on "
+        "CAPTCHA/access-denied. The crawler never bypasses challenges."
     ),
 )
 

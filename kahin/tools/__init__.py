@@ -25,6 +25,7 @@ from kahin.tools import grimoire  # noqa: F401
 from kahin.tools import healer  # noqa: F401
 from kahin.tools import pilot  # noqa: F401
 from kahin.tools import pilot_mirage  # noqa: F401
+from kahin.tools import crawler_mirage  # noqa: F401
 from kahin.tools import reliability_mirage  # noqa: F401
 from kahin.tools import pilot_obscura  # noqa: F401
 from kahin.tools import prophecy  # noqa: F401
@@ -40,6 +41,7 @@ from kahin.tools import upload_mirage  # noqa: F401
 __all__ = [
     "agent_mirage",
     "accessibility_mirage",
+    "crawler_mirage",
     "dejavu",
     "dejavu_mirage",
     "dejavu_obscura",

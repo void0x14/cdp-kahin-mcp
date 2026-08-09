@@ -834,7 +834,10 @@ async def identity_report() -> str:
     result. When the engine is active it reports the configured identity
     name/config plus the runtime ``navigator.userAgent`` read from the live
     page (never a set_user_agent acknowledgement). Engines started without an
-    identity report ``identity: null``.
+    identity report ``identity: null`` but still carry the active bounded
+    ``identityHash`` (fresh BrowserForge digest or the pinned identity's
+    config hash) and the enabled ``stealth`` launch policy — configured or
+    not. Fingerprint payloads are never returned, only the hash.
     """
     async with _healer_ref.safe("kahin_identity_report"):
         engine_error = await _require_engine()
@@ -875,10 +878,14 @@ async def identity_report() -> str:
                 "name": identity_name if isinstance(identity_name, str) else None,
                 "config": _identity_summary(identity_config),
             }
+        active_hash = getattr(engine, "_identity_hash", None)
+        stealth = getattr(engine, "_launch_policy", None)
         return orjson.dumps({
             "active": True,
             "engine": "mirage" if list_pages is not None else "shadow",
             "identity": identity,
+            "identityHash": active_hash if isinstance(active_hash, str) else None,
+            "stealth": stealth if isinstance(stealth, dict) and stealth else None,
             "navigator.userAgent": runtime_ua,
         }, option=orjson.OPT_INDENT_2).decode()
 
@@ -893,6 +900,8 @@ async def agent_status() -> str:
     buffered network/console event counts. Never raises: with no engine this
     returns a structured idle response, and every engine-backed field
     degrades to a neutral value when its source is unavailable.
+    ``identityHash`` (active bounded digest) and ``stealth`` (enabled launch
+    policy) are reported for any running Mirage engine, configured or not.
     ``refsLive``/``domCursor`` come from real DOM-stream bookkeeping — refs
     are live only after a successful snapshot and are invalidated by
     reset/dropped/stale/stop, never guessed.
@@ -919,6 +928,8 @@ async def agent_status() -> str:
                 "networkEvents": 0,
                 "consoleMessages": 0,
                 "identity": None,
+                "identityHash": None,
+                "stealth": None,
                 "hint": "use kahin_browser_start",
             }, option=orjson.OPT_INDENT_2).decode()
 
@@ -939,6 +950,8 @@ async def agent_status() -> str:
             "networkEvents": len(state._network_requests),
             "consoleMessages": len(state._console_messages),
             "identity": None,
+            "identityHash": None,
+            "stealth": None,
         }
 
         identity_config = getattr(engine, "_identity_config", None)
@@ -948,6 +961,13 @@ async def agent_status() -> str:
                 "name": identity_name if isinstance(identity_name, str) else None,
                 "summary": _identity_summary(identity_config),
             }
+        # Active bounded identity hash and the enabled stealth launch
+        # policy, whether or not an identity is configured. Never the raw
+        # fingerprint payload or proxy credentials.
+        active_hash = getattr(engine, "_identity_hash", None)
+        payload["identityHash"] = active_hash if isinstance(active_hash, str) else None
+        stealth = getattr(engine, "_launch_policy", None)
+        payload["stealth"] = stealth if isinstance(stealth, dict) and stealth else None
 
         if isinstance(engine, Mirage):
             try:
