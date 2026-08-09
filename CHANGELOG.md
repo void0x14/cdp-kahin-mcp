@@ -2,6 +2,49 @@
 
 ## Unreleased
 
+## [0.3.9] — 2026-08-09
+
+### Eklenen
+- `kahin_crawl_start` / `kahin_crawl_status` / `kahin_crawl_results` /
+  `kahin_crawl_pause` / `kahin_crawl_resume` / `kahin_crawl_stop` eklendi:
+  tek aktif Camoufox/Mirage motoru ve tek mevcut sekme üzerinde çalışan,
+  bounded kuyruk/sonuç günlüğü ve cursor destekli crawler yüzeyi.
+- Crawler; sayfa, derinlik, süre ve gecikme bütçelerini sınırlar, `Retry-After`
+  ile rate-limit durumunda bounded backoff uygular ve otomatik identity
+  rotasyonunu aynı browser/sekme yaşam döngüsü içinde yürütür.
+
+### Düzeltilen
+- Aktif motor yeniden kullanılmadan tekrar browser açılması, degraded health
+  durumunda canlı context'in gereksiz değiştirilmesi ve crawler sırasında
+  sekmenin kaybolması engellendi.
+- Sidecar stdin yazımları ve sayfa işlemleri bounded hale getirildi; engine
+  çökmesi sonrası URL yeniden kuyruğa alınarak aynı crawler işi kontrollü
+  recovery ile sürdürülebilir hale geldi.
+- Humanized mouse trajectory artık Juggler'ın tamamlamadığı aynı-koordinat
+  no-op dispatch'ini göndermiyor; gerçek hareket adımı korunuyor.
+- CAPTCHA ve erişim engeli bypass edilmiyor: crawler challenge'ı açıkça
+  `paused` durumuna geçiriyor ve ajan müdahalesi için aynı işi koruyor.
+- Her rotation gerçek per-launch fingerprint değişimiyle doğrulanıyor;
+  proxy/geo ayarları ve kayıtlı identity kullanımı yeniden başlatma/rotasyon
+  sonrasında korunuyor.
+- Proxy ile başlatma için Camoufox'un `geoip` extra'sı paket bağımlılığına
+  alındı; temiz kurulumlar artık native proxy/geo ayarını eksik modül yüzünden
+  başarısız bırakmıyor. GeoIP endpoint'i erişilemezse proxy korunarak
+  proxy-only launch fallback'i uygulanıyor.
+- npm launcher wheel install marker'ı ve Camoufox hazırlığı bounded komut
+  süreleriyle tekrar kurulumları güvenli ve hızlı hale getiriyor.
+
+### Gerçek doğrulama
+- Paketlenmiş stdio MCP ile 146 tool ve 2 resource list/read doğrulandı.
+- Gerçek crawler akışında tek engine PID ve tek sekme ile 4 sayfa başarıyla
+  işlendi, 4 rotation gerçekleşti; rate-limit ve CAPTCHA challenge durumları
+  tekrar çağrılarda tutarlı biçimde korundu.
+- Gerçek engine kill sonrası crawler 1 recovery attempt ile 5 başarılı sayfayı
+  tamamladı; ayrı identity probe'unda her rotation fingerprint hash'i değişti.
+- Dış web sayfasında stealth audit `14/14`, DOM snapshot/event reset-dropped,
+  accessibility tree ve `browser_stop` sonrası parent MCP transport bağlantısı
+  doğrulandı.
+
 ## [0.3.8] — 2026-08-08
 
 ### Eklenen
@@ -305,3 +348,4 @@ Tüm önemli değişiklikler bu dosyada tutulur. Format: [Keep a Changelog](http
 [0.3.6]: https://gitlab.com/void0x14/kahin-mcp/-/compare/v0.3.5...v0.3.6
 [0.3.7]: https://gitlab.com/void0x14/kahin-mcp/-/compare/v0.3.6...v0.3.7
 [0.3.8]: https://gitlab.com/void0x14/kahin-mcp/-/compare/v0.3.7...v0.3.8
+[0.3.9]: https://gitlab.com/void0x14/kahin-mcp/-/compare/v0.3.8...v0.3.9

@@ -131,6 +131,21 @@ async def mirage_mouse_trajectory(
             start_x, start_y, x_value, y_value,
             steps=steps_value, jitter=jitter_value, seed=seed,
         )
+        if points and points[0] == (start_x, start_y):
+            next_point = next((point for point in points[1:] if point != points[0]), None)
+            if next_point is None:
+                # A same-coordinate trajectory has no real movement to send;
+                # avoid the Juggler no-op dispatch that wedges the input pipe.
+                points = []
+            else:
+                # The generator deliberately includes its origin. Replace
+                # that no-op with a midpoint toward the first real point so
+                # the public step count remains intact without dispatching a
+                # duplicate coordinate.
+                points[0] = (
+                    (start_x + next_point[0]) / 2,
+                    (start_y + next_point[1]) / 2,
+                )
         for px, py in points:
             move = await _dispatch_mouse("mousemove", px, py, button=0, buttons=0, session_id=session_id)
             if _is_error_response(move):

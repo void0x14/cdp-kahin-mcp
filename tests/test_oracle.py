@@ -63,7 +63,9 @@ def test_server_initialize_and_list_tools() -> None:
     # Faz 3 Task 4: +4 identity pin tools (pin/unpin/pins/for_domain) = 136.
     # Faz 3 Task 5: +2 proxy/geo + fingerprint report tools = 138.
     # Faz 4 Task 3: +1 engine stats tool (kahin_engine_stats) = 139.
-    assert len(tools) == 139
+    # Faz 4 crawler contract: +1 challenge status + 6 single-engine crawler
+    # lifecycle tools = 146.
+    assert len(tools) == 146
     assert "kahin_mirage_dom_start" in tool_names
     assert "kahin_mirage_dom_snapshot" in tool_names
     assert "kahin_mirage_dom_events" in tool_names
@@ -89,6 +91,16 @@ def test_server_initialize_and_list_tools() -> None:
     assert "kahin_identity_for_domain" in tool_names
     assert "kahin_fingerprint_report" in tool_names
     assert "kahin_proxy_resolve" in tool_names
+    assert "kahin_challenge_status" in tool_names
+    for name in [
+        "kahin_crawl_start",
+        "kahin_crawl_status",
+        "kahin_crawl_results",
+        "kahin_crawl_pause",
+        "kahin_crawl_resume",
+        "kahin_crawl_stop",
+    ]:
+        assert name in tool_names
     for name in [
         "kahin_mirage_query",
         "kahin_mirage_click",

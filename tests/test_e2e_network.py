@@ -143,12 +143,12 @@ async def http_server() -> AsyncGenerator[str, None]:
 
 @async_fixture
 async def mirage_tools() -> AsyncGenerator[None, None]:
-    """Start real Camoufox through kahin_browser_start + one tab, then stop."""
+    """Start real Camoufox through kahin_browser_start with its one tab, then stop."""
     resp = _loads(await pilot.browser_start(engine="mirage"))
     assert resp["status"] == "started", resp
     try:
-        tab = _loads(await trainman_mirage.mirage_tab_new())
-        assert tab.get("targetId"), tab
+        tabs = _loads(await trainman_mirage.mirage_tab_list())
+        assert len(tabs) == 1 and tabs[0].get("targetId"), tabs
         await asyncio.sleep(0.5)  # session/frame events settle (mirrors test_e2e_mirage)
         yield
     finally:
@@ -193,7 +193,7 @@ async def _poll_requests(pred, timeout: float = 15.0, interval: float = 0.2) -> 
     """Poll kahin_mirage_network_requests until pred(list) is truthy."""
     deadline = asyncio.get_running_loop().time() + timeout
     while True:
-        reqs = _loads(await dejavu_mirage.mirage_network_requests())
+        reqs = _loads(await dejavu_mirage.mirage_network_requests(detail=True))
         hit = pred(reqs)
         if hit:
             return hit

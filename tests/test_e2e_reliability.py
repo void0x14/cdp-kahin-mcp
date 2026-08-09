@@ -69,12 +69,12 @@ def _eval_value(text: str) -> Any:
 
 @async_fixture
 async def mirage_tools() -> AsyncGenerator[None, None]:
-    """Start real Camoufox through kahin_browser_start + one tab, then stop."""
+    """Start real Camoufox through kahin_browser_start with its one tab, then stop."""
     resp = _loads(await pilot.browser_start(engine="mirage"))
     assert resp["status"] == "started", resp
     try:
-        tab = _loads(await trainman_mirage.mirage_tab_new())
-        assert tab.get("targetId"), tab
+        tabs = _loads(await trainman_mirage.mirage_tab_list())
+        assert len(tabs) == 1 and tabs[0].get("targetId"), tabs
         await asyncio.sleep(0.5)  # session/frame events settle
         yield
     finally:

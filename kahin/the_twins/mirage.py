@@ -554,11 +554,24 @@ class Mirage(BrowserEngine):
         # environment through to the Camoufox child verbatim (pipe.zig
         # buildEnvp reads /proc/self/environ).
         opts_t0 = time.monotonic()
-        opts = (
-            launch_options(**launch_kwargs)
-            if launch_options is not None
-            else {"env": {}, "firefox_user_prefs": {}}
-        )
+        if launch_options is None:
+            opts = {"env": {}, "firefox_user_prefs": {}}
+        else:
+            try:
+                opts = launch_options(**launch_kwargs)
+            except Exception as exc:  # noqa: BLE001 - geoip is an optional proxy seam
+                if validated_proxy_url is None or launch_kwargs.get("geoip") is not True:
+                    raise
+                # Native geo alignment performs an external IP lookup through
+                # the proxy. A dead, local, or temporarily unavailable proxy
+                # must not prevent the browser from starting; retain the
+                # proxy and fall back to proxy-only launch semantics.
+                logger.warning(
+                    "Camoufox geoip lookup failed; continuing with proxy-only launch (%s)",
+                    type(exc).__name__,
+                )
+                launch_kwargs = {**launch_kwargs, "geoip": False}
+                opts = launch_options(**launch_kwargs)
         # Identity config (Faz 2 Task 5): merge through the same seam that
         # applies the default fingerprint. ``launch_options(config=...)``
         # regenerates the full option set (env with CAMOU_CONFIG_*, user.js

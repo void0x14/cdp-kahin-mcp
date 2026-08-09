@@ -48,6 +48,10 @@ for line in sys.stdin:
               "params": {"sessionId": sid, "targetInfo": {"type": "page", "targetId": tid}},
               "sessionId": sid})
         emit({"id": rid, "result": {"targetId": tid}})
+    elif method == "Page.getFrameTree":
+        sid = req.get("sessionId")
+        tid = targets.get(sid, "unknown")
+        emit({"id": rid, "result": {"frameTree": {"frame": {"id": "frame-" + tid}}}})
     elif method == "Page.close":
         sid = req.get("sessionId")
         tid = targets.pop(sid, None)
@@ -77,6 +81,9 @@ def handle(req):
     rid = req["id"]
     if req["method"] == "Browser.health":
         emit({"id": rid, "result": {"alive": True}})
+        return
+    if req["method"] == "Page.getFrameTree":
+        emit({"id": rid, "result": {"frameTree": {"frame": {"id": "frame-1"}}}})
         return
     time.sleep(0.4)
     emit({"id": rid, "result": {"echo": req["method"]}})
