@@ -4,6 +4,9 @@
 
 ## [0.3.10] — 2026-08-09
 
+- fix(harness): align lifecycle tests and screenshot measure with grace-window runtime
+- fix(stealth): disable Camoufox humanize mouse trajectory (drops acks, wedges input)
+- fix(release): retry npm pack verification after publish
 - chore: prepare v0.3.9
 - chore: refresh packaged kahin wheel
 - fix: harden single-engine crawler runtime
