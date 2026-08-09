@@ -54,7 +54,9 @@ _MAX_TITLE_LENGTH = 500
 _MAX_TEXT_LENGTH = 2_000
 _MAX_URL_LENGTH = 4_096
 _MAX_SEEDS = 1_000
-_MAX_IDENTITY_NAME_LENGTH = 512
+_MAX_IDENTITY_NAME_LENGTH = 64
+_MAX_RECOVERY_IDENTITY_BYTES = 1 * 1024 * 1024
+_MAX_PROXY_LENGTH = 4_096
 _MAX_RETAINED_JOBS = 20
 _RESPONSE_MAX_BYTES = 8 * 1024 * 1024
 
@@ -75,7 +77,7 @@ _ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
     "running": frozenset({"backing_off", "paused", "rotating", "completed", "failed", "cancelled"}),
     "backing_off": frozenset({"running", "paused", "rotating", "failed", "cancelled"}),
     "paused": frozenset({"running", "cancelled"}),
-    "rotating": frozenset({"running", "paused", "failed", "cancelled"}),
+    "rotating": frozenset({"running", "failed", "cancelled"}),
     "completed": frozenset(),
     "failed": frozenset(),
     "cancelled": frozenset(),
@@ -183,6 +185,27 @@ def _active_identity_hash() -> str | None:
     return value if isinstance(value, str) else None
 
 
+def _snapshot_identity_config(value: Any) -> dict[str, Any] | None:
+    """Make a bounded, detached copy of an inline identity config.
+
+    The crawl job retains this only for a later recovery/rotation launch;
+    raw identity material is never included in a status or result payload.
+    """
+    if not isinstance(value, dict) or not value:
+        return None
+    try:
+        serialized = orjson.dumps(value)
+    except (TypeError, ValueError):
+        return None
+    if len(serialized) > _MAX_RECOVERY_IDENTITY_BYTES:
+        return None
+    try:
+        copied = orjson.loads(serialized)
+    except orjson.JSONDecodeError:
+        return None
+    return copied if isinstance(copied, dict) and copied else None
+
+
 def _bounded_int(
     value: Any, *, tool: str, field: str, minimum: int, maximum: int, default: int,
 ) -> tuple[int | None, str | None]:
@@ -222,6 +245,11 @@ class _CrawlJob:
         self.job_id = job_id
         self.config = config
         self.lock = asyncio.Lock()
+        # Serializes the stop/start boundary with explicit job cancellation.
+        # The cancellation flag is set before this gate is acquired, so a
+        # stop request arriving after the old engine is stopped cannot allow
+        # the rotation path to start a replacement engine.
+        self.rotation_gate = asyncio.Lock()
         self.resume_event = asyncio.Event()
 
         self.state = "queued"
@@ -274,7 +302,9 @@ class _CrawlJob:
 
         self.tab_id: str | None = None
         self.identity: str | None = None
-        self.launch_identity: str | None = None
+        self.launch_identity: str | dict[str, Any] | None = None
+        self.launch_headless = True
+        self.launch_proxy: str | None = None
         self.task: asyncio.Task[Any] | None = None
 
     # --- bounded queue primitives -----------------------------------------
@@ -627,12 +657,21 @@ async def _stop_for_rotation(job: _CrawlJob) -> bool:
 
 
 async def _start_for_rotation(
-    job: _CrawlJob, *, identity: str | None, previous_hash: str | None, require_different: bool,
+    job: _CrawlJob,
+    *,
+    identity: str | dict[str, Any] | None,
+    previous_hash: str | None,
+    require_different: bool,
 ) -> bool:
     from kahin.tools.pilot import browser_start as pilot_browser_start  # noqa: PLC0415
 
-    kwargs: dict[str, Any] = {"engine": "mirage", "headless": True}
-    if identity:
+    kwargs: dict[str, Any] = {
+        "engine": "mirage",
+        "headless": bool(job.launch_headless),
+    }
+    if isinstance(job.launch_proxy, str) and job.launch_proxy:
+        kwargs["proxy"] = job.launch_proxy
+    if identity is not None:
         kwargs["identity"] = identity
     raw = await pilot_browser_start(**kwargs)
     payload = _loads(raw) or {}
@@ -665,29 +704,38 @@ async def _rotate_engine(job: _CrawlJob, *, reason: str) -> bool:
     Rotation uses a fresh identity unless an explicit identity was given;
     recovery reuses the captured launch identity. Returns False when the job
     reached a terminal state (the worker must stop)."""
-    async with job.lock:
-        if job.state != "running":
-            return True
-    transition_err = await _transition(job, "rotating", reason)
-    if transition_err:
-        return True
-    job.rotation_reason = reason
-    job.rotation_started_at = time.time()
-    previous_hash = _active_identity_hash()
-    identity = job.identity if reason == "rotation" else job.launch_identity
-    if not await _stop_for_rotation(job):
-        await _transition(job, "failed", "rotation_stop_failed")
-        return False
-    if not await _start_for_rotation(
-        job, identity=identity, previous_hash=previous_hash, require_different=reason == "rotation",
-    ):
-        await _transition(job, "failed", "rotation_start_failed")
-        return False
-    job.rotations += 1
-    job.pages_since_rotation = 0
-    job.last_rotation_at = time.time()
-    await _transition(job, "running", f"{reason}_done")
-    return True
+    async with job.rotation_gate:
+        async with job.lock:
+            if job.state != "running" or job.cancel_requested:
+                return not job.cancel_requested
+        transition_err = await _transition(job, "rotating", reason)
+        if transition_err:
+            return False
+        job.rotation_reason = reason
+        job.rotation_started_at = time.time()
+        previous_hash = _active_identity_hash()
+        identity = job.identity if reason == "rotation" else job.launch_identity
+        if not await _stop_for_rotation(job):
+            await _transition(job, "failed", "rotation_stop_failed")
+            return False
+        # A stop request may arrive while the old engine is being reaped. Do
+        # not start a replacement browser after the caller has cancelled the
+        # job; the stop tool will publish the terminal state after this gate.
+        if job.cancel_requested:
+            return False
+        if not await _start_for_rotation(
+            job, identity=identity, previous_hash=previous_hash, require_different=reason == "rotation",
+        ):
+            await _transition(job, "failed", "rotation_start_failed")
+            return False
+        if job.cancel_requested:
+            await _stop_for_rotation(job)
+            return False
+        job.rotations += 1
+        job.pages_since_rotation = 0
+        job.last_rotation_at = time.time()
+        transition_err = await _transition(job, "running", f"{reason}_done")
+        return transition_err is None
 
 
 async def _recover_engine(job: _CrawlJob, *, url: str, depth: int) -> bool:
@@ -907,15 +955,36 @@ def _status_payload(job: _CrawlJob, engine_health: dict[str, Any] | None) -> dic
 
 def _bounded_results_response(job: _CrawlJob, *, cursor: int, limit: int) -> str:
     ledger = list(job.results)
-    total = len(ledger)
-    start = min(cursor, total)
-    selected = list(ledger[start : start + limit])
-    next_cursor = start + len(selected)
-    has_more = next_cursor < total
+    oldest_cursor = (
+        int(ledger[0].get("index"))
+        if ledger and isinstance(ledger[0].get("index"), int)
+        else job._result_seq
+    )
+    # The deque is intentionally bounded. Once old entries are evicted, a
+    # position-based cursor would point at a different result (or appear
+    # exhausted) even though newer entries exist. Cursors are therefore the
+    # monotonic result indexes emitted by _record_result.
+    start = max(cursor, oldest_cursor)
+    cursor_reset = cursor < oldest_cursor
+    selected = [
+        entry for entry in ledger
+        if isinstance(entry.get("index"), int) and int(entry["index"]) >= start
+    ][:limit]
+    next_cursor = (
+        int(selected[-1]["index"]) + 1
+        if selected and isinstance(selected[-1].get("index"), int)
+        else start
+    )
+    has_more = any(
+        isinstance(entry.get("index"), int) and int(entry["index"]) >= next_cursor
+        for entry in ledger
+    )
     payload: dict[str, Any] = {
         "jobId": job.job_id,
         "state": job.state,
         "cursor": start,
+        "oldestCursor": oldest_cursor,
+        "cursorReset": cursor_reset,
         "limit": limit,
         "count": len(selected),
         "nextCursor": next_cursor,
@@ -938,8 +1007,13 @@ def _bounded_results_response(job: _CrawlJob, *, cursor: int, limit: int) -> str
     while trimmed:
         payload["results"] = trimmed
         payload["count"] = len(trimmed)
-        payload["nextCursor"] = start + len(trimmed)
-        payload["hasMore"] = start + len(trimmed) < total
+        last_index = trimmed[-1].get("index") if trimmed else None
+        trimmed_next = int(last_index) + 1 if isinstance(last_index, int) else start
+        payload["nextCursor"] = trimmed_next
+        payload["hasMore"] = any(
+            isinstance(entry.get("index"), int) and int(entry["index"]) >= trimmed_next
+            for entry in ledger
+        )
         raw = orjson.dumps(payload, option=orjson.OPT_INDENT_2).decode()
         if len(raw) <= _RESPONSE_MAX_BYTES:
             payload["truncated"] = True
@@ -949,6 +1023,8 @@ def _bounded_results_response(job: _CrawlJob, *, cursor: int, limit: int) -> str
         "jobId": job.job_id,
         "state": job.state,
         "cursor": start,
+        "oldestCursor": oldest_cursor,
+        "cursorReset": cursor_reset,
         "limit": limit,
         "count": 0,
         "nextCursor": start,
@@ -1040,11 +1116,21 @@ async def crawl_start(
             if not isinstance(identity, str) or not identity or len(identity) > _MAX_IDENTITY_NAME_LENGTH:
                 return _json_error(
                     tool,
-                    "identity must be a saved identity name of at most 512 characters",
+                    f"identity must be a saved identity name of at most {_MAX_IDENTITY_NAME_LENGTH} characters",
                     "invalid_argument",
                     field="identity",
                 )
             identity_name = identity
+            from kahin.tools.agent_mirage import _identity_path  # noqa: PLC0415
+
+            identity_path = _identity_path(identity_name)
+            if identity_path is None or not identity_path.is_file():
+                return _json_error(
+                    tool,
+                    f"unknown identity: {identity_name!r}",
+                    "invalid_argument",
+                    field="identity",
+                )
 
         async with state._crawl_jobs_lock:
             active_id = state._active_crawl_id
@@ -1073,6 +1159,16 @@ async def crawl_start(
         engine_error = await _require_engine()
         if engine_error:
             return engine_error
+        active_identity_name = getattr(engine, "_identity_name", None)
+        if identity_name is not None and active_identity_name != identity_name:
+            return _json_error(
+                tool,
+                "active Mirage engine uses a different identity",
+                "engine_config_conflict",
+                requested={"identity": identity_name},
+                active={"identity": active_identity_name or None},
+                hint="Stop/start Mirage with the requested identity before starting the crawl.",
+            )
         try:
             page = await asyncio.wait_for(engine.ensure_page(), timeout=_PAGE_SETTLE_TIMEOUT)
         except Exception as exc:  # noqa: BLE001 - public tool returns JSON
@@ -1094,9 +1190,38 @@ async def crawl_start(
         job = _CrawlJob(job_id, config, canonical_seeds)
         job.tab_id = tab_id if isinstance(tab_id, str) else None
         job.identity = identity_name
-        job.launch_identity = identity_name or getattr(engine, "_identity_name", None)
+        job.launch_identity = (
+            identity_name
+            or getattr(engine, "_identity_name", None)
+            or _snapshot_identity_config(getattr(engine, "_identity_config", None))
+        )
+        launch_policy = getattr(engine, "_launch_policy", None)
+        job.launch_headless = bool(
+            launch_policy.get("headless", True)
+            if isinstance(launch_policy, dict)
+            else True
+        )
+        launch_proxy = getattr(engine, "_proxy_url", None)
+        job.launch_proxy = (
+            launch_proxy[:_MAX_PROXY_LENGTH]
+            if isinstance(launch_proxy, str) and len(launch_proxy) <= _MAX_PROXY_LENGTH
+            else None
+        )
 
         async with state._crawl_jobs_lock:
+            # Re-check while holding the registration lock. The first check
+            # above is only an early rejection; two concurrent start calls
+            # must not both pass it and then overwrite _active_crawl_id.
+            active_id = state._active_crawl_id
+            active_job = state._crawl_jobs.get(active_id) if active_id else None
+            if active_job is not None and active_job.state not in _TERMINAL:
+                return _json_error(
+                    tool,
+                    "another crawl job is already active",
+                    "crawl_busy",
+                    jobId=active_id,
+                    state=active_job.state,
+                )
             # Bounded retention: prune the oldest terminal jobs so the
             # in-process registry cannot grow without limit.
             terminal_ids = [
@@ -1114,9 +1239,15 @@ async def crawl_start(
             state._active_crawl_id = job_id
 
         job.started_at = time.time()
+        transition_err = await _transition(job, "running", "started")
+        if transition_err:
+            async with state._crawl_jobs_lock:
+                state._crawl_jobs.pop(job_id, None)
+                if state._active_crawl_id == job_id:
+                    state._active_crawl_id = None
+            return transition_err
         task = asyncio.create_task(_run_job(job))
         job.task = task
-        await _transition(job, "running", "started")
         return orjson.dumps(
             {
                 "jobId": job_id,
@@ -1187,7 +1318,9 @@ async def crawl_pause(jobId: str | None = None) -> str:
                 option=orjson.OPT_INDENT_2,
             ).decode()
         job.resume_event.clear()
-        await _transition(job, "paused", "user_pause")
+        transition_err = await _transition(job, "paused", "user_pause")
+        if transition_err:
+            return transition_err
         return orjson.dumps(
             {"jobId": job.job_id, "state": "paused", "paused": True, "reason": "user_pause"},
             option=orjson.OPT_INDENT_2,
@@ -1216,8 +1349,10 @@ async def crawl_resume(jobId: str | None = None) -> str:
                 "invalid_state_transition",
                 jobId=job.job_id, current=current,
             )
+        transition_err = await _transition(job, "running", "resumed")
+        if transition_err:
+            return transition_err
         job.resume_event.set()
-        await _transition(job, "running", "resumed")
         return orjson.dumps(
             {"jobId": job.job_id, "state": "running", "resumed": True, "reason": "resumed"},
             option=orjson.OPT_INDENT_2,
@@ -1240,17 +1375,24 @@ async def crawl_stop(jobId: str | None = None) -> str:
                 {"jobId": job.job_id, "state": current, "alreadyStopped": True},
                 option=orjson.OPT_INDENT_2,
             ).decode()
+        # Serialize cancellation with the stop/start rotation boundary. The
+        # worker checks cancel_requested while holding this gate, so a stop
+        # arriving during reaping cannot be followed by a surprise new boot.
         job.cancel_requested = True
-        await _transition(job, "cancelled", "user_stop")
-        task = job.task
-        if task is not None and not task.done():
-            task.cancel()
-            try:
-                await asyncio.wait_for(asyncio.shield(task), timeout=10.0)
-            except (asyncio.CancelledError, asyncio.TimeoutError):
-                pass
-            except Exception:  # noqa: BLE001 - stop must return structured JSON
-                pass
+        job.resume_event.set()
+        async with job.rotation_gate:
+            transition_err = await _transition(job, "cancelled", "user_stop")
+            if transition_err:
+                return transition_err
+            task = job.task
+            if task is not None and not task.done():
+                task.cancel()
+                try:
+                    await asyncio.wait_for(asyncio.shield(task), timeout=10.0)
+                except (asyncio.CancelledError, asyncio.TimeoutError):
+                    pass
+                except Exception:  # noqa: BLE001 - stop must return structured JSON
+                    pass
         return orjson.dumps(
             {
                 "jobId": job.job_id,

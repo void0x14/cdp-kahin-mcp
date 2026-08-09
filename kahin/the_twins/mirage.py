@@ -510,6 +510,23 @@ class Mirage(BrowserEngine):
         if self._identity_config is not None:
             prewarm_hash = _identity_hash(self._identity_config)
             prewarm = _prewarm_load(prewarm_hash)
+        # Validate the proxy before constructing launch options so the same
+        # validated value can drive Camoufox's native proxy/geoip seam and
+        # the existing environment defense-in-depth seam below. Credentials
+        # remain internal to the launch call and env; no display/log path
+        # receives the raw URL.
+        proxy_url = kwargs.get("proxy")
+        validated_proxy_url: str | None = None
+        proxy_environment: dict[str, str] | None = None
+        if isinstance(proxy_url, str) and proxy_url.strip():
+            from kahin.stealth import proxy_env  # noqa: PLC0415 - pure helper
+
+            candidate_proxy_url = proxy_url.strip()
+            try:
+                proxy_environment = proxy_env(candidate_proxy_url)
+                validated_proxy_url = candidate_proxy_url
+            except ValueError:
+                logger.warning("proxy env merge skipped: invalid proxy URL")
         # Real launch policy (crawler/rotation Task 1): the same fixed
         # Camoufox options are bound on EVERY start — default and identity —
         # so fingerprint generation, user.js prefs and args never drift from
@@ -520,13 +537,24 @@ class Mirage(BrowserEngine):
         from kahin.stealth import launch_policy  # noqa: PLC0415 - pure helper
 
         policy = launch_policy(headless=headless)
+        launch_kwargs: dict[str, Any] = {
+            **policy,
+        }
+        if validated_proxy_url is not None:
+            # Camoufox uses this native proxy config for proxy-aware
+            # fingerprint geo alignment. The raw URL is passed only to the
+            # library; it is never logged or returned by Kahin.
+            launch_kwargs.update({
+                "proxy": {"server": validated_proxy_url},
+                "geoip": True,
+            })
         # BrowserForge fingerprint -> CAMOU_CONFIG_* env (master plan §2.1.5).
         # Every start() draws a fresh identity; the sidecar passes our
         # environment through to the Camoufox child verbatim (pipe.zig
         # buildEnvp reads /proc/self/environ).
         opts_t0 = time.monotonic()
         opts = (
-            launch_options(**policy)
+            launch_options(**launch_kwargs)
             if launch_options is not None
             else {"env": {}, "firefox_user_prefs": {}}
         )
@@ -545,7 +573,7 @@ class Mirage(BrowserEngine):
                     opts = launch_options(
                         config=self._identity_config,
                         i_know_what_im_doing=True,
-                        **policy,
+                        **launch_kwargs,
                     )
                 except Exception:  # noqa: BLE001 - identity must not crash boot
                     logger.warning("identity config injection failed; using defaults", exc_info=True)
@@ -559,16 +587,9 @@ class Mirage(BrowserEngine):
         # is retained as engine metadata so a later browser_start reuse can
         # detect a requested configuration mismatch instead of silently
         # ignoring it. A failed merge must never crash boot.
-        proxy_url = kwargs.get("proxy")
-        if isinstance(proxy_url, str) and proxy_url.strip():
-            from kahin.stealth import proxy_env  # noqa: PLC0415 - pure helper
-
-            try:
-                env.update(proxy_env(proxy_url))
-                self._proxy_url = proxy_url
-            except ValueError:
-                logger.warning("proxy env merge skipped: invalid proxy URL")
-                self._proxy_url = None
+        if proxy_environment is not None and validated_proxy_url is not None:
+            env.update(proxy_environment)
+            self._proxy_url = validated_proxy_url
         else:
             self._proxy_url = None
 
