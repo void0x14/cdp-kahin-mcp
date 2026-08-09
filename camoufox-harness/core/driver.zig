@@ -70,6 +70,12 @@ pub const WireCall = struct {
 /// evaluateWithRetry pump(100) grace so context create/destroy events land
 /// before the retry).
 const eval_retry_settle_ms: i64 = 100;
+/// Give a started navigation a short window for commit/abort before the
+/// sidecar returns control to Kahin's Python wait contract. Some Camoufox
+/// pages never resolve the native Page.navigate promise even after emitting
+/// navigationStarted; holding the IPC request for 30s makes every later tool
+/// look dead although the browser process is healthy.
+const nav_started_grace_ms: i64 = 500;
 
 const ContextInfo = struct {
     id: []u8,
@@ -511,6 +517,7 @@ pub const Driver = struct {
         deadline_ms: i64,
         call: ?*WireCall = null,
         nav_id: ?[]u8 = null,
+        nav_started_grace_until_ms: i64 = 0,
         done: bool = false,
         failed: bool = false,
         err: anyerror = error.UnknownTarget,
@@ -547,7 +554,31 @@ pub const Driver = struct {
             if (nowMs() >= self.deadline_ms) return self.fail(error.WaitTimeout);
 
             if (self.call) |call| {
-                if (!call.done) return;
+                if (!call.done) {
+                    if (d.pages.get(self.target_id)) |p| {
+                        if (p.lifecycle.nav_started and p.lifecycle.navigation_id.len > 0) {
+                            if (p.lifecycle.state == .aborted) {
+                                self.abort_text = d.allocator.dupe(u8, p.lifecycle.abort_text) catch "";
+                                return self.fail(error.NavigationAborted);
+                            }
+                            if (self.nav_started_grace_until_ms == 0) {
+                                self.nav_started_grace_until_ms = nowMs() + nav_started_grace_ms;
+                            }
+                            if (p.lifecycle.committed_current or nowMs() >= self.nav_started_grace_until_ms) {
+                                self.nav_id = d.allocator.dupe(u8, p.lifecycle.navigation_id) catch return self.fail(error.OutOfMemory);
+                                d.cancelWireCall(call);
+                                self.call = null;
+                                // The request is now owned by Python's URL /
+                                // readyState wait. Mark the driver lifecycle
+                                // reusable for the next navigation.
+                                p.lifecycle.state = .done;
+                                self.done = true;
+                                return;
+                            }
+                        }
+                    }
+                    return;
+                }
                 const raw = call.raw.?;
                 call.raw = null;
                 const is_error = call.is_error;
@@ -586,6 +617,29 @@ pub const Driver = struct {
                 return self.fail(error.NavigationAborted);
             }
             const nav_id = self.nav_id.?;
+            // Kahin's Python layer owns the requested wait_until contract
+            // (commit/domcontentloaded/load/networkidle). The sidecar must
+            // finish the wire navigation as soon as the new document is
+            // genuinely committed; waiting for load here as well created a
+            // second gate and could strand Page.navigate after a large
+            // DOM/accessibility operation even though the browser had
+            // already accepted the next URL.
+            if (p.lifecycle.committed_current and
+                (p.lifecycle.navigation_id.len == 0 or std.mem.eql(u8, p.lifecycle.navigation_id, nav_id))) {
+                // The sidecar completes Page.navigate at commit. Keep the
+                // per-page lifecycle in the same terminal state so the next
+                // navigation can call Lifecycle.begin() and reset the
+                // navigation id/commit flags instead of seeing a stale
+                // `.waiting` navigation forever.
+                p.lifecycle.state = .done;
+                self.done = true;
+                return;
+            }
+            if (d.urlCommitted(p, self.url)) {
+                p.lifecycle.state = .done;
+                self.done = true;
+                return;
+            }
             if (p.lifecycle.state == .done and d.navigationSatisfied(p, nav_id, self.url)) {
                 self.done = true;
                 return;

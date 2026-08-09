@@ -78,9 +78,11 @@ async def mirage_upload_files(files: list[str], timeout: float = 15.0) -> str:
     (Page.setFileInputFiles). Requires file chooser interception enabled
     (kahin_mirage_set_file_chooser_intercept). Waits up to ``timeout`` for
     Page.fileChooserOpened — works whether the input was already clicked or
-    is clicked after this call — then sets the files. ``files`` MUST be
-    absolute paths and must exist; multiple files upload in one call. Returns
-    an error when no chooser opens within ``timeout``."""
+    is clicked concurrently after this call — then sets the files. The tool
+    does not guess which file input to click; use
+    ``kahin_mirage_click(selector=...)`` in parallel when no chooser is open.
+    ``files`` MUST be absolute paths and must exist; multiple files upload in
+    one call. Returns an error when no chooser opens within ``timeout``."""
     context_files = files[:10] if isinstance(files, list) else None
     async with _healer_ref.safe("kahin_mirage_upload_files", files=context_files, timeout=timeout):
         if not isinstance(files, list) or not files:
@@ -123,9 +125,12 @@ async def mirage_upload_files(files: list[str], timeout: float = 15.0) -> str:
         if err:
             return err
         engine = _mirage_engine()
-        await engine.ensure_page()
+        page = await engine.ensure_page()
+        page_session_id = page.get("sessionId") if isinstance(page, dict) else None
+        if not isinstance(page_session_id, str) or not page_session_id:
+            return '{"error": "selected page has no live session", "code": "session_unavailable"}'
         try:
-            chooser = await engine.wait_for_chooser(wait)
+            chooser = await engine.wait_for_chooser(wait, session_id=page_session_id)
         except Exception as e:  # noqa: BLE001
             return orjson.dumps({"error": f"Connection lost: {e}"}).decode()
         if chooser is None:

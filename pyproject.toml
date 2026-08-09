@@ -32,6 +32,8 @@ packages = ["kahin"]
 [tool.hatch.build.targets.wheel.force-include]
 "kahin/the_source/protocol.json.gz" = "kahin/the_source/protocol.json.gz"
 "camoufox-harness/vendor/bin/kahin-sidecar" = "kahin/_vendor/kahin-sidecar"
+"README.md" = "kahin/_docs/README.md"
+"docs/juggler-ai-native.md" = "kahin/_docs/juggler-ai-native.md"
 
 [tool.ruff]
 line-length = 100

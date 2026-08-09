@@ -66,7 +66,7 @@ kahin_pattern_query(context="doggystyle")
 kahin_pattern_suggest(partial="navig")
 ```
 
-## Tool Listesi (139 adet)
+## Tool Listesi (140 adet)
 
 Juggler/Mirage yüzeyinin ajana dönük, uçtan uca sözleşmesi:
 [docs/juggler-ai-native.md](docs/juggler-ai-native.md)
@@ -126,7 +126,7 @@ Juggler/Mirage yüzeyinin ajana dönük, uçtan uca sözleşmesi:
 | `kahin_pattern_forget` | Pattern sil |
 | `kahin_pattern_stats` | Pattern istatistikleri |
 
-### MIRAGE — Juggler Native (107) — Camoufox varsayılandır; Shadow'dan gerektiğinde otomatik yükseltilir
+### MIRAGE — Juggler Native (104) — Camoufox varsayılandır; Shadow'dan gerektiğinde otomatik yükseltilir
 
 #### DOM Stream (5) — gerçek MutationObserver + Juggler binding
 | Tool | Ne işe yarar? |
@@ -163,7 +163,7 @@ Juggler/Mirage yüzeyinin ajana dönük, uçtan uca sözleşmesi:
 | `kahin_mirage_drag` | Bounded mouse adımlarıyla drag-and-drop yapar |
 | `kahin_mirage_wait_for_text` | Sayfa metni görünene kadar bekler |
 | `kahin_mirage_wait_for_timeout` | Bounded millisecond bekleme yapar |
-| `kahin_mirage_route` | Glob/regex ile tek sonraki isteği abort/continue/fulfill eder |
+| `kahin_mirage_route` | Eşzamanlı request-producing çağrıyla bekleyen tek sonraki isteği abort/continue/fulfill eder |
 
 #### Input (7)
 | Tool | Ne işe yarar? |
@@ -247,7 +247,7 @@ Juggler/Mirage yüzeyinin ajana dönük, uçtan uca sözleşmesi:
 | Tool | Ne işe yarar? |
 |------|---------------|
 | `kahin_mirage_set_file_chooser_intercept` | File chooser interception'ı aç/kapat (Page.setInterceptFileChooserDialog) |
-| `kahin_mirage_upload_files` | Dosya yükle (Page.fileChooserOpened bekle + Page.setFileInputFiles; absolute path zorunlu) |
+| `kahin_mirage_upload_files` | Page.fileChooserOpened bekle + Page.setFileInputFiles; input önceden/eşzamanlı tıklanmalı, absolute path zorunlu |
 
 #### Screencast (4)
 | Tool | Ne işe yarar? |
@@ -262,7 +262,7 @@ Juggler/Mirage yüzeyinin ajana dönük, uçtan uca sözleşmesi:
 |------|---------------|
 | `kahin_mirage_accessibility_tree` | Erişilebilirlik ağacı (Accessibility.getFullAXTree — Camoufox-only, CDP'de yok) |
 
-#### Agent (10) — ref'li snapshot, form doldurma, oturum/kimlik kalıcılığı ve durum özeti
+#### Agent (11) — ref'li snapshot, form doldurma, oturum/kimlik kalıcılığı, durum ve crawl challenge özeti
 | Tool | Ne işe yarar? |
 |------|---------------|
 | `kahin_mirage_snapshot` | Canlı DOM ağacını token bütçeli, ref'li satırlara çevirir (`[ref=n9]` ile action ipuçlu) |
@@ -271,6 +271,7 @@ Juggler/Mirage yüzeyinin ajana dönük, uçtan uca sözleşmesi:
 | `kahin_identity_new` / `kahin_identity_save` / `kahin_identity_list` / `kahin_identity_delete` | Camoufox fingerprint kimliklerini oluştur/kaydet/listele/sil |
 | `kahin_identity_report` | Aktif engine'in kimlik özetini ve sayfa-içi canlı `navigator.userAgent`'ı raporlar |
 | `kahin_agent_status` | Agent döngüsü özeti: engine liveness, sayfa durumu, sekme sayısı, refsLive/domCursor, dialog/network/console sayaçları |
+| `kahin_challenge_status` | CAPTCHA/access-denied/rate-limit algılar; `retryAfterSeconds` ve güvenli pause/backoff kararını döndürür; bypass etmez |
 
 #### Stealth (9) — anti-detect denetimi, insansı girdi, kimlik rotasyonu ve proxy/geo
 | Tool | Ne işe yarar? |

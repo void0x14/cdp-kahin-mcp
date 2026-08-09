@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import re
 from typing import Any
 from urllib.parse import urlparse
 
@@ -51,18 +52,42 @@ def _get_fate() -> FateDB:
     global _fate
     if _fate is None:
         _fate = FateDB()
+        # Fate is a CDP pattern store.  Older releases recorded failed or
+        # invented methods (for example Runtime.click), which then polluted
+        # suggestions for every later agent.  Prune those records once at
+        # load-time and keep the on-wire surface schema-backed thereafter.
+        try:
+            _fate.prune(set(_get_schema().commands))
+        except Exception:  # noqa: BLE001 - pattern memory must never break tools
+            logger.warning("could not prune invalid Fate patterns", exc_info=True)
     return _fate
 
 
 async def _auto_learn(domain: str, command: str, params: dict[str, Any] | None = None) -> None:
     """Auto-record a CDP pattern to FateDB."""
     try:
-        url = (params or {}).get("url", "")
+        values = params or {}
+        full_name = f"{domain}.{command}"
+        schema = _get_schema()
+        if full_name not in schema.commands:
+            return
+        # Auto-learning is only for a command that passed the same schema
+        # gate used by kahin_execute_cdp.  This prevents failed guesses from
+        # becoming persistent training data.
+        if not schema.validate_command(domain, command, values).get("valid"):
+            return
+        url = values.get("url", "")
+        if not isinstance(url, str) or not url:
+            engine = state._current_engine
+            if isinstance(engine, Mirage):
+                target = engine._current_target
+                info = engine._target_infos.get(target or "") or {}
+                url = info.get("url", "")
         ctx = ""
-        if url:
+        if isinstance(url, str) and url:
             parsed = urlparse(url)
             ctx = parsed.hostname or "unknown"
-        _get_fate().learn(domain, command, params or {}, context=ctx)
+        _get_fate().learn(domain, command, values, context=ctx)
     except Exception as e:
         logger.warning("auto_learn failed for %s.%s: %s", domain, command, e)
 
@@ -76,6 +101,67 @@ _MIRAGE_HEALTH_TIMEOUT = 5.0
 _MIRAGE_PROMOTE_TIMEOUT = 60.0
 _MIRAGE_STOP_TIMEOUT = 15.0
 _MAX_TOOL_PAYLOAD_BYTES = 16 * 1024 * 1024
+_MAX_SAFE_EVALUATE_VALUE_BYTES = 512 * 1024
+_REPEAT_LITERAL = re.compile(r"\.repeat\(\s*(\d{6,})\s*\)")
+_ARRAY_JOIN_LITERAL = re.compile(
+    r"(?:new\s+)?Array\(\s*(\d{6,})\s*\)\s*\.fill\([^\n]{0,256}\)\s*\.join\("
+)
+
+
+def _network_response_payload(event: dict[str, Any]) -> dict[str, Any]:
+    """Normalize the two network event shapes used by Kahin's buffers.
+
+    Juggler's ``Network.responseReceived`` puts ``status``/``headers``
+    directly in ``params``. The CDP-shaped diagnostic path may wrap the same
+    object in ``params.response``. Callers must not assume only one shape.
+    """
+    params = event.get("params")
+    if not isinstance(params, dict):
+        return {}
+    nested = params.get("response")
+    if isinstance(nested, dict):
+        return nested
+    if event.get("event") == "responseReceived" or event.get("method") == "Network.responseReceived":
+        return params
+    return {}
+
+
+def _evaluate_preflight_error(method: str, params: dict[str, Any]) -> str | None:
+    """Reject a statically provable giant string before Firefox allocates it."""
+    expression = params.get("expression")
+    if not isinstance(expression, str):
+        return None
+    match = _REPEAT_LITERAL.search(expression) or _ARRAY_JOIN_LITERAL.search(expression)
+    if match is None or int(match.group(1)) <= _MAX_SAFE_EVALUATE_VALUE_BYTES:
+        return None
+    return orjson.dumps({
+        "error": f"{method} result exceeds Kahin's bounded response size",
+        "code": "result_too_large",
+        "method": method,
+        "estimatedBytes": int(match.group(1)),
+        "maxPayloadBytes": _MAX_SAFE_EVALUATE_VALUE_BYTES,
+        "hint": "Return a bounded slice or summary instead of the full generated string.",
+        "retryable": False,
+    }, option=orjson.OPT_INDENT_2).decode()
+
+
+def _native_result_too_large(method: str, message: str) -> str | None:
+    """Normalize sidecar size guards before they look like CDP typos."""
+    lowered = message.lower()
+    markers = (
+        "result exceeds the bounded sidecar response size",
+        "response exceeds the bounded sidecar response size",
+        "exceeds the bounded sidecar response size",
+    )
+    if not any(marker in lowered for marker in markers):
+        return None
+    return orjson.dumps({
+        "error": f"{method} result exceeds Kahin's bounded response size",
+        "code": "result_too_large",
+        "method": method,
+        "hint": "Narrow the expression, selector, event limit, or requested tree before retrying.",
+        "retryable": False,
+    }, option=orjson.OPT_INDENT_2).decode()
 
 
 def _needs_mirage_page(domain: str, command: str) -> bool:
@@ -108,6 +194,9 @@ async def _safe_cdp(domain: str, command: str, params: dict[str, Any] | None = N
         }, option=orjson.OPT_INDENT_2).decode()
     engine = state._current_engine
     try:
+        preflight = _evaluate_preflight_error(f"{domain}.{command}", params or {})
+        if preflight is not None:
+            return preflight
         if isinstance(engine, Obscura) and requires_mirage(domain, command):
             promoted = await _promote_shadow_to_mirage()
             if isinstance(promoted, str):
@@ -137,6 +226,17 @@ async def _safe_cdp(domain: str, command: str, params: dict[str, Any] | None = N
     except RuntimeError as e:
         msg = str(e)
         lowered = msg.lower()
+        bounded = _native_result_too_large(f"{domain}.{command}", msg)
+        if bounded is not None:
+            return bounded
+        if any(marker in lowered for marker in ("sidecar exited", "mirage is dead", "transport closed")):
+            return orjson.dumps({
+                "error": f"Browser engine stopped while executing {domain}.{command}: {msg}",
+                "code": "engine_dead",
+                "method": f"{domain}.{command}",
+                "hint": "Inspect kahin_engine_health, then use kahin_browser_stop and kahin_browser_start.",
+                "last_engine_death": state._last_engine_death,
+            }, option=orjson.OPT_INDENT_2).decode()
         if "not supported" in lowered or "method not found" in lowered:
             engine_name = "mirage" if isinstance(engine, Mirage) else "shadow"
             return orjson.dumps({
@@ -149,12 +249,11 @@ async def _safe_cdp(domain: str, command: str, params: dict[str, Any] | None = N
                     "Use the native kahin_mirage_* tool when one exists; no external automation fallback is used.",
                 ],
             }, option=orjson.OPT_INDENT_2).decode()
-        correction = _get_schema().error_decode(error_code=-32601, error_message=f"'{domain}.{command}' not found")
         return orjson.dumps({
             "error": f"CDP error: {msg}",
             "code": "cdp_command_failed",
             "method": f"{domain}.{command}",
-            "hint": correction.get("common_causes", []) + correction.get("solutions", []),
+            "hint": "Inspect the native error and kahin_engine_health; a valid method is not treated as a typo.",
         }, option=orjson.OPT_INDENT_2).decode()
     except Exception as e:
         msg = str(e)
@@ -183,15 +282,24 @@ async def _require_engine() -> str | None:
         try:
             health = await asyncio.wait_for(engine.health(), timeout=_MIRAGE_HEALTH_TIMEOUT)
         except asyncio.TimeoutError:
-            engine._mark_dead()
             return orjson.dumps({
                 "error": "Browser engine health check timed out. Use kahin_browser_stop, then kahin_browser_start to restart.",
                 "code": "engine_health_timeout",
+                "state": "degraded",
+                "hint": "The health probe timed out; the process lock is retained. Retry health or stop/start explicitly.",
             }, option=orjson.OPT_INDENT_2).decode()
         if not health.get("alive"):
+            if health.get("state") == "degraded":
+                return orjson.dumps({
+                    "error": "Browser health probe is degraded; liveness is not proven dead.",
+                    "code": "engine_degraded",
+                    "health": health,
+                    "hint": "Retry the operation or call kahin_browser_stop explicitly; do not start a second browser.",
+                }, option=orjson.OPT_INDENT_2).decode()
             return orjson.dumps({
                 "error": "Browser engine is dead (crashed). Use kahin_browser_stop, then kahin_browser_start to restart.",
                 "code": "engine_dead",
+                "last_engine_death": state._last_engine_death,
             }, option=orjson.OPT_INDENT_2).decode()
         return None
     if not engine.is_alive():
@@ -268,6 +376,9 @@ async def _mirage_call(
         result = await engine.call(method, params or {}, session_id=session_id)
         return orjson.dumps(result, option=orjson.OPT_INDENT_2).decode()
     except RuntimeError as e:
+        bounded = _native_result_too_large(method, str(e))
+        if bounded is not None:
+            return bounded
         return orjson.dumps({
             "error": f"Juggler call failed: {e}",
             "hint": "Check the engine with kahin_engine_health.",
@@ -394,9 +505,11 @@ async def _promote_shadow_to_mirage() -> Mirage | str:
 
         # Reap Shadow before publishing Mirage. Publishing first leaves two
         # browsers on cleanup failure and leaves the healer bound to Shadow.
+        current._preserve_state_on_stop = True
         try:
             await asyncio.wait_for(current.stop(), timeout=_MIRAGE_STOP_TIMEOUT)
         except Exception as exc:  # noqa: BLE001 - handoff must fail closed
+            current._preserve_state_on_stop = False
             try:
                 await asyncio.wait_for(candidate.stop(), timeout=_MIRAGE_STOP_TIMEOUT)
             except Exception:
@@ -406,6 +519,7 @@ async def _promote_shadow_to_mirage() -> Mirage | str:
                 "code": "mirage_handoff_cleanup_failed",
                 "hint": "The existing Shadow engine was retained; retry stop/start before using Mirage.",
             }, option=orjson.OPT_INDENT_2).decode()
+        current._preserve_state_on_stop = False
 
         # Publish only after Camoufox is healthy, the page is available, and
         # Shadow has been reaped. Keep event/network evidence across the
@@ -478,7 +592,10 @@ async def _shadow_page_state(engine: Obscura) -> dict[str, Any]:
         if same_site in {"Strict", "Lax", "None"}:
             cookie["sameSite"] = same_site
         expires = raw.get("expires")
-        if isinstance(expires, (int, float)) and not isinstance(expires, bool) and expires >= 0:
+        # Obscura represents session cookies as expires=-1 (and the
+        # Juggler side drops non-positive expiry values). Omit that field so
+        # promotion restores a real session cookie instead of losing auth.
+        if isinstance(expires, (int, float)) and not isinstance(expires, bool) and expires > 0:
             cookie["expires"] = expires
         cookies.append(cookie)
     # Keep the handoff bounded.  Navigable URLs retain external resources;
@@ -544,6 +661,9 @@ async def _mirage_eval_result(
     try:
         return await engine.call(method, params, session_id=session_id)
     except RuntimeError as e:
+        bounded = _native_result_too_large(method, str(e))
+        if bounded is not None:
+            return bounded
         return orjson.dumps({"error": f"Juggler evaluate failed: {e}"}, option=orjson.OPT_INDENT_2).decode()
     except Exception as e:
         return orjson.dumps({"error": f"Connection lost: {e}"}).decode()

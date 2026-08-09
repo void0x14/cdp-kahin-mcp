@@ -52,7 +52,33 @@ async def mirage_tab_new(url: str = "about:blank", browser_context_id: str | Non
         if err:
             return err
         try:
-            page = await _mirage_engine().create_page(url=url, browser_context_id=browser_context_id)
+            engine = _mirage_engine()
+            # Browser.newPage is an attach primitive in Juggler. Navigate
+            # through Kahin's bounded navigation contract after the target is
+            # frame-ready; passing the URL into the sidecar's combined flow
+            # can return before the requested document is committed.
+            page = await engine.create_page(url="about:blank", browser_context_id=browser_context_id)
+            navigation: dict[str, Any] | None = None
+            if url != "about:blank":
+                from kahin.tools.pilot import navigate as pilot_navigate  # noqa: PLC0415
+
+                raw_navigation = await pilot_navigate(url=url, wait_until="load")
+                try:
+                    navigation = orjson.loads(raw_navigation)
+                except orjson.JSONDecodeError:
+                    navigation = {"error": raw_navigation[:1_000]}
+                if isinstance(navigation, dict) and navigation.get("error"):
+                    return orjson.dumps({
+                        "error": "newPage navigation failed",
+                        "code": navigation.get("code", "navigation_failed"),
+                        "target": page,
+                        "navigation": navigation,
+                    }, option=orjson.OPT_INDENT_2).decode()
+                # A bounded target recovery may have replaced the page. Return
+                # the live target/session pair rather than the stale one.
+                page = await engine.ensure_page()
+            if navigation is not None:
+                page["navigation"] = navigation
             return orjson.dumps(page, option=orjson.OPT_INDENT_2).decode()
         except RuntimeError as e:
             return orjson.dumps({"error": f"newPage failed: {e}"}).decode()

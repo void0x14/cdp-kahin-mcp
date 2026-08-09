@@ -50,19 +50,26 @@ def _dom_stream_record(
     *,
     stream_id: str | None = None,
     cursor: int | None = None,
+    next_seq: int | None = None,
     refs_live: bool | None = None,
 ) -> None:
     """Persist the latest observed stream state for a page session."""
     entry = _DOM_STREAM_STATE.setdefault(
-        session_id, {"streamId": None, "cursor": None, "refsLive": False}
+        session_id, {"streamId": None, "cursor": None, "nextSeq": None, "refsLive": False}
     )
     if stream_id is not None and entry.get("streamId") != stream_id:
         # A different streamId means a new document: the previous snapshot's
         # refs died with it, whatever the caller believes.
         entry["streamId"] = stream_id
+        entry["cursor"] = None
+        entry["nextSeq"] = None
         entry["refsLive"] = False
     if cursor is not None:
         entry["cursor"] = cursor
+        if next_seq is None:
+            next_seq = cursor
+    if next_seq is not None:
+        entry["nextSeq"] = next_seq
     if refs_live is not None:
         entry["refsLive"] = refs_live
 
@@ -78,6 +85,7 @@ def _dom_stream_status(session_id: str | None) -> dict[str, Any] | None:
     return {
         "streamId": entry.get("streamId"),
         "cursor": entry.get("cursor"),
+        "nextSeq": entry.get("nextSeq"),
         "refsLive": bool(entry.get("refsLive")),
     }
 
@@ -211,6 +219,7 @@ async def mirage_dom_start(
                 session_id,
                 stream_id=value.get("streamId"),
                 cursor=cursor if isinstance(cursor, int) else None,
+                next_seq=cursor if isinstance(cursor, int) else None,
             )
         return _dump({"status": "started", "stream": value, "frame_id": checked_frame})
 
@@ -270,6 +279,7 @@ async def mirage_dom_snapshot(
                 session_id,
                 stream_id=value.get("streamId"),
                 cursor=cursor if isinstance(cursor, int) else None,
+                next_seq=value.get("nextSeq") if isinstance(value.get("nextSeq"), int) else None,
                 refs_live=True,
             )
         return _dump(value)
@@ -332,6 +342,7 @@ async def mirage_dom_events(
                 session_id,
                 stream_id=value.get("streamId"),
                 cursor=cursor if isinstance(cursor, int) else None,
+                next_seq=value.get("nextSeq") if isinstance(value.get("nextSeq"), int) else None,
                 refs_live=False if (value.get("reset") or value.get("dropped")) else None,
             )
             if value.get("events") or value.get("reset") or value.get("dropped"):

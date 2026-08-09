@@ -92,7 +92,24 @@ def _on_engine_death(engine) -> None:
     keeping the reference lets those paths, or an explicit stop, do so.
     """
     if state._current_engine is engine:
+        if getattr(engine, "_preserve_state_on_stop", False):
+            # Shadow->Mirage promotion is a controlled backend replacement,
+            # not a browser shutdown. Keep bounded evidence buffers intact.
+            return
+        if getattr(engine, "_stopping", False):
+            state.clear_state()
+            return
+        process = getattr(engine, "_process", None)
+        state._last_engine_death = {
+            "engine": type(engine).__name__.lower(),
+            "reason": getattr(engine, "_death_reason", None) or "transport_closed",
+            "timestamp": getattr(engine, "_death_at", None) or time.time(),
+            "pid": getattr(process, "pid", None),
+            "returncode": getattr(process, "returncode", None),
+            "stderr_log": str(getattr(engine, "_stderr_path", "")) or None,
+        }
         state.clear_state()
+        state.release_browser_lock()
 
 
 def main() -> None:

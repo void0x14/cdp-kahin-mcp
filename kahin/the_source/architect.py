@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gzip
+import hashlib
 import re
 import time
 from dataclasses import dataclass
@@ -14,6 +15,10 @@ import orjson
 
 HERE = Path(__file__).resolve().parent
 PROTOCOL_PATH = HERE / "protocol.json.gz"
+# The embedded schema predates the current protocol.json version field.  Its
+# provenance is the Chrome 148 CDP snapshot documented by the project; never
+# expose the implementation detail "unknown" to an agent.
+PROTOCOL_VERSION = "Chrome 148"
 
 
 @dataclass
@@ -56,6 +61,7 @@ class DomainInfo:
     commands: list[CommandInfo]
     events: list[EventInfo]
     types: list[TypeInfo]
+    deprecated: bool = False
 
 
 @dataclass
@@ -88,15 +94,21 @@ class SchemaEngine:
         self.types: dict[str, TypeInfo] = {}
         self._keyword_index: dict[str, set[str]] = {}
         self.protocol_version = ""
+        self.protocol_sha256 = ""
+        self.protocol_source = "kahin/the_source/protocol.json.gz"
         self.load_time = 0.0
 
     def load(self, path: str | Path | None = None) -> None:
         t0 = time.time()
         p = Path(path) if path else PROTOCOL_PATH
         raw = gzip.decompress(p.read_bytes())
+        self.protocol_sha256 = hashlib.sha256(raw).hexdigest()
         data: dict[str, Any] = orjson.loads(raw)
-        version = data.get("version", {})
-        self.protocol_version = version.get("major", "unknown")
+        version = data.get("version") or {}
+        if isinstance(version, dict) and version.get("major"):
+            self.protocol_version = str(version["major"])
+        else:
+            self.protocol_version = PROTOCOL_VERSION
 
         for domain in data.get("domains", []):
             self._index_domain(domain)
@@ -153,6 +165,7 @@ class SchemaEngine:
             commands=cmds_list,
             events=evts_list,
             types=typs_list,
+            deprecated=bool(domain.get("deprecated", False)),
         )
         self.domains[name] = di
 
@@ -177,7 +190,9 @@ class SchemaEngine:
                 "domain": name,
                 "description": d.description,
                 "version": d.version,
-                "deprecated": False,
+                "deprecated": d.deprecated,
+                "version_provenance": "bundled protocol snapshot; see protocol_sha256",
+                "protocol_sha256": self.protocol_sha256,
                 "command_count": len(d.commands),
                 "event_count": len(d.events),
                 "type_count": len(d.types),
@@ -192,6 +207,9 @@ class SchemaEngine:
             "domain": d.name,
             "description": d.description,
             "version": d.version,
+            "deprecated": d.deprecated,
+            "version_provenance": "bundled protocol snapshot; see protocol_sha256",
+            "protocol_sha256": self.protocol_sha256,
             "commands": [
                 {"name": c.name, "description": c.description, "deprecated": c.deprecated}
                 for c in d.commands
@@ -239,33 +257,78 @@ class SchemaEngine:
 
     def find_concept(self, query: str, max_results: int = 10) -> list[dict]:
         q = query.lower().strip()
-        words = set(re.findall(r"[a-z]+", q))
+        words = sorted(set(re.findall(r"[a-z]+", q)))
+        words = [word for word in words if len(word) > 1]
         if not words:
             return []
 
-        direct = self._keyword_index.get(q, set())
-        scored: dict[str, tuple[int, str, str]] = {}
+        # Score the complete, sorted schema rather than iterating keyword
+        # sets. The old set-based loop made equal-score ordering depend on
+        # PYTHONHASHSEED and only kept the best single query word, so a
+        # multi-word request such as "navigate to url" could rank unrelated
+        # commands above Page.navigate.
+        scored: list[tuple[int, str, str, str]] = []
+        entries = [
+            *(self.commands[name] for name in sorted(self.commands)),
+            *(self.events[name] for name in sorted(self.events)),
+        ]
 
-        for name in direct:
-            entry = self.commands.get(name) or self.events.get(name)
-            if entry:
-                typ = "command" if name in self.commands else "event"
-                scored[name] = (100, typ, entry.description)
+        def concept_words(text: str) -> set[str]:
+            # Schema names are camelCase (captureScreenshot,
+            # setUserAgentOverride). Treat those boundaries as real words so
+            # intent ranking can distinguish a screenshot command from a
+            # generic command whose description merely mentions screenshots.
+            separated = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", text)
+            return set(re.findall(r"[a-z]+", separated.lower()))
 
-        for w in words:
-            for key, names in self._keyword_index.items():
-                ratio = Levenshtein.ratio(w, key)
-                if ratio >= 0.8:
-                    for name in names:
-                        entry = self.commands.get(name) or self.events.get(name)
-                        if entry:
-                            typ = "command" if name in self.commands else "event"
-                            new_score = int(ratio * 50)
-                            curr = scored.get(name)
-                            if not curr or new_score > curr[0]:
-                                scored[name] = (new_score, typ, entry.description)
+        for entry in entries:
+            name = entry.full_name
+            name_words = concept_words(name)
+            description_words = concept_words(entry.description)
+            score = 0
+            matched = 0
+            for word in words:
+                if word in name_words:
+                    score += 120
+                    matched += 1
+                    continue
+                if word in description_words:
+                    score += 55
+                    matched += 1
+                    continue
+                best = max(
+                    (Levenshtein.ratio(word, candidate) for candidate in name_words),
+                    default=0.0,
+                )
+                if best >= 0.8:
+                    score += int(best * 45)
+                    matched += 1
+                else:
+                    best_description = max(
+                        (Levenshtein.ratio(word, candidate) for candidate in description_words),
+                        default=0.0,
+                    )
+                    if best_description >= 0.8:
+                        score += int(best_description * 18)
+                        matched += 1
+            if q in name.lower() or q in entry.description.lower():
+                score += 160
+            # Common natural-language intents do not occur literally in the
+            # protocol schema. Keep these boosts small and deterministic, but
+            # enough to choose the executable command over a diagnostic
+            # command whose prose happens to mention the same noun.
+            if "screenshot" in words and name == "Page.captureScreenshot":
+                score += 180
+            if "navigate" in words and name == "Page.navigate":
+                score += 120
+            if {"user", "agent"}.issubset(words) and name.endswith("setUserAgentOverride"):
+                score += 120
+            if matched == len(words):
+                score += 25
+            if score:
+                scored.append((score, name, "command" if name in self.commands else "event", entry.description))
 
-        sorted_items = sorted(scored.items(), key=lambda x: -x[1][0])[:max_results]
+        sorted_items = sorted(scored, key=lambda item: (-item[0], item[1]))[:max_results]
         return [
             {
                 "domain": name.split(".")[0],
@@ -273,7 +336,7 @@ class SchemaEngine:
                 "name": name,
                 "description": desc,
             }
-            for name, (_, typ, desc) in sorted_items
+            for _, name, typ, desc in sorted_items
         ]
 
     def validate_command(
@@ -282,7 +345,19 @@ class SchemaEngine:
         full = f"{domain}.{command}"
         cmd = self.commands.get(full)
         if not cmd:
-            return {"valid": False, "errors": [{"message": f"Unknown command: {full}"}]}
+            correction: list[str] = []
+            suggestion = self._fuzzy_find_command(domain, command)
+            if suggestion:
+                correction = [
+                    f"Typo: {full} -> {suggestion}",
+                    f"Use {suggestion} instead of {full}",
+                ]
+            return {
+                "valid": False,
+                "errors": [{"message": f"Unknown command: {full}"}],
+                "warnings": [],
+                "correction": correction,
+            }
         if not isinstance(parameters, dict):
             return {
                 "valid": False,
@@ -407,7 +482,7 @@ class SchemaEngine:
                     result["common_causes"].append(f"Typo in method name: '{method}' should be '{alt}'")
                     result["solutions"].append(f"Use {alt} instead of {method}")
 
-        if "not found" in result["name"].lower():
+        if "not found" in result["name"].lower() and not result["common_causes"]:
             result["common_causes"].append("Method was removed in a newer protocol version")
             result["solutions"].append("Run kahin_list_domains to list available methods")
 
@@ -426,16 +501,23 @@ class SchemaEngine:
         prereqs = []
         required_events = []
 
-        if cmd.name in ("enable", "start", "capture"):
+        if cmd.name in ("start", "capture") and f"{cmd.domain}.enable" in self.commands:
             prereqs.append({
                 "domain": cmd.domain,
-                "command": cmd.name,
-                "reason": f"Must call {full} to activate the domain",
+                "command": "enable",
+                "reason": f"Call {cmd.domain}.enable before {full} to activate the domain",
+            })
+
+        if full == "Network.getResponseBody":
+            prereqs.append({
+                "domain": "Network",
+                "command": "enable",
+                "reason": "Network.enable must be active before response bodies are observed",
             })
 
         for p in cmd.parameters:
             for evt_name, evt in self.events.items():
-                if evt.domain == cmd.domain and p.name in evt.name.lower():
+                if evt.domain == cmd.domain and p.name.lower() in evt.name.lower():
                     required_events.append({
                         "domain": evt.domain,
                         "event": evt.name,
@@ -485,7 +567,7 @@ def _parse_type(domain: str, typ: dict) -> TypeInfo:
         properties=[
             TypeProperty(
                 name=p["name"],
-                type=p.get("type", "any"),
+                type=p.get("type") or p.get("$ref", "any"),
                 optional=p.get("optional", False),
                 description=p.get("description", ""),
                 enum_values=p.get("enum"),

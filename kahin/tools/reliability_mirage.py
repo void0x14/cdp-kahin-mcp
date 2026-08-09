@@ -503,6 +503,7 @@ async def mirage_wait_for_timeout(ms: int = 1000) -> str:
 
 
 _ROUTE_PATTERN_MAX = 8_192
+_ROUTE_FRAME_ID_MAX = 512
 _ROUTE_WAIT_MAX = 60_000.0
 
 
@@ -528,11 +529,27 @@ async def mirage_route(
     wait_ms: float = 10_000.0,
     frame_id: str | None = None,
 ) -> str:
-    """Apply one abort/continue/fulfill decision to the next matching request."""
+    """Apply one abort/continue/fulfill decision to the next matching request.
+
+    This is a bounded waiting tool: issue it concurrently with the navigate,
+    click, or other request-producing tool that should be routed. A serial
+    client must use ``kahin_mirage_intercept_requests`` first and decide with
+    ``kahin_mirage_network_continue``/``kahin_mirage_network_abort`` after
+    reading the intercepted request.
+    """
     pattern_value, error = _text_arg("" if pattern is None else pattern, tool="kahin_mirage_route", field="pattern", maximum=_ROUTE_PATTERN_MAX)
     if error:
         return error
     assert pattern_value is not None
+    frame_value, error = _text_arg(
+        frame_id,
+        tool="kahin_mirage_route",
+        field="frame_id",
+        maximum=_ROUTE_FRAME_ID_MAX,
+        allow_none=True,
+    )
+    if error:
+        return error
     if not pattern_value:
         return _json_error("kahin_mirage_route", "pattern must not be empty", "invalid_argument", field="pattern")
     if action not in {"abort", "continue", "fulfill"}:
@@ -553,12 +570,13 @@ async def mirage_route(
         matcher = _route_matcher(pattern_value)
     except ValueError as exc:
         return _json_error("kahin_mirage_route", str(exc), "invalid_argument", field="pattern")
-    async with _healer_ref.safe("kahin_mirage_route", pattern=pattern_value[:80], action=action, wait_ms=wait_value * 1000, frame_id=frame_id):
+    async with _healer_ref.safe("kahin_mirage_route", pattern=pattern_value[:80], action=action, wait_ms=wait_value * 1000, frame_id=frame_value):
         session_id, capture_error = await _capture_page_session("kahin_mirage_route")
         if capture_error:
             return capture_error
         assert session_id is not None
         engine = _mirage_engine()
+        route_started = asyncio.get_running_loop().time()
         # The route is one-shot but self-sufficient: make sure the page pauses
         # requests before waiting, so a caller does not need a separate
         # mirage_intercept_requests() first (Faz 1 Task 11 Step 4).
@@ -571,17 +589,44 @@ async def mirage_route(
                 "route_interception_failed",
             )
 
+        async def disable_interception() -> None:
+            # ``kahin_mirage_route`` is explicitly one-shot. Leaving the
+            # page in interception mode after a match or timeout pauses every
+            # later crawl request until another tool happens to resume it.
+            try:
+                await engine.call(
+                    "Network.setRequestInterception",
+                    {"enabled": False},
+                    session_id=session_id,
+                )
+            except Exception:  # noqa: BLE001 - cleanup must not mask the route result
+                pass
+
         def matches(event: dict[str, Any]) -> bool:
-            if event.get("session_id") not in {None, session_id}:
+            # Routes are page-session scoped. Root/browser events and another
+            # tab's request must never satisfy a route armed for this page.
+            if event.get("session_id") != session_id:
                 return False
             params = event.get("params") or {}
             request = params.get("request") or {}
             url = params.get("url") or request.get("url")
             request_method = params.get("method") or request.get("method")
+            request_frame = params.get("frameId") or request.get("frameId")
+            if frame_value is not None and request_frame != frame_value:
+                return False
             return matcher(str(url or "")) and (method is None or str(request_method or "").upper() == method.upper())
 
-        event = await engine.wait_for_intercepted(matches, wait_value)
+        try:
+            event = await engine.wait_for_intercepted(
+                matches,
+                wait_value,
+                after_monotonic=route_started,
+            )
+        except Exception:
+            await disable_interception()
+            raise
         if event is None:
+            await disable_interception()
             return orjson.dumps({"matched": False, "code": "timeout", "timeout": wait_value * 1000, "pattern": pattern_value}, option=orjson.OPT_INDENT_2).decode()
         params = event.get("params") or {}
         request = params.get("request") or {}
@@ -589,6 +634,7 @@ async def mirage_route(
         url = params.get("url") or request.get("url") or ""
         owner_session = event.get("session_id") or session_id
         if not isinstance(request_id, str) or not request_id:
+            await disable_interception()
             return _json_error("kahin_mirage_route", "intercepted event has no requestId", "invalid_engine_response")
         call_params: dict[str, Any] = {"requestId": request_id}
         try:
@@ -614,6 +660,7 @@ async def mirage_route(
                 }
                 await engine.call("Network.fulfillInterceptedRequest", fulfill_params, session_id=owner_session)
         except Exception as exc:  # noqa: BLE001 - public tool returns JSON
+            await disable_interception()
             return orjson.dumps({
                 "matched": True,
                 "requestId": request_id,
@@ -622,6 +669,7 @@ async def mirage_route(
                 "error": f"{type(exc).__name__}: {exc}",
                 "code": "route_action_failed",
             }, option=orjson.OPT_INDENT_2).decode()
+        await disable_interception()
         return orjson.dumps({
             "matched": True,
             "url": url,

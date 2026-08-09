@@ -16,7 +16,7 @@ AI modeller Chrome'un içine girip sayfa gezip kod çalıştırabilir ama CDP'yi
 
 56 domain, 667 komut, 237 event, 609 type — Chrome 148 protokolü gömülü.
 
-## 139 Tool · 4 Kategori Ailesi · 2 Engine
+## 140 Tool · 4 Kategori Ailesi · 2 Engine
 
 Tool'lar engine-ayrımlı kategori dosyalarında (`kahin/tools/`): paylaşılan çekirdek + Obscura + Camoufox aileleri.
 
@@ -29,10 +29,10 @@ Tool'lar engine-ayrımlı kategori dosyalarında (`kahin/tools/`): paylaşılan 
 |  DEJA_VU — Debug | CDP event geçmişi, network istekleri, console mesajları | 4 |
 |  PROPHECY — Pattern DB | Kullanım desenlerini öğren, sorgula, öner | 5 |
 |  HEALER | Hata istatistikleri | 1 |
-|  MIRAGE — Camoufox Native (107) | Juggler protokolü üstünde gerçek-zamanlı DOM stream, DOM, Reliability, Input, PageEx, Tab, Network, Storage, Emulation, Dialog/Download/Worker/WS, Upload, Screencast, Accessibility, Engine sağlığı/istatistik, Agent-native snapshot/form/state/identity/status, Stealth audit/insansı girdi/identity rotasyonu/proxy-geo | 107 |
+|  MIRAGE — Camoufox Native (104) | Juggler protokolü üstünde gerçek-zamanlı DOM stream, DOM, Reliability, Input, PageEx, Tab, Network, Storage, Emulation, Dialog/Download/Worker/WS, Upload, Screencast, Accessibility, Engine sağlığı/istatistik, Agent-native snapshot/form/state/identity/status/challenge, Stealth audit/insansı girdi/identity rotasyonu/proxy-geo | 104 |
 |  OBSCURA — Ayrı kategori | Obscura'ya özel tool'lar (hazırlanıyor) | 0 |
 
-**Toplam: 139 tool.**
+**Toplam: 140 tool.**
 
 ## Bir satırda özet
 
@@ -104,14 +104,15 @@ Camoufox (Juggler native) ile:
 → kahin_mirage_query("#btn", frame_id="subframe-...")   # iframe içi erişim
 → kahin_mirage_cookie_set/get/clear → kahin_mirage_storage_local_get
 → kahin_mirage_set_user_agent / set_viewport / set_geolocation
-→ kahin_mirage_set_file_chooser_intercept(true) → kahin_mirage_upload_files(["/abs/path"])
+→ kahin_mirage_set_file_chooser_intercept(true)
+→ (eşzamanlı) kahin_mirage_upload_files(["/abs/path"]) + kahin_mirage_click("input[type=file]")
 → kahin_mirage_screencast_start → kahin_mirage_screencast_frame (base64 JPEG)
 → kahin_mirage_accessibility_tree → kahin_engine_health → kahin_engine_stats
 → kahin_mirage_dom_start → kahin_mirage_dom_snapshot → kahin_mirage_dom_events
 → kahin_mirage_dom_action (snapshot'tan alınan canlı nodeId ile)
 → kahin_mirage_snapshot (ref'li ajan görünümü) → kahin_mirage_fill_form
 → kahin_mirage_state_save/load → kahin_identity_new/save/list/delete/report
-→ kahin_agent_status (agent döngüsü özeti)
+→ kahin_agent_status (agent döngüsü özeti) → kahin_challenge_status (crawl öncesi)
 ```
 
 `kahin_browser_start` tek bir Camoufox/sidecar süreci açar. İlk sayfa işlemi
@@ -120,6 +121,11 @@ bu sekmeyi yeniden kullanır. Ayrı bir sayfa gerektiğinde yeni tarayıcı baş
 yerine `kahin_mirage_tab_new` ve `kahin_mirage_tab_switch` kullanın. Camoufox
 aktifken `kahin_execute_cdp` ve diğer CDP araçları, eşdeğer Juggler/Mirage
 çağrısına otomatik yönlendirilir ve CDP biçimli sonuç döndürür.
+Makine genelinde aktif browser slot'u lock ile korunur; ikinci bağımsız MCP
+süreci ikinci browser açmak yerine owner bilgisini içeren `engine_process_conflict`
+döndürür. Native navigation hedefi bounded response timeout'a takılırsa Kahin
+aynı browser/context içinde yalnızca hedef tab'ı yenileyebilir; başarılı recovery
+`target_recovered: true` olarak raporlanır ve browser PID'si değişmez.
 
 Tam liste için: [AGENTS.md](AGENTS.md). Juggler'ın ajan sözleşmesi ve gerçek-zamanlı
 DOM akışı için [AI-native Juggler kılavuzuna](docs/juggler-ai-native.md) bakın.
@@ -161,7 +167,7 @@ Kahin'de hata loglama ve kendini onarma sistemi gömülüdür:
 
 ```
 oracle.py               → MCP server (bootstrap: mcp instance + engine lifecycle + main)
-  tools/                → 139 tool, engine-ayrımlı kategori dosyaları
+  tools/                → 140 tool, engine-ayrımlı kategori dosyaları
     _common.py          → capability routing, _safe_cdp, _require_engine, _auto_learn
     the_twins/capabilities → motor-yetenek sözleşmesi ve Mirage yükseltme matrisi
     grimoire/seraph/prophecy/healer → CDP bilgi + doğrulama + pattern (paylaşılan)
@@ -190,7 +196,7 @@ camoufox-harness/       → Zig sidecar (Juggler protocol, vendor binary gömül
 - [x] **Tek tık kurulum** — `pnpm add -g @kahinmcp/kahin`, sonra `kahin` (ilk çalıştırmada Python ortamını otomatik kurar)
 - [ ] **Zero-dependency** hedefi (Go/Rust portu)
 - [ ] **LSP modu** — kod içinde hata yakalama, AI'a yanlışını yüzüne vurma
-- [x] **Tool sayısı 139** — Camoufox Juggler-native 107 tool (gerçek-zamanlı DOM stream, DOM, Reliability, Input, Network, Storage, Emulation, Dialog, Tab, Worker/WS, Upload, Screencast, Accessibility, Engine sağlığı/istatistik, Agent-native snapshot/form/state/identity/status, Stealth audit/humanized input/identity pins/proxy geo) + paylaşılan 32 çekirdek
+- [x] **Tool sayısı 140** — Camoufox Juggler-native 104 tool (gerçek-zamanlı DOM stream, DOM, Reliability, Input, Network, Storage, Emulation, Dialog, Tab, Worker/WS, Upload, Screencast, Accessibility, Engine sağlığı/istatistik, Agent-native snapshot/form/state/identity/status, Stealth audit/humanized input/identity pins/proxy geo) + paylaşılan 36 çekirdek
 - [x] **Faz 4 performans yüzeyi** — non-blocking Zig sidecar (N=20 probe: paralel duvar 56.89 → 8.71 ms, ratio 1.314 → 3.281), `kahin_engine_stats` (monotonic uptime + per-tool rollup, top_slow ≤ 10) ve identity başına bounded prewarm metadata (launch asla atlanmaz; dürüst reuse kaydı)
 - [ ] **Obscura ayrı tool'ları** — CDP-yeteneklerine özel pilot_obscura/trainman_obscura/dejavu_obscura kategorilerini doldur
 

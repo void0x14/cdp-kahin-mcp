@@ -53,7 +53,15 @@ class BrowserEngine(ABC):
         self._http: httpx.AsyncClient | None = None
         self._pending: dict[int, asyncio.Future[dict[str, Any]]] = {}
         self._reader: asyncio.Task[None] | None = None
+        self._target_id: str | None = None
+        # Promotion stops the old backend while retaining bounded evidence
+        # for the replacement engine. The oracle death callback uses this
+        # marker to distinguish handoff from an ordinary shutdown.
+        self._preserve_state_on_stop = False
         self._dead: bool = False
+        self._stopping: bool = False
+        self._death_reason: str | None = None
+        self._death_at: float | None = None
         self._death_callbacks: list[Callable[[], Awaitable[None] | None]] = []
 
     @abstractmethod
@@ -72,11 +80,13 @@ class BrowserEngine(ABC):
     def on_death(self, callback: Callable[[], Awaitable[None] | None]) -> None:
         """Register a callback fired when the transport dies (reader EOF)."""
 
-    def _mark_dead(self) -> None:
+    def _mark_dead(self, reason: str = "transport_closed") -> None:
         """Reader EOF / WS close: record death and fire death callbacks once."""
         if self._dead:
             return
         self._dead = True
+        self._death_reason = reason
+        self._death_at = time.time()
         for cb in self._death_callbacks:
             try:
                 result = cb()
@@ -98,6 +108,7 @@ class BrowserEngine(ABC):
 
         async def reader() -> None:
             assert self._ws is not None
+            death_reason = "transport_closed"
             try:
                 while True:
                     raw = await self._ws.recv()
@@ -123,10 +134,11 @@ class BrowserEngine(ABC):
                             except Exception:
                                 logger.exception("event callback failed for %s", evt.method)
             except asyncio.CancelledError:
-                pass
-            except Exception:  # noqa: BLE001
+                death_reason = "reader_cancelled"
+            except Exception as exc:  # noqa: BLE001
                 # WS closed or the engine was stopped; the connection is dead.
                 logger.debug("CDP reader stopped: %s", type(self).__name__)
+                death_reason = f"transport_error:{type(exc).__name__}"
             finally:
                 # A transport can disappear without a response for every
                 # in-flight request.  Leaving those futures pending makes
@@ -137,7 +149,7 @@ class BrowserEngine(ABC):
                     if not fut.done():
                         fut.set_exception(error)
                 self._pending.clear()
-                self._mark_dead()
+                self._mark_dead(death_reason)
 
         self._reader = asyncio.create_task(reader())
 
@@ -173,9 +185,11 @@ class BrowserEngine(ABC):
             raise RuntimeError(f"Target.createTarget returned no targetId: {result}")
         attached = await self.send_cdp("Target", "attachToTarget", {"targetId": target_id, "flatten": True})
         self._session_id = attached.get("sessionId") or f"{target_id}-session"
+        self._target_id = target_id
         return target_id
 
     async def stop(self) -> None:
+        self._stopping = True
         reader, self._reader = self._reader, None
         if reader is not None:
             reader.cancel()
@@ -191,6 +205,8 @@ class BrowserEngine(ABC):
             await self._http.aclose()
             self._http = None
         process, self._process = self._process, None
+        self._target_id = None
+        self._session_id = None
         if process:
             try:
                 process.terminate()

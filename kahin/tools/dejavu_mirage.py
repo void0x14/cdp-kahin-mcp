@@ -29,6 +29,7 @@ from kahin.tools._common import (
     _healer_ref,
     _mirage_call,
     _mirage_engine,
+    _network_response_payload,
     _require_mirage,
 )
 
@@ -345,8 +346,41 @@ def _current_session_id() -> str | None:
         return None
 
 
-def _owner_session_id(request_id: str) -> str | None:
-    """Find the live Juggler session that emitted a request event."""
+def _network_summary(event: dict[str, Any]) -> dict[str, Any]:
+    """Return the crawl-friendly request identity without raw headers."""
+    params = event.get("params") or {}
+    request = params.get("request") or {}
+    response = _network_response_payload(event)
+    summary: dict[str, Any] = {
+        "event": event.get("event"),
+        "timestamp": event.get("timestamp"),
+        "session_id": event.get("session_id"),
+            "requestId": params.get("requestId"),
+        "url": params.get("url") or request.get("url") or response.get("url"),
+        "method": params.get("method") or request.get("method"),
+        "resourceType": params.get("type") or params.get("resourceType"),
+    }
+    if response:
+        summary.update({
+            "status": response.get("status"),
+            "statusText": response.get("statusText"),
+            "mimeType": response.get("mimeType"),
+        })
+    if params.get("errorText") is not None:
+        summary["errorText"] = params.get("errorText")
+    if params.get("isIntercepted") is True:
+        summary["isIntercepted"] = True
+    return {key: value for key, value in summary.items() if value is not None}
+
+
+def _owner_session_id(request_id: str, preferred_session: str | None = None) -> str | None:
+    """Find the live Juggler session that emitted a request event.
+
+    CDP request ids are only unique within a page session. Prefer the
+    currently selected tab and refuse an ambiguous cross-tab match instead
+    of sending a decision to the wrong page.
+    """
+    owners: list[str] = []
     for event in reversed(state._network_requests):
         if not isinstance(event, dict) or event.get("session_id") is None:
             continue
@@ -354,15 +388,20 @@ def _owner_session_id(request_id: str) -> str | None:
         if params.get("requestId") == request_id:
             owner = event.get("session_id")
             if isinstance(owner, str) and owner:
-                return owner
-    return None
+                if preferred_session == owner:
+                    return owner
+                if owner not in owners:
+                    owners.append(owner)
+    return owners[0] if len(owners) == 1 else None
 
 
 @mcp.tool(name="kahin_mirage_network_requests", annotations=_RO)
-async def mirage_network_requests(limit: int = 50) -> str:
+async def mirage_network_requests(limit: int = 50, detail: bool = False) -> str:
     """Mirage: recent network requests from the buffered event stream
     (requestWillBeSent/responseReceived/requestFinished/requestFailed)."""
-    async with _healer_ref.safe("kahin_mirage_network_requests", limit=_ctx(limit, 64)):
+    async with _healer_ref.safe("kahin_mirage_network_requests", limit=_ctx(limit, 64), detail=detail):
+        if not isinstance(detail, bool):
+            return _error("kahin_mirage_network_requests", "invalid_parameter", "detail must be a boolean", field="detail")
         effective, clamped, validation_error = _validate_limit("kahin_mirage_network_requests", limit)
         if validation_error:
             return validation_error
@@ -376,7 +415,8 @@ async def mirage_network_requests(limit: int = 50) -> str:
             and e.get("event") in _REQUEST_EVENTS
             and e.get("session_id") == current_session
         ]
-        return _bounded_list(reqs, int(limit), effective, clamped)
+        items = reqs if detail else [_network_summary(item) for item in reqs]
+        return _bounded_list(items, int(limit), effective, clamped)
 
 
 @mcp.tool(name="kahin_mirage_get_response_body", annotations=_RO)
@@ -397,7 +437,7 @@ async def mirage_get_response_body(request_id: str) -> str:
         try:
             engine = _mirage_engine()
             await engine.ensure_page()
-            owner_session = _owner_session_id(request_id)
+            owner_session = _owner_session_id(request_id, _current_session_id())
             if owner_session is None:
                 return _error(
                     tool,
@@ -462,7 +502,9 @@ async def mirage_get_response_body(request_id: str) -> str:
 @mcp.tool(name="kahin_mirage_intercept_requests", annotations=_RW)
 async def mirage_intercept_requests() -> str:
     """Mirage: intercept page requests (Network.setRequestInterception
-    enabled=true — Network domain, not the Browser context one)."""
+    enabled=true — Network domain, not the Browser context one). This is a
+    persistent mode: continue/abort each intercepted request and call
+    kahin_mirage_unintercept_requests when the interception session is over."""
     async with _healer_ref.safe("kahin_mirage_intercept_requests"):
         return await _mirage_call_checked(
             "kahin_mirage_intercept_requests", "Network.setRequestInterception", {"enabled": True},
@@ -471,8 +513,8 @@ async def mirage_intercept_requests() -> str:
 
 @mcp.tool(name="kahin_mirage_unintercept_requests", annotations=_RW)
 async def mirage_unintercept_requests() -> str:
-    """Mirage: stop intercepting page requests (Network.setRequestInterception
-    enabled=false)."""
+    """Mirage: stop intercepting page requests and release any future
+    request pauses (Network.setRequestInterception enabled=false)."""
     async with _healer_ref.safe("kahin_mirage_unintercept_requests"):
         return await _mirage_call_checked(
             "kahin_mirage_unintercept_requests", "Network.setRequestInterception", {"enabled": False},
@@ -488,7 +530,9 @@ async def mirage_network_continue(
     post_data: str | None = None,
 ) -> str:
     """Mirage: resume an intercepted request, optionally overriding url/method/
-    headers/postData (Network.resumeInterceptedRequest)."""
+    headers/postData (Network.resumeInterceptedRequest). Interception remains
+    enabled for later requests; call kahin_mirage_unintercept_requests when
+    finished."""
     tool = "kahin_mirage_network_continue"
     async with _healer_ref.safe(
         tool,
@@ -534,7 +578,7 @@ async def mirage_network_continue(
             if validation_error:
                 return validation_error
             params["postData"] = checked_post_data
-        owner_session = _owner_session_id(checked_request_id)
+        owner_session = _owner_session_id(checked_request_id, _current_session_id())
         if owner_session is None:
             return _error(
                 tool,
@@ -550,7 +594,9 @@ async def mirage_network_continue(
 
 @mcp.tool(name="kahin_mirage_network_abort", annotations=_DW)
 async def mirage_network_abort(request_id: str, error_code: str = "Aborted") -> str:
-    """Mirage: abort an intercepted request (Network.abortInterceptedRequest)."""
+    """Mirage: abort an intercepted request (Network.abortInterceptedRequest).
+    Interception remains enabled for later requests; call
+    kahin_mirage_unintercept_requests when finished."""
     tool = "kahin_mirage_network_abort"
     async with _healer_ref.safe(tool, request_id=_ctx(request_id, 80), error_code=_ctx(error_code, 80)):
         checked_request_id, validation_error = _validate_text(
@@ -563,7 +609,7 @@ async def mirage_network_abort(request_id: str, error_code: str = "Aborted") -> 
         )
         if validation_error:
             return validation_error
-        owner_session = _owner_session_id(checked_request_id)
+        owner_session = _owner_session_id(checked_request_id, _current_session_id())
         if owner_session is None:
             return _error(
                 tool,

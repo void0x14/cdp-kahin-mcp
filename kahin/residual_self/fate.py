@@ -3,18 +3,26 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from collections import Counter
 from pathlib import Path
 from typing import Any
 
 HERE = Path(__file__).resolve().parent
-DB_PATH = HERE / ".fate_db.json"
+DB_PATH = HERE / ".fate_db.json"  # legacy path, retained for explicit callers
+
+
+def _default_db_path() -> Path:
+    configured = os.environ.get("KAHIN_FATE_PATH")
+    if configured:
+        return Path(configured).expanduser()
+    return Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "kahin" / "fate_db.json"
 
 
 class FateDB:
     def __init__(self, path: str | Path | None = None) -> None:
-        self._path = Path(path) if path else DB_PATH
+        self._path = Path(path).expanduser() if path else _default_db_path()
         self._patterns: list[dict[str, Any]] = []
         self._load()
 
@@ -25,12 +33,16 @@ class FateDB:
     def _load(self) -> None:
         if self._path.exists():
             try:
-                self._patterns = json.loads(self._path.read_text())
+                loaded = json.loads(self._path.read_text(encoding="utf-8"))
+                self._patterns = loaded if isinstance(loaded, list) else []
             except (json.JSONDecodeError, OSError):
                 self._patterns = []
 
     def _save(self) -> None:
-        self._path.write_text(json.dumps(self._patterns, indent=2))
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self._path.with_name(self._path.name + ".tmp")
+        temporary.write_text(json.dumps(self._patterns, indent=2), encoding="utf-8")
+        temporary.replace(self._path)
 
     def learn(self, domain: str, command: str, params: dict[str, Any], context: str = "") -> None:
         for p in self._patterns:
@@ -76,6 +88,18 @@ class FateDB:
                 self._save()
                 return True
         return False
+
+    def prune(self, valid_commands: set[str]) -> int:
+        """Remove records that do not name a command in the loaded schema."""
+        before = len(self._patterns)
+        self._patterns = [
+            pattern for pattern in self._patterns
+            if f"{pattern.get('domain')}.{pattern.get('command')}" in valid_commands
+        ]
+        removed = before - len(self._patterns)
+        if removed:
+            self._save()
+        return removed
 
     def stats(self) -> dict[str, Any]:
         if not self._patterns:

@@ -54,6 +54,18 @@ const max_line: usize = 16 * 1024 * 1024;
 const request_timeout_ms: i32 = 30_000;
 const chunk_size: usize = 64 * 1024;
 const max_sink_bytes: usize = 8 * 1024 * 1024;
+// Keep JSON responses below the browser/sidecar serialization cliff. A
+// Runtime.evaluate value or a diagnostic tree can be much smaller than the
+// stdin line limit and still make Camoufox/Juggler die while serializing it.
+// Screenshots use a separate, larger budget in formatTaskOk.
+const max_json_response_bytes: usize = 512 * 1024;
+const max_evaluate_value_bytes: usize = 512 * 1024;
+// Accessibility.getFullAXTree has no wire-level maxNodes parameter. Allow
+// its bounded Python adapter to receive a larger raw tree so it can trim the
+// real AX nodes before returning them to the agent; every other passthrough
+// remains on the strict 512 KiB cap.
+const max_accessibility_response_bytes: usize = 8 * 1024 * 1024;
+const max_screenshot_response_bytes: usize = 48 * 1024 * 1024;
 
 var line_buf: std.array_list.Aligned(u8, null) = .empty;
 /// Set by Browser.close; the sidecar shuts down with the browser.
@@ -110,6 +122,7 @@ const Task = struct {
     /// Page target/session for response formatting and staging (owned).
     target_id: ?[]u8 = null,
     session_id: ?[]u8 = null,
+    accessibility_tree: bool = false,
     /// Screenshot staging.
     shot_stage: u8 = 0, // 0 = ensure main frame, 1 = measure, 2 = shoot
     full_page: bool = false,
@@ -455,6 +468,7 @@ fn startPassthrough(d: *driver_mod.Driver, a: Allocator, out: *std.array_list.Al
     const params_json = try std.json.Stringify.valueAlloc(a, params, .{});
     defer a.free(params_json);
     const t = try allocTask(a, id, .passthrough);
+    t.accessibility_tree = std.mem.eql(u8, method, "Accessibility.getFullAXTree");
     t.flow = .{ .wire = d.sendAsync(target_session, method, params_json, request_timeout_ms) catch {
         a.destroy(t);
         try respondErr(a, out, id, -32000, "Juggler call failed");
@@ -753,12 +767,22 @@ fn formatTaskOk(d: *driver_mod.Driver, a: Allocator, t: *Task, out: *std.array_l
     switch (t.kind) {
         .passthrough => {
             const call = t.flow.wire;
-            return respondFromRaw(a, out, t.ipc_id, call.raw.?);
+            const cap = if (t.accessibility_tree) max_accessibility_response_bytes else max_json_response_bytes;
+            return respondFromRawBounded(a, out, t.ipc_id, call.raw.?, cap);
         },
         .evaluate => {
             const f = t.flow.eval;
             var res = try f.takeResult();
             defer res.deinit(a);
+            if (res.value_json.len > max_evaluate_value_bytes) {
+                return respondErr(
+                    a,
+                    out,
+                    t.ipc_id,
+                    -32000,
+                    "Runtime.evaluate result exceeds the bounded sidecar response size",
+                );
+            }
             if (res.exception_text) |et| {
                 const json = try std.json.Stringify.valueAlloc(
                     a,
@@ -798,7 +822,7 @@ fn formatTaskOk(d: *driver_mod.Driver, a: Allocator, t: *Task, out: *std.array_l
         },
         .screenshot => {
             const call = t.flow.wire;
-            return respondFromRaw(a, out, t.ipc_id, call.raw.?);
+            return respondFromRawBounded(a, out, t.ipc_id, call.raw.?, max_screenshot_response_bytes);
         },
         .close => unreachable,
     }
@@ -884,6 +908,26 @@ fn nowMs() i64 {
 /// Wrap a Juggler response `{"id":N,"result":...}` / `{"id":N,"error":...}`
 /// in the IPC envelope, dropping the Juggler id for ours.
 fn respondFromRaw(a: Allocator, out: *std.array_list.Aligned(u8, null), id: u32, raw: []const u8) !void {
+    return respondFromRawBounded(a, out, id, raw, max_json_response_bytes);
+}
+
+fn respondFromRawBounded(
+    a: Allocator,
+    out: *std.array_list.Aligned(u8, null),
+    id: u32,
+    raw: []const u8,
+    max_bytes: usize,
+) !void {
+    if (raw.len > max_bytes) {
+        try respondErr(
+            a,
+            out,
+            id,
+            -32000,
+            "Juggler response exceeds the bounded sidecar response size",
+        );
+        return;
+    }
     const parsed = std.json.parseFromSlice(std.json.Value, a, raw, .{}) catch {
         try respondErr(a, out, id, -32603, "bad Juggler response");
         return;
@@ -1042,6 +1086,16 @@ fn flushSinkEvents(a: Allocator, out: *std.array_list.Aligned(u8, null)) !void {
     }
     while (std.mem.indexOfScalar(u8, sink_buf.items, 0)) |idx| {
         const msg = sink_buf.items[0..idx];
+        // A page can emit a diagnostic event containing a large payload. Do
+        // not let event forwarding recreate the serialization cliff that the
+        // command response cap protects.
+        if (msg.len > max_json_response_bytes or out.items.len >= 2 * max_json_response_bytes) {
+            sink_dropped_events += 1;
+            const rest = sink_buf.items[idx + 1 ..];
+            std.mem.copyForwards(u8, sink_buf.items[0..rest.len], rest);
+            sink_buf.shrinkRetainingCapacity(rest.len);
+            continue;
+        }
         try emitEvent(a, out, msg);
         const rest = sink_buf.items[idx + 1 ..];
         std.mem.copyForwards(u8, sink_buf.items[0..rest.len], rest);

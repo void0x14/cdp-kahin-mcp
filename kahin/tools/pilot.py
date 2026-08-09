@@ -13,6 +13,7 @@ import base64
 import logging
 import time
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 import orjson
 
@@ -59,6 +60,30 @@ def _json_error(tool: str, message: str, code: str = "tool_error", **details: An
 def _js_literal(value: str) -> str:
     """Encode a Python string as a JavaScript string literal, never repr()."""
     return orjson.dumps(value).decode()
+
+
+def _normalized_navigation_url(value: str) -> str:
+    """Normalize browser URL serialization for lifecycle comparisons.
+
+    Browsers serialize an origin URL such as ``https://example.com`` as
+    ``https://example.com/`` and may retain a fragment that does not affect
+    the document lifecycle.  Comparing those strings literally makes a
+    successful Shadow navigation wait until its timeout even though the
+    document is already complete.
+    """
+    try:
+        parts = urlsplit(value)
+    except ValueError:
+        return value
+    path = parts.path
+    if parts.scheme.lower() in {"http", "https", "ws", "wss"} and not path:
+        path = "/"
+    return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), path, parts.query, ""))
+
+
+def _navigation_urls_match(current_url: str, target_url: str) -> bool:
+    """Return whether the live URL represents the requested navigation."""
+    return _normalized_navigation_url(current_url) == _normalized_navigation_url(target_url)
 
 
 def _validate_text(
@@ -129,13 +154,89 @@ async def _stop_engine(engine: Any, *, suppress: bool = True) -> None:
             raise
 
 
+async def _stop_mirage_page_loading(engine: Mirage) -> bool:
+    """Stop the selected Mirage document before a replacement navigation.
+
+    This is deliberately an internal, session-pinned operation. Calling the
+    public ``kahin_mirage_stop`` function from inside ``kahin_navigate`` made
+    recovery errors indistinguishable from a successful stop and introduced a
+    second tool/healer layer around the same page call. The navigation path
+    needs the real result from the exact target it is about to replace.
+    """
+    try:
+        page = await asyncio.wait_for(engine.ensure_page(), timeout=1.0)
+        session_id = page.get("sessionId") if isinstance(page, dict) else None
+        if not isinstance(session_id, str) or not session_id:
+            return False
+        result = await asyncio.wait_for(
+            engine.call(
+                "Runtime.evaluate",
+                {
+                    "expression": "(() => {"
+                    "const s = window[Symbol.for('kahin.dom.stream.v1')];"
+                    "const root = document.documentElement;"
+                    "const heavy = !!root && ("
+                    "document.getElementsByTagName('*').length > 1000 || "
+                    "root.scrollHeight > 100000"
+                    ");"
+                    "if (!((s && s.active) || heavy)) return false;"
+                    "if (s && s.active) s.stop();"
+                    "window.stop();"
+                    "return true;"
+                    "})()",
+                    "returnByValue": True,
+                },
+                session_id=session_id,
+            ),
+            timeout=1.5,
+        )
+        value = (result.get("result") or {}).get("value") if isinstance(result, dict) else None
+        if value is True:
+            return True
+        if value is False:
+            return False
+        logger.warning("Mirage pre-navigation stop returned no true value: %s", result)
+    except Exception:  # noqa: BLE001 - navigation remains the authoritative operation
+        logger.warning("Mirage pre-navigation stop failed", exc_info=True)
+    return False
+
+
+async def _recover_mirage_navigation_target(engine: Mirage) -> bool:
+    """Replace one wedged page target without replacing the browser engine."""
+    old_target = engine._current_target
+    if old_target:
+        try:
+            await asyncio.wait_for(engine.close_page(old_target), timeout=2.5)
+        except Exception:  # noqa: BLE001 - a wedged target may refuse close
+            logger.warning("Mirage target close failed during navigation recovery", exc_info=True)
+    try:
+        await asyncio.wait_for(engine.create_page(url="about:blank"), timeout=5.0)
+    except Exception:
+        logger.warning("Mirage could not create a replacement target during navigation recovery", exc_info=True)
+        return False
+    # If close raced the target detach, the old target may still be present.
+    # Try one bounded cleanup after the replacement is live; failure is
+    # reported through the retained tab list rather than killing the browser.
+    if old_target and old_target in engine._sessions and old_target != engine._current_target:
+        try:
+            await asyncio.wait_for(engine.close_page(old_target), timeout=2.5)
+        except Exception:
+            logger.warning("stale Mirage target remained after navigation recovery", exc_info=True)
+    return True
+
+
 async def _engine_is_healthy(engine: Any) -> bool:
     """Check the browser child, not only the Python/sidecar process."""
     if isinstance(engine, Mirage):
         try:
             result = await asyncio.wait_for(engine.health(), timeout=_ENGINE_HEALTH_TIMEOUT)
+        except asyncio.TimeoutError:
+            # A transient health timeout must not drop the process lock or
+            # trigger a second browser. Reuse remains safe while the sidecar
+            # transport is alive; explicit stop/start is the recovery path
+            # if the next operation also fails.
+            return bool(engine.is_alive())
         except Exception:  # noqa: BLE001
-            engine._mark_dead()
             return False
         return bool(result.get("alive"))
     return bool(engine.is_alive())
@@ -180,6 +281,18 @@ def _engine_config_conflict(
         "code": "engine_config_conflict",
         "requested": requested,
         "active": active,
+    }
+
+
+def _identity_start_summary(engine: Any) -> dict[str, Any] | None:
+    """Expose bounded identity metadata without returning fingerprint data."""
+    if not isinstance(engine, Mirage):
+        return None
+    config = getattr(engine, "_identity_config", None)
+    return {
+        "name": getattr(engine, "_identity_name", None),
+        "hash": getattr(engine, "_identity_hash", None),
+        "configured": isinstance(config, dict) and bool(config),
     }
 
 
@@ -348,6 +461,16 @@ async def browser_start(
                             )
                             if conflict is not None:
                                 return orjson.dumps(conflict, option=orjson.OPT_INDENT_2).decode()
+                        if isinstance(current, Mirage):
+                            try:
+                                await current.ensure_page()
+                            except Exception as exc:  # noqa: BLE001
+                                return _json_error(
+                                    "kahin_browser_start",
+                                    f"Existing Mirage engine has no usable page: {exc}",
+                                    "session_unavailable",
+                                )
+                        tabs = await current.list_pages() if isinstance(current, Mirage) else []
                         current_port = (
                             getattr(current, "port", None) if current_kind == "shadow" else 0
                         )
@@ -355,8 +478,10 @@ async def browser_start(
                             "status": "reused",
                             "engine": current_kind,
                             "capabilities": capabilities_for(current_kind),
+                            "identity": _identity_start_summary(current),
                             "message": "Engine already running; reusing the existing browser and tabs.",
                             "port": current_port or 0,
+                            "tabs": tabs,
                         }, option=orjson.OPT_INDENT_2).decode()
                     return orjson.dumps({
                         "error": f"Engine {current_kind} already running. Stop it before switching to {engine}.",
@@ -379,6 +504,16 @@ async def browser_start(
                 state._current_engine = None
                 _healer_ref.bind_engine(None)
                 state.clear_state()
+
+            browser_lock_error = state.acquire_browser_lock()
+            if browser_lock_error is not None:
+                return _json_error(
+                    "kahin_browser_start",
+                    "Another Kahin MCP process owns the machine-wide browser slot; refusing to open a second browser.",
+                    "engine_process_conflict",
+                    hint="Reuse the owner MCP session or stop it before starting a new session.",
+                    **browser_lock_error,
+                )
 
             if engine == "shadow":
                 candidate: Any = Obscura()
@@ -405,6 +540,7 @@ async def browser_start(
             except asyncio.TimeoutError:
                 failed_port = getattr(candidate, "port", None) or actual_port
                 await _stop_engine(candidate)
+                state.release_browser_lock()
                 _healer_ref.bind_engine(None)
                 return _json_error(
                     "kahin_browser_start",
@@ -415,10 +551,12 @@ async def browser_start(
                 )
             except asyncio.CancelledError:
                 await _stop_engine(candidate)
+                state.release_browser_lock()
                 _healer_ref.bind_engine(None)
                 raise
             except Exception as exc:
                 await _stop_engine(candidate)
+                state.release_browser_lock()
                 _healer_ref.bind_engine(None)
                 return _json_error(
                     "kahin_browser_start",
@@ -437,9 +575,17 @@ async def browser_start(
                 eng = candidate
                 eng.on_death(lambda: _on_engine_death(eng))
                 _healer_ref.bind_engine(candidate)
+                if isinstance(candidate, Mirage):
+                    # Publish a deterministic first tab during startup. This
+                    # is still one browser process; it prevents the first
+                    # navigate/status race from manufacturing a second page
+                    # after the caller already believes startup completed.
+                    await candidate.ensure_page()
+                tabs = await candidate.list_pages() if isinstance(candidate, Mirage) else []
             except BaseException:
                 state._current_engine = None
                 await _stop_engine(candidate)
+                state.release_browser_lock()
                 _healer_ref.bind_engine(None)
                 state.clear_state()
                 raise
@@ -448,8 +594,9 @@ async def browser_start(
                 "status": "started",
                 "engine": "mirage" if engine == "camoufox" else engine,
                 "capabilities": capabilities_for("mirage" if engine == "camoufox" else engine),
+                "identity": _identity_start_summary(candidate),
                 "port": actual_port,
-                "tabs": [],
+                "tabs": tabs,
                 "hint": "Reuse this browser; for separate work create/switch a Mirage tab.",
             }, option=orjson.OPT_INDENT_2).decode()
 
@@ -479,6 +626,7 @@ async def browser_stop() -> str:
             state._current_engine = None
             _healer_ref.bind_engine(None)
             state.clear_state()
+            state.release_browser_lock()
             return '{"status": "stopped"}'
 
 
@@ -487,24 +635,26 @@ async def _navigation_wait(
     *,
     wait_until: str,
     timeout: float,
+    target_url: str,
+    previous_url: str | None,
     frame_id: str | None,
     session_id: str | None,
     started_at: float,
+    event_start_index: int,
 ) -> dict[str, Any] | None:
     """Wait for a bounded document lifecycle state after navigation."""
-    if wait_until == "commit":
-        return None
     loop = asyncio.get_running_loop()
     deadline = loop.time() + max(0.0, timeout)
     expression = (
         "(() => { const rs = document.readyState; "
         "const resources = performance.getEntriesByType('resource').length; "
-        "return {readyState: rs, resources}; })()"
+        "return {readyState: rs, resources, url: location.href}; })()"
     )
     engine = state._current_engine
     last_event_ts = 0.0
     while True:
         ready_state = ""
+        current_url = ""
         if isinstance(engine, Mirage):
             from kahin.tools.pilot_mirage import _safe_mirage_eval_result  # noqa: PLC0415
 
@@ -524,11 +674,40 @@ async def _navigation_wait(
             value = result.get("value") if isinstance(result, dict) else None
             if isinstance(value, dict):
                 ready_state = str(value.get("readyState") or "")
+                current_url = str(value.get("url") or "")
 
         now = time.time()
-        if wait_until == "domcontentloaded" and ready_state in {"interactive", "complete"}:
+        committed = False
+        history = list(state._current_event_log)
+        for event in history[event_start_index:] if event_start_index < len(history) else []:
+            if event.get("session_id") != session_id:
+                continue
+            event_name = event.get("event")
+            if event_name == "Page.navigationAborted":
+                return {
+                    "error": "navigation was aborted by the browser",
+                    "code": "navigation_aborted",
+                    "wait_until": wait_until,
+                    "timeout": timeout,
+                    "readyState": ready_state,
+                }
+            if event_name in {"Page.navigationCommitted", "Page.sameDocumentNavigation"}:
+                committed = True
+
+        url_ready = bool(
+            committed
+            or _navigation_urls_match(current_url, target_url)
+            or (
+                previous_url
+                and current_url
+                and not _navigation_urls_match(current_url, previous_url)
+            )
+        )
+        if wait_until == "commit" and url_ready:
             return None
-        if wait_until == "load" and ready_state == "complete":
+        if wait_until == "domcontentloaded" and url_ready and ready_state in {"interactive", "complete"}:
+            return None
+        if wait_until == "load" and url_ready and ready_state == "complete":
             return None
         if wait_until == "networkidle":
             events = state._network_requests
@@ -537,7 +716,7 @@ async def _navigation_wait(
                 if event_ts >= started_at:
                     last_event_ts = event_ts
                     break
-            if ready_state == "complete" and last_event_ts and now - last_event_ts >= _NAVIGATE_IDLE_QUIET:
+            if url_ready and ready_state == "complete" and last_event_ts and now - last_event_ts >= _NAVIGATE_IDLE_QUIET:
                 return None
         if loop.time() >= deadline:
             return {
@@ -546,6 +725,7 @@ async def _navigation_wait(
                 "wait_until": wait_until,
                 "timeout": timeout,
                 "readyState": ready_state,
+                "url": current_url,
             }
         await asyncio.sleep(0.1)
 
@@ -592,18 +772,67 @@ async def navigate(
     async with _healer_ref.safe(
         "kahin_navigate", url=url_value[:80], wait_until=wait_until, timeout=timeout_value,
     ):
-        await _auto_learn("Page", "navigate", {"url": url_value})
         params: dict[str, Any] = {"url": url_value}
         if referer_value:
             params["referer"] = referer_value
+        # A previous large DOM/accessibility probe can leave the current
+        # document's loader doing background work even after the agent has
+        # decided to leave it. Firefox then occasionally keeps the native
+        # Juggler Page.navigate gate open until its 30s deadline. Stopping the
+        # document immediately before a new navigation is the browser-native
+        # equivalent of a user clicking a new link; it does not create a tab
+        # or a second browser and is bounded so it cannot delay navigation.
+        engine = state._current_engine
+        previous_url: str | None = None
+        if isinstance(engine, Mirage):
+            info = engine._target_infos.get(engine._current_target or "") or {}
+            if isinstance(info.get("url"), str):
+                previous_url = info["url"]
+        if isinstance(engine, Mirage):
+            if await _stop_mirage_page_loading(engine):
+                # Give the sidecar reader one scheduling turn after the
+                # successful stop so its document lifecycle state is settled
+                # before the replacement Page.navigate is written.
+                await asyncio.sleep(0.05)
         navigation_started_at = time.time()
+        event_start_index = len(state._current_event_log)
+        target_recovered = False
         navigation_result = await _safe_cdp("Page", "navigate", params)
         try:
             parsed_result = orjson.loads(navigation_result)
         except orjson.JSONDecodeError:
             return navigation_result
+        if isinstance(parsed_result, dict) and parsed_result.get("error") and isinstance(engine, Mirage):
+            error_text = str(parsed_result.get("error") or "").lower()
+            retryable_navigation_error = (
+                parsed_result.get("code") == "cdp_command_failed"
+                and any(token in error_text for token in ("timeout", "aborted", "navigate failed"))
+            )
+            if retryable_navigation_error:
+                # A response timeout means this target is no longer a safe
+                # navigation surface. Replace only the wedged target inside
+                # the same Mirage browser/context; never start a second
+                # browser as a timeout strategy. Abort errors get one
+                # same-target retry first because the target may still be
+                # healthy.
+                if "timeout" in error_text:
+                    target_recovered = await _recover_mirage_navigation_target(engine)
+                    if not target_recovered:
+                        return navigation_result
+                    previous_url = None
+                else:
+                    await _stop_mirage_page_loading(engine)
+                await asyncio.sleep(0.05)
+                navigation_started_at = time.time()
+                event_start_index = len(state._current_event_log)
+                navigation_result = await _safe_cdp("Page", "navigate", params)
+                try:
+                    parsed_result = orjson.loads(navigation_result)
+                except orjson.JSONDecodeError:
+                    return navigation_result
         if not isinstance(parsed_result, dict) or parsed_result.get("error"):
             return navigation_result
+        await _auto_learn("Page", "navigate", {"url": url_value})
 
         frame_id: str | None = None
         session_id: str | None = None
@@ -620,14 +849,19 @@ async def navigate(
             "kahin_navigate",
             wait_until=wait_until,
             timeout=timeout_value,
+            target_url=url_value,
+            previous_url=previous_url,
             frame_id=frame_id,
             session_id=session_id,
             started_at=navigation_started_at,
+            event_start_index=event_start_index,
         )
         if wait_error:
             return orjson.dumps(wait_error, option=orjson.OPT_INDENT_2).decode()
         parsed_result["wait_until"] = wait_until
         parsed_result["timeout"] = timeout_value
+        if target_recovered:
+            parsed_result["target_recovered"] = True
         return orjson.dumps(parsed_result, option=orjson.OPT_INDENT_2).decode()
 
 
@@ -663,7 +897,14 @@ async def click(selector: str) -> str:
                 return "clicked";
             }})()"""
             raw = await _safe_cdp("Runtime", "evaluate", {"expression": expr, "returnByValue": True})
-            return _normalize_evaluate_response(raw, "kahin_click", nested_error=True)
+            normalized = _normalize_evaluate_response(raw, "kahin_click", nested_error=True)
+            try:
+                parsed = orjson.loads(normalized)
+            except orjson.JSONDecodeError:
+                parsed = None
+            if not isinstance(parsed, dict) or not parsed.get("error"):
+                await _auto_learn("Runtime", "click", {"selector": selector_value})
+            return normalized
         except Exception as exc:  # noqa: BLE001 - MCP tools must return JSON errors
             return _json_error("kahin_click", f"Click failed: {exc}", "tool_failed")
 
@@ -770,12 +1011,18 @@ async def evaluate(expression: str) -> str:
         return error
     assert expression_value is not None
     async with _healer_ref.safe("kahin_evaluate", expression=expression_value[:80]):
-        await _auto_learn("Runtime", "evaluate", {"expression": expression_value[:50]})
-        return await _safe_cdp("Runtime", "evaluate", {
+        result = await _safe_cdp("Runtime", "evaluate", {
             "expression": expression_value,
             "returnByValue": True,
             "awaitPromise": True,
         })
+        try:
+            parsed = orjson.loads(result)
+        except orjson.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict) and not parsed.get("error") and not parsed.get("exceptionDetails"):
+            await _auto_learn("Runtime", "evaluate", {"expression": expression_value[:50]})
+        return result
 
 
 @mcp.tool(name="kahin_execute_cdp", annotations=_DW)
@@ -816,16 +1063,18 @@ async def execute_cdp(domain: str, command: str, parameters: dict[str, Any] | No
             )
         if not validation.get("valid"):
             errors = validation.get("errors", [])
-            try:
-                correction = _get_schema().error_decode(
-                    error_code=-32601, error_message=f"'{domain}.{command}' not found",
-                )
-            except Exception:
-                correction = {"common_causes": [], "solutions": []}
+            correction = list(validation.get("correction") or [])
+            for item in errors:
+                if isinstance(item, dict):
+                    message = item.get("message")
+                    if isinstance(message, str) and "Did you mean" in message:
+                        correction.append(message)
+            if not correction:
+                correction.append("Fix validation_errors and retry the same command")
             result = {
                 "error": "Command validation failed",
                 "validation_errors": errors,
-                "correction": correction.get("common_causes", []) + correction.get("solutions", []),
+                "correction": correction,
             }
             return orjson.dumps(result, option=orjson.OPT_INDENT_2).decode()
         return await _safe_cdp(domain, command, parameters or {})

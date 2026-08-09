@@ -73,7 +73,12 @@ async def create_session(url: str = "about:blank") -> str:
 @mcp.tool(name="kahin_kill_session", annotations=_DW)
 async def kill_session(session_id: str) -> str:
     """
-    Close a target by targetId.
+    Close a target by targetId or attached sessionId.
+
+    Mirage exposes both identifiers in ``Target.getTargets``. The public
+    argument is historically named ``session_id``, so resolve it against the
+    live Mirage session map before routing the native closeTarget call; CDP
+    engines keep their existing targetId behavior.
     """
     if not isinstance(session_id, str) or not session_id:
         return orjson.dumps({
@@ -82,4 +87,24 @@ async def kill_session(session_id: str) -> str:
             "field": "session_id",
         }).decode()
     async with _healer_ref.safe("kahin_kill_session", session_id=session_id[:120]):
+        from kahin import _state as state  # noqa: PLC0415
+        from kahin.the_twins.mirage import Mirage  # noqa: PLC0415
+
+        engine = state._current_engine
+        if isinstance(engine, Mirage):
+            target_id = next(
+                (
+                    target
+                    for target, attached_session in engine._sessions.items()
+                    if target == session_id or attached_session == session_id
+                ),
+                None,
+            )
+            if target_id is None:
+                return orjson.dumps({
+                    "error": "No session/target found",
+                    "code": "session_not_found",
+                    "session_id": session_id,
+                }).decode()
+            return await _safe_cdp("Target", "closeTarget", {"targetId": target_id})
         return await _safe_cdp("Target", "closeTarget", {"targetId": session_id})

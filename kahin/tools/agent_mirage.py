@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import asyncio
 import re
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 
@@ -23,8 +25,19 @@ import orjson
 
 from kahin._mcp import mcp
 from kahin.agent_snapshot import format_snapshot
-from kahin.tools._common import _DW, _RO, _RW, _healer_ref, _mirage_evaluate, _require_engine
+from kahin.dom_stream import DOM_STREAM_GLOBAL
+from kahin.tools._common import (
+    _DW,
+    _RO,
+    _RW,
+    _healer_ref,
+    _mirage_eval_result,
+    _mirage_evaluate,
+    _network_response_payload,
+    _require_engine,
+)
 from kahin.tools.dom_stream_mirage import (
+    _dom_stream_record,
     _dom_stream_status,
     mirage_dom_action,
     mirage_dom_snapshot,
@@ -47,6 +60,76 @@ _STATE_STORAGE_KEY_MAX = 1_024
 _STATE_STORAGE_VALUE_MAX = 1024 * 1024
 _STATE_URL_MAX = 4_096
 _MAX_IDENTITY_PAYLOAD = 16 * 1024 * 1024
+
+_CHALLENGE_STATUS_JS = r"""
+(() => {
+  const body = String(document.body?.innerText || "").slice(0, 30000).toLowerCase();
+  const title = String(document.title || "").slice(0, 500).toLowerCase();
+  const url = String(location.href || "").slice(0, 4096).toLowerCase();
+  const signals = [];
+  const has = (name, pattern, source) => {
+    if (pattern.test(source)) signals.push(name);
+  };
+  has("captcha-text", /captcha|recaptcha|hcaptcha|turnstile|verify you are human|cloudflare.*challenge/, body + " " + title);
+  has("captcha-url", /captcha|challenge-platform|challenges\.cloudflare|turnstile/, url);
+  has("captcha-element", /iframe|textarea|div/, Array.from(document.querySelectorAll(
+    "iframe[src*='captcha'], iframe[src*='challenge'], [id*='captcha'], [class*='captcha'], " +
+    "[id*='challenge'], [class*='challenge'], textarea[name*='captcha'], " +
+    "iframe[src*='turnstile'], input[name*='turnstile'], [name*='cf-turnstile'], " +
+    "[id*='cf-chl'], [class*='cf-turnstile']"
+  )).map((el) => String(el.outerHTML || "").slice(0, 500)).join(" ").toLowerCase());
+  has("rate-limit-text", /too many requests|rate limit|slow down|try again later|temporarily blocked/, body + " " + title);
+  has("rate-limit-status", /(?:status(?:\s+code)?|http\s+error|error\s+code|response\s+code)\s*:?\s*(?:429|503)|(?:429|503)\s+(?:too many|service unavailable)/, body + " " + title);
+  has("access-denied-text", /access denied|forbidden|request blocked|automated queries/, body + " " + title);
+  const captcha = signals.some((item) => item.startsWith("captcha"));
+  const rateLimit = signals.some((item) => item.startsWith("rate-limit"));
+  const denied = signals.some((item) => item.startsWith("access-denied"));
+  const kind = captcha ? "captcha" : rateLimit ? "rate_limit" : denied ? "access_denied" : null;
+  return {
+    detected: Boolean(kind),
+    kind,
+    signals: signals.slice(0, 20),
+    action: captcha ? "pause_for_human_or_authorized_provider" :
+      rateLimit ? "honor_retry_after_and_backoff" :
+      denied ? "stop_and_review_authorization" : "continue",
+    retryable: rateLimit && !captcha && !denied,
+    url: String(location.href || "").slice(0, 4096),
+    title: String(document.title || "").slice(0, 500),
+  };
+})()
+"""
+
+
+def _retry_after_seconds(headers: Any) -> float | None:
+    """Parse Retry-After from Juggler's list or CDP's object headers."""
+    candidates: list[Any] = []
+    if isinstance(headers, dict):
+        candidates.extend(
+            value for name, value in headers.items()
+            if isinstance(name, str) and name.lower() == "retry-after"
+        )
+    elif isinstance(headers, list):
+        candidates.extend(
+            entry.get("value")
+            for entry in headers
+            if isinstance(entry, dict)
+            and isinstance(entry.get("name"), str)
+            and entry["name"].lower() == "retry-after"
+        )
+    for candidate in candidates:
+        try:
+            parsed = float(candidate)
+        except (TypeError, ValueError):
+            try:
+                deadline = parsedate_to_datetime(str(candidate))
+                if deadline.tzinfo is None:
+                    deadline = deadline.replace(tzinfo=timezone.utc)
+                parsed = (deadline - datetime.now(timezone.utc)).total_seconds()
+            except (TypeError, ValueError, OverflowError):
+                continue
+        if 0 <= parsed <= 86_400:
+            return parsed
+    return None
 
 # Identity persistence (Faz 2 Task 5): fingerprints live in the user config
 # dir, keyed by a strict name so a saved name can never traverse out of the
@@ -831,6 +914,7 @@ async def agent_status() -> str:
                 "currentTab": None,
                 "refsLive": False,
                 "domCursor": None,
+                "domNextSeq": None,
                 "pendingDialogs": 0,
                 "networkEvents": 0,
                 "consoleMessages": 0,
@@ -850,6 +934,7 @@ async def agent_status() -> str:
             "currentTab": None,
             "refsLive": False,
             "domCursor": None,
+            "domNextSeq": None,
             "pendingDialogs": 0,
             "networkEvents": len(state._network_requests),
             "consoleMessages": len(state._console_messages),
@@ -866,30 +951,46 @@ async def agent_status() -> str:
 
         if isinstance(engine, Mirage):
             try:
-                payload["alive"] = bool(
-                    (await asyncio.wait_for(engine.health(), timeout=5.0)).get("alive")
-                )
+                health = await asyncio.wait_for(engine.health(), timeout=5.0)
+                payload["alive"] = bool(health.get("alive"))
             except Exception:  # noqa: BLE001 - status must never raise
                 payload["alive"] = False
+            # A dead sidecar may still have Python-side session maps. Never
+            # expose those stale maps as live tabs, refs, or page metadata.
+            # Agents use this tool as their recovery decision point; a dead
+            # engine must be an unambiguous neutral state.
+            if not payload["alive"]:
+                return orjson.dumps(payload, option=orjson.OPT_INDENT_2).decode()
             try:
                 pages = await engine.list_pages()
                 payload["tabCount"] = len(pages)
             except Exception:  # noqa: BLE001
-                pass
-            payload["currentTab"] = engine._current_target
+                pages = []
 
-            session_id = engine._sessions.get(engine._current_target or "")
-            if not isinstance(session_id, str):
-                try:
-                    page = await engine.ensure_page()
-                    session_id = page.get("sessionId") if isinstance(page, dict) else None
-                except Exception:  # noqa: BLE001
-                    session_id = None
+            current_target = engine._current_target
+            if current_target not in engine._sessions:
+                current_target = next(
+                    (
+                        page.get("targetId")
+                        for page in pages
+                        if isinstance(page, dict)
+                        and isinstance(page.get("targetId"), str)
+                    ),
+                    None,
+                )
+            payload["currentTab"] = current_target
+
+            # Status is observational. It must never call ensure_page(),
+            # because that silently creates an about:blank tab merely because
+            # an agent asked for telemetry.
+            session_id = engine._sessions.get(current_target or "")
             if isinstance(session_id, str):
                 try:
                     raw = _loads(await _mirage_evaluate(
                         "JSON.stringify({url: location.href, title: document.title,"
-                        " readyState: document.readyState})",
+                        " readyState: document.readyState,"
+                        f" stream:(() => {{ const s = window[Symbol.for({DOM_STREAM_GLOBAL!r})];"
+                        " return s && s.status ? s.status() : null; })()})",
                         session_id=session_id,
                     ))
                     if isinstance(raw, str):
@@ -899,6 +1000,15 @@ async def agent_status() -> str:
                                 value = page_state.get(key)
                                 if isinstance(value, str):
                                     payload[key] = value
+                            stream_state = page_state.get("stream")
+                            if isinstance(stream_state, dict):
+                                live_stream_id = stream_state.get("streamId")
+                                live_next_seq = stream_state.get("nextSeq")
+                                _dom_stream_record(
+                                    session_id,
+                                    stream_id=live_stream_id if isinstance(live_stream_id, str) else None,
+                                    next_seq=live_next_seq if isinstance(live_next_seq, int) else None,
+                                )
                 except Exception:  # noqa: BLE001
                     pass
                 stream = _dom_stream_status(session_id)
@@ -906,14 +1016,187 @@ async def agent_status() -> str:
                     payload["refsLive"] = bool(stream.get("refsLive"))
                     cursor = stream.get("cursor")
                     payload["domCursor"] = cursor if isinstance(cursor, int) else None
-            try:
-                from kahin.tools import dialog_mirage  # noqa: PLC0415
-
-                dialogs = _loads(await dialog_mirage.mirage_dialog_list())
-                payload["pendingDialogs"] = len(dialogs) if isinstance(dialogs, list) else 0
-            except Exception:  # noqa: BLE001
-                payload["pendingDialogs"] = 0
+                    next_seq = stream.get("nextSeq")
+                    payload["domNextSeq"] = next_seq if isinstance(next_seq, int) else None
+            # Dialog state is already in Kahin's bounded forwarded event log.
+            # Do not call the public dialog tool from a status probe: that
+            # hidden nested MCP operation added latency and could race a page
+            # session while the agent was deciding whether to recover.
+            open_dialogs: set[str] = set()
+            for event in state._current_event_log:
+                if event.get("session_id") != session_id:
+                    continue
+                params = event.get("params") or {}
+                dialog_id = params.get("dialogId")
+                if not isinstance(dialog_id, str):
+                    continue
+                if event.get("event") == "Page.dialogOpened":
+                    open_dialogs.add(dialog_id)
+                elif event.get("event") == "Page.dialogClosed":
+                    open_dialogs.discard(dialog_id)
+            payload["pendingDialogs"] = len(open_dialogs)
         else:
             payload["alive"] = bool(engine.is_alive()) if hasattr(engine, "is_alive") else True
+            if payload["alive"] and isinstance(engine, Obscura):
+                # Obscura owns one attached page per browser connection, but
+                # unlike Mirage it has no Python-side tab map.  Status must
+                # still report the real target and live document instead of
+                # pretending that a working Shadow page is an empty engine.
+                target_id = getattr(engine, "_target_id", None)
+                session_id = getattr(engine, "_session_id", None)
+                if isinstance(target_id, str) and isinstance(session_id, str):
+                    payload["tabCount"] = 1
+                    payload["currentTab"] = target_id
+                    try:
+                        raw = await asyncio.wait_for(
+                            engine.call(
+                                "Runtime.evaluate",
+                                {
+                                    "expression": (
+                                        "({url: location.href, title: document.title, "
+                                        "readyState: document.readyState})"
+                                    ),
+                                    "returnByValue": True,
+                                },
+                                session_id=session_id,
+                            ),
+                            timeout=5.0,
+                        )
+                        value = ((raw.get("result") or {}).get("value")) if isinstance(raw, dict) else None
+                        if isinstance(value, dict):
+                            for key in ("url", "title", "readyState"):
+                                if isinstance(value.get(key), str):
+                                    payload[key] = value[key]
+                    except Exception:  # noqa: BLE001 - status must never raise
+                        pass
 
         return orjson.dumps(payload, option=orjson.OPT_INDENT_2).decode()
+
+
+@mcp.tool(name="kahin_challenge_status", annotations=_RO)
+async def challenge_status() -> str:
+    """Detect challenge/rate-limit pages and return a safe next action.
+
+    This is intentionally detection-only. It never solves, bypasses or
+    retries a CAPTCHA; agents receive an explicit pause/backoff contract so a
+    crawl cannot blindly hammer a blocked origin.
+    """
+    tool = "kahin_challenge_status"
+    async with _healer_ref.safe(tool):
+        from kahin import _state as state  # noqa: PLC0415
+
+        err = await _require_engine()
+        if err:
+            return err
+        from kahin.the_twins.mirage import Mirage  # noqa: PLC0415
+        from kahin.the_twins.shadow import Obscura  # noqa: PLC0415
+
+        engine = state._current_engine
+        session_id: str | None = None
+        if isinstance(engine, Mirage):
+            session_id, capture_error = await _capture_page_session(tool)
+            if capture_error:
+                return capture_error
+            assert session_id is not None
+            result = await _mirage_eval_result(_CHALLENGE_STATUS_JS, session_id=session_id)
+        elif isinstance(engine, Obscura):
+            # Shadow is the fast crawl engine and already has a live CDP
+            # session. Challenge detection is observational, so it must not
+            # promote to Mirage or open another browser merely to inspect the
+            # current document.
+            session_id = getattr(engine, "_session_id", None)
+            if not isinstance(session_id, str) or not session_id:
+                return _json_error(tool, "selected Shadow page has no live session", "session_unavailable")
+            try:
+                result = await asyncio.wait_for(
+                    engine.call(
+                        "Runtime.evaluate",
+                        {"expression": _CHALLENGE_STATUS_JS, "returnByValue": True},
+                        session_id=session_id,
+                    ),
+                    timeout=5.0,
+                )
+            except Exception as exc:  # noqa: BLE001 - public tool returns JSON
+                return _json_error(tool, f"challenge probe failed: {exc}", "challenge_probe_failed")
+        else:
+            return _json_error(tool, "active engine has no challenge probe", "capability_unavailable")
+        if isinstance(result, str):
+            return result
+        if result.get("exceptionDetails"):
+            return _json_error(tool, "challenge probe failed", "javascript_error")
+        value = (result.get("result") or {}).get("value")
+        if not isinstance(value, dict):
+            return _json_error(tool, "challenge probe returned an invalid payload", "invalid_engine_response")
+        # A 429/403/503 response can render an otherwise innocuous body. Use
+        # the bounded live network buffer as a second signal so a crawler
+        # cannot miss a server-side block merely because its HTML is generic.
+        network_status: int | None = None
+        retry_after_seconds: float | None = None
+        current_url = value.get("url") if isinstance(value.get("url"), str) else ""
+        requests_by_id: dict[str, dict[str, Any]] = {}
+        current_document_started = 0.0
+        for event in state._network_requests:
+            if event.get("session_id") != session_id:
+                continue
+            params = event.get("params") or {}
+            request_id = params.get("requestId")
+            if event.get("event") == "requestWillBeSent" and isinstance(request_id, str):
+                requests_by_id[request_id] = params
+                if params.get("url") == current_url:
+                    current_document_started = max(
+                        current_document_started, float(event.get("timestamp") or 0.0)
+                    )
+        ignored_resource_causes = {
+            "TYPE_IMAGE",
+            "TYPE_STYLESHEET",
+            "TYPE_FONT",
+            "TYPE_MEDIA",
+            "TYPE_CSS",
+        }
+        for event in reversed(state._network_requests):
+            if event.get("session_id") != session_id or event.get("event") != "responseReceived":
+                continue
+            if current_document_started and float(event.get("timestamp") or 0.0) < current_document_started:
+                continue
+            params = event.get("params") or {}
+            response = _network_response_payload(event)
+            status = response.get("status")
+            if not isinstance(status, (int, float)) or isinstance(status, bool):
+                continue
+            status_int = int(status)
+            if status_int not in {403, 429, 503}:
+                continue
+            request_id = params.get("requestId")
+            request_params = requests_by_id.get(request_id, {}) if isinstance(request_id, str) else {}
+            if request_params.get("cause") in ignored_resource_causes:
+                continue
+            response_url = response.get("url") or params.get("url") or request_params.get("url")
+            if current_url and isinstance(response_url, str) and response_url != current_url:
+                # Keep API/fetch failures visible, but do not let an old
+                # document (even on the same origin) or an unrelated asset
+                # poison the current challenge decision.
+                if request_params.get("cause") not in {"TYPE_XHR", "TYPE_FETCH"}:
+                    continue
+            network_status = status_int
+            retry_after_seconds = _retry_after_seconds(response.get("headers"))
+            break
+        if network_status is not None:
+            signals = value.get("signals")
+            if not isinstance(signals, list):
+                signals = []
+            signals = [*signals, f"http-status-{network_status}"]
+            value["signals"] = signals[:20]
+            value["detected"] = True
+            value["httpStatus"] = network_status
+            if value.get("kind") is None:
+                if network_status == 403:
+                    value["kind"] = "access_denied"
+                    value["action"] = "stop_and_review_authorization"
+                    value["retryable"] = False
+                else:
+                    value["kind"] = "rate_limit"
+                    value["action"] = "honor_retry_after_and_backoff"
+                    value["retryable"] = True
+            if retry_after_seconds is not None:
+                value["retryAfterSeconds"] = retry_after_seconds
+        return orjson.dumps(value, option=orjson.OPT_INDENT_2).decode()

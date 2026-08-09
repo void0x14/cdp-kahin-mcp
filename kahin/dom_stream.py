@@ -11,16 +11,24 @@ from __future__ import annotations
 
 import orjson
 
-DOM_STREAM_BINDING_NAME = "__kahin_dom_notify_v1"
-DOM_STREAM_GLOBAL = "__kahin_dom_stream_v1"
+DOM_STREAM_BINDING_NAME = "__dom_notify_v1"
+DOM_STREAM_GLOBAL = "kahin.dom.stream.v1"
 
 
 # This is intentionally plain page JavaScript. It uses only Web APIs available
 # in Firefox/Camoufox and does not invent a CDP DOM domain for Juggler.
 DOM_STREAM_INIT_SCRIPT = r"""
 (() => {
-  const KEY = "__kahin_dom_stream_v1";
-  const BINDING = "__kahin_dom_notify_v1";
+  const KEY = Symbol.for("kahin.dom.stream.v1");
+  const LEGACY_KEY = "__kahin_dom_stream_v1";
+  const BINDING = "__dom_notify_v1";
+  // Remove the pre-stealth public property when a page is reused by an older
+  // init script.  The live stream now lives under a Symbol and is not exposed
+  // through Object.getOwnPropertyNames(window).
+  if (window[LEGACY_KEY]) {
+    try { window[LEGACY_KEY].stop?.(); } catch (_) {}
+    try { delete window[LEGACY_KEY]; } catch (_) { window[LEGACY_KEY] = null; }
+  }
   if (window[KEY] && window[KEY].version === 1 && window[KEY].active) return;
   if (window[KEY] && window[KEY].version === 1 && !window[KEY].active) {
     try { window[KEY].stop?.(); } catch (_) {}
@@ -119,10 +127,20 @@ DOM_STREAM_INIT_SCRIPT = r"""
     const nodeIds = new WeakMap();
     const liveNodes = new Map();
     const events = [];
+    const maxMutationRecordsPerCallback = 128;
     let nextNodeId = 1;
     let nextSeq = 0;
     let revision = 0;
+    let overflowed = false;
     const streamId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+    // Node ids must not collide across documents. A WeakMap alone is not
+    // enough because this init script is evaluated again after navigation and
+    // the counter starts at one for every new document. Keep the ref compact,
+    // but include this stream's generation so an old ref can never resolve to
+    // a new document's node by accident.
+    const nodeGeneration = streamId.replace(/[^a-z0-9]/gi, "").slice(-8);
+    const maxSnapshotBytes = 350000;
+    const maxDrainBytes = 350000;
     const state = {
       version: 1,
       active: true,
@@ -135,18 +153,19 @@ DOM_STREAM_INIT_SCRIPT = r"""
       if (!node || (node.nodeType !== 1 && node.nodeType !== 3)) return null;
       let id = nodeIds.get(node);
       if (!id) {
-        id = `n${nextNodeId++}`;
+        id = `n${nodeGeneration}-${nextNodeId++}`;
         nodeIds.set(node, id);
         liveNodes.set(id, node);
       }
       return id;
     };
 
-    const removeKnown = (node) => {
-      if (!node) return;
+    const removeKnown = (node, budget = {remaining: 256}) => {
+      if (!node || budget.remaining <= 0) return;
+      budget.remaining -= 1;
       const id = nodeIds.get(node);
       if (id) liveNodes.delete(id);
-      if (node.childNodes) Array.from(node.childNodes).forEach(removeKnown);
+      if (node.childNodes) Array.from(node.childNodes).forEach((child) => removeKnown(child, budget));
     };
 
     const descriptor = (el, textLimit = 240) => {
@@ -181,6 +200,21 @@ DOM_STREAM_INIT_SCRIPT = r"""
 
     const shallow = (node) => descriptor(node, 160);
 
+    // Mutation delivery runs on the page's main thread, often while a large
+    // document is still being parsed. Layout and computed-style reads here
+    // turn an observer into a second page renderer and can block navigation.
+    // Mutation deltas only need a bounded identity; agents use snapshot for
+    // the expensive semantic/geometry view.
+    const mutationDescriptor = (node) => {
+      if (!(node instanceof Element)) {
+        const result = {nodeId: idOf(node), nodeType: node && node.nodeType};
+        if (node && node.nodeType === 3) result.text = textOf(node, 120);
+        return result;
+      }
+      return {nodeId: idOf(node), tag: node.tagName.toLowerCase(),
+        attributes: safeAttributes(node)};
+    };
+
     const snapshot = (options = {}) => {
       const selector = typeof options.selector === "string" ? options.selector : "";
       const root = selector ? document.querySelector(selector) : document.documentElement;
@@ -190,11 +224,22 @@ DOM_STREAM_INIT_SCRIPT = r"""
       const includeHidden = options.includeHidden === true;
       let count = 0;
       let truncated = false;
+      let serializedBytes = 0;
       const walk = (el, depth) => {
         if (count >= maxNodes) { truncated = true; return null; }
         const info = descriptor(el, clamp(options.textLimit, 20, 2000, 240));
         if (!includeHidden && depth > 0 && !info.visible && !info.actions.length) return null;
+        // Bound the object before Runtime.evaluate serializes it across the
+        // Juggler pipe. maxNodes alone is not a safe byte bound on real pages:
+        // one node can carry long text/attributes and a mutation-heavy page
+        // can make a modest tree exceed the sidecar's response budget.
+        const infoBytes = JSON.stringify(info).length + 32;
+        if (count > 0 && serializedBytes + infoBytes > maxSnapshotBytes) {
+          truncated = true;
+          return null;
+        }
         count += 1;
+        serializedBytes += infoBytes;
         info.children = [];
         if (depth < maxDepth) {
           for (const child of Array.from(el.children)) {
@@ -228,15 +273,26 @@ DOM_STREAM_INIT_SCRIPT = r"""
       const after = reset ? 0 : Math.max(0, Number(options.after) || 0);
       const limit = clamp(options.limit, 1, 500, 100);
       const first = events.length ? events[0].seq : nextSeq + 1;
-      const dropped = reset || (events.length > 0 && after < first - 1);
+      const ringDropped = events.length > 0 && after < first - 1;
+      const dropped = reset || overflowed || ringDropped;
+      overflowed = false;
       const available = events.filter((event) => event.seq > after);
-      const selected = available.slice(0, limit);
+      const selected = [];
+      let selectedBytes = 128;
+      for (const event of available) {
+        if (selected.length >= limit) break;
+        const eventBytes = JSON.stringify(event).length + 16;
+        if (selected.length > 0 && selectedBytes + eventBytes > maxDrainBytes) break;
+        selected.push(event);
+        selectedBytes += eventBytes;
+      }
       const cursor = selected.length ? selected[selected.length - 1].seq : after;
       return {
         streamId,
         // Return the last sequence actually delivered. Returning nextSeq
         // here would skip pending events when the caller uses a small limit.
         cursor,
+        nextSeq,
         revision,
         reset,
         dropped,
@@ -265,7 +321,7 @@ DOM_STREAM_INIT_SCRIPT = r"""
     };
 
     const mutation = (record) => {
-      const target = shallow(record.target);
+      const target = mutationDescriptor(record.target);
       if (record.type === "attributes") {
         return {type: "attributes", target, attribute: record.attributeName,
           oldValue: safeAttributeValue(record.target, record.attributeName, record.oldValue),
@@ -276,14 +332,18 @@ DOM_STREAM_INIT_SCRIPT = r"""
         return {type: "characterData", target, oldValue: record.oldValue,
           value: textOf(record.target, 500)};
       }
-      const added = Array.from(record.addedNodes).slice(0, 30).map(shallow);
-      const removed = Array.from(record.removedNodes).slice(0, 30).map((node) => {
-        const result = shallow(node);
+      const addedNodes = Array.from(record.addedNodes);
+      const removedNodes = Array.from(record.removedNodes);
+      const added = addedNodes.slice(0, 8).map(mutationDescriptor);
+      const removed = removedNodes.slice(0, 8).map((node) => {
+        const result = mutationDescriptor(node);
         removeKnown(node);
         return result;
       });
       return {type: "childList", target, added, removed,
-        addedCount: record.addedNodes.length, removedCount: record.removedNodes.length};
+        addedCount: addedNodes.length, removedCount: removedNodes.length,
+        addedTruncated: addedNodes.length > added.length,
+        removedTruncated: removedNodes.length > removed.length};
     };
 
     const pageEvent = (event) => {
@@ -296,7 +356,12 @@ DOM_STREAM_INIT_SCRIPT = r"""
 
     state.observer = new MutationObserver((records) => {
       if (!state.active) return;
-      records.forEach((record) => push(mutation(record)));
+      const selected = records.slice(0, maxMutationRecordsPerCallback);
+      if (records.length > selected.length) {
+        overflowed = true;
+        push({type: "overflow", droppedCount: records.length - selected.length});
+      }
+      selected.forEach((record) => push(mutation(record)));
       if (records.length) notify();
     });
     state.observer.observe(document, {
@@ -309,8 +374,9 @@ DOM_STREAM_INIT_SCRIPT = r"""
     });
     state.snapshot = snapshot;
     state.drain = drain;
-    state.status = () => ({streamId, cursor: nextSeq, revision, pending: events.length,
-      active: state.active, url: location.href, readyState: document.readyState});
+    state.status = () => ({streamId, cursor: nextSeq, nextSeq, revision, pending: events.length,
+      active: state.active, dropped: overflowed, url: location.href,
+      readyState: document.readyState});
     state.configure = (next) => {
       state.maxEvents = clamp(next && next.maxEvents, 32, 2000, state.maxEvents);
       while (events.length > state.maxEvents) events.shift();
@@ -373,4 +439,4 @@ DOM_STREAM_INIT_SCRIPT = r"""
 def js_call(method: str, params: dict[str, object] | None = None) -> str:
     """Build a safe expression calling the page's DOM stream object."""
     encoded = orjson.dumps(params or {}).decode()
-    return f"(() => {{ const s = window[{DOM_STREAM_GLOBAL!r}]; if (!s || !s.{method}) return {{error: 'dom stream unavailable'}}; return s.{method}({encoded}); }})()"
+    return f"(() => {{ const s = window[Symbol.for({DOM_STREAM_GLOBAL!r})]; if (!s || !s.{method}) return {{error: 'dom stream unavailable'}}; return s.{method}({encoded}); }})()"

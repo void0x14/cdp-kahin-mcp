@@ -33,7 +33,13 @@ from typing import Any
 import orjson
 
 from kahin._mcp import mcp
-from kahin.tools._common import _RO, _healer_ref, _mirage_engine, _require_mirage
+from kahin.tools._common import (
+    _RO,
+    _healer_ref,
+    _mirage_engine,
+    _native_result_too_large,
+    _require_mirage,
+)
 
 _MAX_AX_NODES = 5000
 _MAX_AX_RESPONSE_BYTES = 8 * 1024 * 1024
@@ -108,6 +114,9 @@ async def mirage_accessibility_tree(max_nodes: int = 200) -> str:
                 }, option=orjson.OPT_INDENT_2).decode()
             result = await engine.call("Accessibility.getFullAXTree", {}, session_id=session_id)
         except RuntimeError as e:
+            bounded = _native_result_too_large("Accessibility.getFullAXTree", str(e))
+            if bounded is not None:
+                return bounded
             return orjson.dumps({
                 "error": f"Juggler call failed: {e}",
                 "hint": "Check the engine with kahin_engine_health.",

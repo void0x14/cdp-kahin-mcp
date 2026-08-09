@@ -5,7 +5,18 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
+// A local pnpm link can point PACKAGE_ROOT at a checkout that contains a
+// ``kahin/`` source directory. Running ``python -m kahin.oracle`` with that
+// checkout as cwd shadows the wheel installed in the launcher's venv and
+// makes the same MCP command behave differently depending on the caller's
+// cwd. Use an empty system temp cwd for that development-link case; published
+// npm packages have no source directory and can run from their package root.
+const PYTHON_CWD = existsSync(join(PACKAGE_ROOT, "kahin")) ? tmpdir() : PACKAGE_ROOT;
 
 const HOME = process.env.KAHIN_HOME || join(homedir(), ".local", "share", "kahin");
 const VENV = join(HOME, "venv");
@@ -32,7 +43,10 @@ async function setup() {
     process.exit(1);
   }
   const python = existsSync(PY) ? PY : (process.env.KAHIN_PY || "python3");
-  const check = await sh(python, ["-c", "import kahin"], { stdio: ["ignore", "pipe", "pipe"] });
+  const check = await sh(python, ["-c", "import kahin"], {
+    stdio: ["ignore", "pipe", "pipe"],
+    cwd: PYTHON_CWD,
+  });
   if (check !== 0) {
     process.stderr.write(`[kahin] kahin Python paketi bulunamadı. ${python} ile çalıştırılamıyor.\n`);
     process.exit(1);
@@ -55,7 +69,10 @@ if (args[0] === "setup") {
 }
 
 const python = await setup();
-const child = spawn(python, ["-m", "kahin.oracle", ...args], { stdio: "inherit" });
+const child = spawn(python, ["-m", "kahin.oracle", ...args], {
+  stdio: "inherit",
+  cwd: PYTHON_CWD,
+});
 child.on("exit", (code, signal) => {
   if (signal) process.kill(process.pid, signal);
   process.exit(code ?? 0);

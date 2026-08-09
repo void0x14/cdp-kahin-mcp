@@ -25,6 +25,11 @@ MCP tool
 - Aynı browser'ı ve aktif sekmeyi yeniden kullan. Başka sayfa gerektiğinde
   yeni browser açmak yerine `kahin_mirage_tab_new` ve
   `kahin_mirage_tab_switch` kullan.
+- `kahin_navigate` native response deadline'ına takılırsa mevcut target'ı
+  kapatıp aynı Mirage browser/context içinde bounded bir replacement target
+  açarak bir kez kurtarma yapabilir. Başarılı sonuçta `target_recovered: true`
+  gelir; browser PID'si değişmez. Bu durumda eski DOM `streamId`/nodeId'lerini
+  bırakıp yeni snapshot alın.
 - Juggler'da `Browser.*` browser köküne, `Page.*` ise aktif target/session'a
   aittir. MCP araçları session routing'i ajandan saklar.
 - `kahin_execute_cdp`, Mirage aktifken desteklenen CDP çağrılarını Juggler
@@ -63,9 +68,11 @@ Zorunlu kurallar:
 ## 3. Gerçek zamanlı DOM vericisi
 
 DOM stream sayfanın kendi `MutationObserver`'ını ve DOM event listener'larını
-kullanır. Sayfa tarafında bounded bir ring buffer tutulur; sidecar yalnızca
-değişiklik sinyali taşır. Böylece hızlı bir sayfa, sidecar reader'ını büyük
-DOM payload'ları ile bloke etmez.
+kullanır. Sayfa tarafında bounded bir ring buffer tutulur; mutation delta'ları
+layout/computed-style ölçümü yapmadan hafif kimlikler taşır, semantik/geometri
+ayrıntısı snapshot'tan alınır. Observer callback'i de bounded'dır; büyük bir
+belgenin parser/mutation kuyruğu sidecar reader'ını veya sonraki navigation'ı
+bloke etmez.
 
 ### 3.1 Tool sözleşmesi
 
@@ -146,6 +153,13 @@ Snapshot alanlarının anlamı:
 - `cursor`: o snapshot anındaki son sequence numarasıdır. Delta okumaya bu
   cursor'dan devam edilir.
 
+`dom_events` yanıtındaki `cursor`, gerçekten teslim edilen son event'in
+sequence numarasıdır; `limit` küçükse bekleyen event'leri atlamamak için bunu
+sonraki `after_seq` olarak kullanın. `nextSeq` ise sayfadaki canlı üst sınırdır
+ve henüz teslim edilmemiş event'leri de kapsayabilir. `kahin_agent_status`
+`domCursor` (son teslim edilen) ve `domNextSeq` (canlı üst sınır) alanlarını
+ayrı raporlar.
+
 ### 3.2 Delta ve event akışı
 
 ```json
@@ -166,7 +180,9 @@ Snapshot alanlarının anlamı:
       "added": [{"nodeId": "n8", "tag": "button", "role": "button", "name": "Save"}],
       "removed": [],
       "addedCount": 1,
-      "removedCount": 0
+      "addedTruncated": false,
+      "removedCount": 0,
+      "removedTruncated": false
     },
     {
       "seq": 7,
@@ -183,6 +199,10 @@ Snapshot alanlarının anlamı:
 event'lerine ek olarak `input`, `change`, `focusin`, `focusout` ve `click`
 sayfa event'leri verilir. Bu event'ler neden-sonuç sinyalidir; tam güncel
 durum için snapshot yetkilidir.
+
+`added`/`removed` listeleri bounded'dır. `addedTruncated` veya
+`removedTruncated` true ise ilgili count listedeki node sayısından büyüktür;
+eksik node'ları tahmin etmeyin, yeni snapshot alın.
 
 `dom_events` için önerilen çağrı:
 
@@ -216,6 +236,18 @@ Not: `reset`/`dropped` tespiti, çağrıya geçtiğiniz `stream_id` ile sayfadak
 mevcut `streamId`'yi karşılaştırır. `dom_start`'ten aldığınız `streamId`'yi
 her `dom_events` çağrısında geçirin; `stream_id` verilmezse navigation sessiz
 kalır ve eski cursor yeni document'ın event'leriyle karışabilir.
+
+### 3.5 Crawl challenge ve rate-limit sözleşmesi
+
+Her crawl döngüsünde `kahin_challenge_status` çağrısı yapılabilir. Araç Shadow
+ve Mirage'ın mevcut sayfasını, DOM, challenge widget selector'larını ve gerçek
+network response'larını
+birlikte gözlemler; 403/429/503 yanıtlarında `httpStatus` ve varsa
+`retryAfterSeconds` döndürür. `rate_limit` için `action` değeri
+`honor_retry_after_and_backoff`, CAPTCHA için ise
+`pause_for_human_or_authorized_provider` olur. Bu yüzey bypass/otomatik CAPTCHA
+çözümü yapmaz; ajan verilen karara uymalı ve aynı origin'i körlemesine tekrar
+çalıştırmamalıdır.
 
 ### 3.4 Live action sözleşmesi
 
@@ -283,7 +315,7 @@ script'i ayrıca evaluate eder. Observer sayfa tarafında bounded olduğu için
 
 ## 6. Juggler tool kataloğu (A-Z)
 
-Aşağıdaki liste Mirage'ın 107 Juggler-native tool'unun tamamıdır. `MIRAGE`
+Aşağıdaki liste Mirage'ın 104 Juggler-native tool'unun tamamıdır. `MIRAGE`
 tool'ları `engine="mirage"` aktifken kullanılır.
 
 ### DOM gözlem ve adaptif action (5)
@@ -312,6 +344,14 @@ tool'ları `engine="mirage"` aktifken kullanılır.
 - `kahin_mirage_wait_for_text`, `kahin_mirage_wait_for_timeout`
 - `kahin_mirage_route`
 
+`kahin_mirage_route` bir sonraki eşleşen isteği bekleyen bounded, tek-atımlık
+bir çağrıdır; navigate/click ile eşzamanlı çağrılır. `frame_id` verilirse yalnız
+o iframe'in isteğini eşleştirir. Seri MCP istemcileri önce
+`kahin_mirage_intercept_requests` çağırıp isteği
+`kahin_mirage_network_continue`/`kahin_mirage_network_abort` ile sürdürür ve
+ardından zorunlu olarak `kahin_mirage_unintercept_requests` çağırır; aksi halde
+gelecek istekler interception modunda bekleyebilir.
+
 ### Input (7)
 
 - `kahin_mirage_mouse_click`, `kahin_mirage_mouse_move`
@@ -323,6 +363,9 @@ tool'ları `engine="mirage"` aktifken kullanılır.
 
 - `kahin_mirage_reload`, `kahin_mirage_go_back`, `kahin_mirage_go_forward`
 - `kahin_mirage_stop`, `kahin_mirage_frame_tree`, `kahin_mirage_page_content`
+
+`kahin_mirage_page_content` HTML'i bounded döndürür; `htmlLength` gerçek
+belge boyutunu, `truncated` ise `html` alanının kesilip kesilmediğini bildirir.
 
 ### Tab/session (7)
 
@@ -364,6 +407,10 @@ tool'ları `engine="mirage"` aktifken kullanılır.
 - `kahin_mirage_set_file_chooser_intercept`
 - `kahin_mirage_upload_files`
 
+Upload çağrısı da `Page.fileChooserOpened` bekler. Input önceden tıklanmış
+olmalı veya `kahin_mirage_click(selector="input[type=file]")` ile eşzamanlı
+çağrılmalıdır; upload tool hangi input'u kendiliğinden seçmez.
+
 ### Screencast (4)
 
 - `kahin_mirage_screencast_start`, `kahin_mirage_screencast_frame`
@@ -383,6 +430,13 @@ en eski frame FIFO olarak döner.
   bounded per-tool rollup (`tool_calls`, `tool_errors`, `top_slow` ≤ 10,
   `last_error`); Mirage aktifse `prewarm` metadata'sı; engine yoksa
   yapılandırılmış `engine_unavailable` yanıtı (asla hata fırlatmaz)
+
+`kahin_mirage_accessibility_tree(max_nodes=N)` gerçek Camoufox AX ağacını
+alır, toplam `nodeCount`'ı raporlar ve ajana en fazla `N` node döndürür.
+Sidecar'ın raw AX cevabı da bounded'dır; büyük belgelerde beklenen sonuç
+`truncated: true` olabilir. `result_too_large` veya `truncated` gördüğünüzde
+engine'in öldüğünü varsaymayın; `kahin_engine_health` ile doğrulayın ve
+gerekirse DOM snapshot/selector ile hedef alanı daraltın.
 
 ### Agent-native (10)
 
@@ -484,6 +538,7 @@ dom_events(after_seq=C, stream_id=S, frame_id=F, wait_ms=5000)
 | `reset`/`dropped` | Stream değişti veya ring overflow | Snapshot; eski cursor'u bırak |
 | `not_found` | Selector artık yok | Event/snapshot ile yeni hedef bul |
 | `truncated` | Snapshot cap'i küçük | Selector veya cap daralt/genişlet |
+| `cdp_command_failed` + `Page.navigate` response timeout | Native target navigation promise takıldı | Aynı browser içinde bounded target recovery yapılır; `target_recovered: true` ise yeni DOM snapshot al |
 | `unsupported_action` | Action allow-list dışında | Yalnızca desteklenen action kullan |
 | `not_text_input` | Hedef textbox değil | Role/name/action ipuçlarını tekrar değerlendir |
 | `not_select` | `action=select` hedefi `<select>` değil | Snapshot'taki action ipuçlarını tekrar değerlendir |

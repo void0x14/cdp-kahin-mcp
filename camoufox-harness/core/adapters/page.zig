@@ -231,19 +231,22 @@ pub const Lifecycle = struct {
     /// previous document can complete the lifecycle before our navigation
     /// starts (state .done) — the real started event must still be able to
     /// mark the navigation as genuine.
-    /// Page.navigationStarted — prove the navigation is genuine: the event
-    /// carries the id we know from the navigate RESPONSE (the only
-    /// authoritative id). Events arriving before the response are events of
-    /// the PREVIOUS document (e.g. the initial about:blank navigation racing
-    /// our request) and are ignored — their id is never adopted.
+    /// Page.navigationStarted — retain the browser's real navigation id even
+    /// when Juggler has not answered the Page.navigate request yet. Camoufox
+    /// can emit the started event before that response; holding the id lets
+    /// the sidecar apply a short grace window and prevents a broken native
+    /// promise from blocking the MCP for its full 30-second deadline.
     ///
-    /// Runs in the waiting AND done states: a stale load event from the
-    /// previous document can complete the lifecycle before our navigation
-    /// starts (state .done) — the real started event must still be able to
-    /// mark the navigation as genuine.
+    /// The response id still wins when it arrives. A stale started event is
+    /// harmless because the Python navigation wait separately requires a new
+    /// URL/commit before declaring load success.
     pub fn onNavigationStarted(self: *Lifecycle, frame_id: []const u8, navigation_id: []const u8) void {
         if ((self.state != .waiting and self.state != .done) or !std.mem.eql(u8, frame_id, self.frame_id)) return;
-        if (self.navigation_id.len == 0) return; // response id unknown yet — stale document events
+        if (self.navigation_id.len == 0) {
+            self.replaceNavigationId(navigation_id);
+            self.nav_started = true;
+            return;
+        }
         self.nav_started = std.mem.eql(u8, self.navigation_id, navigation_id);
     }
 
@@ -254,7 +257,7 @@ pub const Lifecycle = struct {
     /// about:blank) and never set the flag.
     pub fn onCommitted(self: *Lifecycle, frame_id: []const u8, navigation_id: []const u8) void {
         if (!std.mem.eql(u8, frame_id, self.frame_id)) return;
-        if (self.navigation_id.len == 0) return; // response id unknown yet — stale document commits
+        if (self.navigation_id.len == 0) return;
         self.committed_current = std.mem.eql(u8, self.navigation_id, navigation_id);
     }
 

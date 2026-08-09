@@ -373,7 +373,22 @@ _FINGERPRINT_REPORT_JS = r"""
   webgl: gl,
 }))(
   (() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone; } catch (e) { return ""; } })(),
-  (() => { try { const c = document.createElement("canvas"); const g = c.getContext("webgl") || c.getContext("experimental-webgl"); if (!g) { return {}; } const e = g.getExtension("WEBGL_debug_renderer_info"); return {vendor: e ? g.getParameter(e.UNMASKED_VENDOR_WEBGL) : "", renderer: e ? g.getParameter(e.UNMASKED_RENDERER_WEBGL) : ""}; } catch (e) { return {}; } })()
+  (() => {
+    try {
+      const c = document.createElement("canvas");
+      const g = c.getContext("webgl") || c.getContext("experimental-webgl");
+      if (!g) return {available: false, vendor: null, renderer: null, reason: "context_unavailable"};
+      const e = g.getExtension("WEBGL_debug_renderer_info");
+      return {
+        available: true,
+        vendor: e ? g.getParameter(e.UNMASKED_VENDOR_WEBGL) : null,
+        renderer: e ? g.getParameter(e.UNMASKED_RENDERER_WEBGL) : null,
+        debugInfo: Boolean(e),
+      };
+    } catch (e) {
+      return {available: false, vendor: null, renderer: null, reason: "context_error"};
+    }
+  })()
 )
 """
 

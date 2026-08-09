@@ -1174,7 +1174,11 @@ async def mirage_key_press(
             return capture_error
         assert session_id is not None
         base: dict[str, Any] = {
-            "type": "keyDown", "key": key_value, "keyCode": key_code_value,
+            # Page.dispatchKeyEvent is Juggler-native here. Its event type is
+            # lowercase (the CDP Input adapter performs this mapping only
+            # for raw execute_cdp calls), so do not send CDP's keyDown token
+            # directly through the Mirage helper.
+            "type": "keydown", "key": key_value, "keyCode": key_code_value,
             "location": 0, "code": code_value, "repeat": False,
         }
         if text_value is not None:
@@ -1185,7 +1189,7 @@ async def mirage_key_press(
         if _is_error_response(down):
             return down
         up = await _safe_mirage_call("kahin_mirage_key_press", "Page.dispatchKeyEvent", {
-            "type": "keyUp", "key": key_value, "keyCode": key_code_value,
+            "type": "keyup", "key": key_value, "keyCode": key_code_value,
             "location": 0, "code": code_value, "repeat": False,
         }, session_id=session_id)
         if _is_error_response(up):
@@ -1355,12 +1359,12 @@ async def mirage_page_content() -> str:
     async with _healer_ref.safe("kahin_mirage_page_content"):
         expr = (
             "(() => ({"
-            "  html: (() => {"
+            "  ...(() => {"
             "    const copy = document.documentElement.cloneNode(true);"
             "    copy.querySelectorAll('input').forEach(input => {"
             "      if (String(input.getAttribute('type') || '').toLowerCase() === 'password') input.removeAttribute('value');"
             "    });"
-            f"    return copy.outerHTML.slice(0, {_MAX_RETURNED_TEXT});"
+            f"    const html = copy.outerHTML; return {{html: html.slice(0, {_MAX_RETURNED_TEXT}), htmlLength: html.length, truncated: html.length > {_MAX_RETURNED_TEXT}}};"
             "  })(),"
             "  innerWidth: window.innerWidth,"
             "  innerHeight: window.innerHeight,"

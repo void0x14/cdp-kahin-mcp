@@ -33,6 +33,8 @@ from collections import deque
 from pathlib import Path
 from typing import Any, Callable
 
+import orjson
+
 from kahin.dom_stream import DOM_STREAM_BINDING_NAME
 from kahin.the_twins.chassis import BrowserEngine, EngineContext, EventData
 
@@ -44,8 +46,16 @@ except ImportError:  # pragma: no cover - harness without the camoflox package
 logger = logging.getLogger(__name__)
 
 _REQUEST_TIMEOUT = 30.0
+_PAGE_NAVIGATE_RESPONSE_TIMEOUT = 5.0
 _RESPONSE_BODY_RETRY_TIMEOUT = 5.0
 _RESPONSE_BODY_RETRY_INTERVAL = 0.1
+# asyncio.StreamReader defaults to 64 KiB. The sidecar deliberately returns
+# bounded semantic trees/events up to 512 KiB, so the default turns a valid
+# response into LimitOverrunError and kills the transport reader.
+_IPC_STREAM_LIMIT = 64 * 1024 * 1024
+_READER_SHUTDOWN_TIMEOUT = 1.0
+_SIDECAR_SHUTDOWN_TIMEOUT = 3.0
+_SIDECAR_KILL_TIMEOUT = 2.0
 _CAMOUFOX_FETCH_TIMEOUT = 120.0
 _CAMOUFOX_PROBE_TIMEOUT = 10.0
 _CAMOUFOX_OUTPUT_LIMIT = 600
@@ -343,6 +353,7 @@ class Mirage(BrowserEngine):
         super().__init__()
         self._engine_name = engine_name
         self._stderr_file = None
+        self._stderr_path: Path | None = None
         self._profile_dir: Path | None = None
         # Active identity applied at launch (Faz 2 Task 5): the resolved
         # fingerprint config plus the saved identity name it came from.
@@ -373,9 +384,10 @@ class Mirage(BrowserEngine):
         # to the main-world context of that frame.
         self._frame_contexts: dict[str, dict[str, str]] = {}
         # Page.fileChooserOpened (file-input click while interception is on):
-        # latest params + event, consumed by wait_for_chooser (Gap C upload).
-        self._pending_chooser: dict[str, Any] | None = None
-        self._pending_chooser_session_id: str | None = None
+        # bounded per-session queue, consumed by wait_for_chooser (Gap C
+        # upload). A single global slot lets a second tab steal the first
+        # tab's chooser during concurrent uploads.
+        self._pending_choosers: deque[tuple[str | None, dict[str, Any]]] = deque(maxlen=32)
         self._chooser_event = asyncio.Event()
         # Page.screencastFrame (live screencast, Gap D): params of every
         # unconsumed frame (data is base64-JPEG, ack'd on consume — see
@@ -413,8 +425,7 @@ class Mirage(BrowserEngine):
         wake waiters so they can observe liveness immediately; start() clears
         the wake-up events before the new browser is exposed.
         """
-        self._pending_chooser = None
-        self._pending_chooser_session_id = None
+        self._pending_choosers.clear()
         self._screencast_frames.clear()
         self._screencast_id = None
         self._screencast_session_id = None
@@ -437,6 +448,7 @@ class Mirage(BrowserEngine):
         # makes a stop/start cycle deterministic and prevents stale tab or
         # liveness state from leaking into a replacement browser.
         self._dead = False
+        self._stopping = False
         self._msg_id = 0
         self._sessions.clear()
         self._target_infos.clear()
@@ -538,13 +550,19 @@ class Mirage(BrowserEngine):
             log_dir = Path(__file__).resolve().parents[2] / "logs"
             log_dir.mkdir(parents=True, exist_ok=True)
             # File lives as long as the child process, not a with-block.
-            self._stderr_file = await asyncio.to_thread(open, log_dir / "kahin-sidecar.err", "ab")
+            # Keep stderr diagnostics attributable to one sidecar/session.
+            # A shared append-only file made old allocator leaks and unrelated
+            # browser deaths look like the current crash, especially when
+            # multiple MCP clients were being investigated concurrently.
+            self._stderr_path = log_dir / f"kahin-sidecar-{os.getpid()}-{time.time_ns()}.err"
+            self._stderr_file = await asyncio.to_thread(open, self._stderr_path, "ab")
             self._process = await asyncio.create_subprocess_exec(
                 *args,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=self._stderr_file,
                 env=env,
+                limit=_IPC_STREAM_LIMIT,
             )
             self._start_reader()
             # Boot validation: the sidecar must report a live browser. A dead
@@ -596,6 +614,7 @@ class Mirage(BrowserEngine):
 
         async def reader() -> None:
             assert self._process is not None and self._process.stdout is not None
+            death_reason = "sidecar_stdout_closed"
             try:
                 while True:
                     raw = await self._process.stdout.readline()
@@ -614,13 +633,23 @@ class Mirage(BrowserEngine):
                             else:
                                 fut.set_result(data.get("result", {}))
                     elif "method" in data:
-                        self._track_session(data)
-                        self._track_target_url(data)
-                        self._track_context(data)
-                        self._track_chooser(data)
-                        self._track_screencast(data)
-                        self._track_dom_binding(data)
-                        self._track_network_event(data)
+                        # Event metadata is auxiliary state. A malformed
+                        # browser event must be logged and dropped, never
+                        # allowed to terminate the transport reader while
+                        # requests are still in flight.
+                        for tracker in (
+                            self._track_session,
+                            self._track_target_url,
+                            self._track_context,
+                            self._track_chooser,
+                            self._track_screencast,
+                            self._track_dom_binding,
+                            self._track_network_event,
+                        ):
+                            try:
+                                tracker(data)
+                            except Exception:  # noqa: BLE001 - one event cannot kill the reader
+                                logger.warning("malformed Mirage event metadata in %s", data.get("method"), exc_info=True)
                         evt = EventData(
                             method=data["method"],
                             params=data.get("params", {}),
@@ -634,16 +663,18 @@ class Mirage(BrowserEngine):
                             except Exception:
                                 logger.exception("event callback failed for %s", evt.method)
             except asyncio.CancelledError:
-                pass
-            except Exception:  # noqa: BLE001
-                logger.debug("Mirage reader stopped")
+                death_reason = "reader_cancelled"
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Mirage reader stopped unexpectedly")
+                detail = str(exc).replace("\n", " ")[:160]
+                death_reason = f"reader_error:{type(exc).__name__}:{detail}"
             finally:
                 # The browser died; fail every in-flight request.
                 for fut in self._pending.values():
                     if not fut.done():
                         fut.set_exception(RuntimeError("Mirage sidecar exited"))
                 self._pending.clear()
-                self._mark_dead()
+                self._mark_dead(death_reason)
 
         self._reader = asyncio.create_task(reader())
 
@@ -744,19 +775,35 @@ class Mirage(BrowserEngine):
             "method": method,
             "params": params,
             "session_id": data.get("sessionId"),
+            "_kahin_received_at": time.monotonic(),
         })
         self._network_signal.set()
 
     async def wait_for_intercepted(
-        self, predicate: Callable[[dict[str, Any]], bool], timeout: float,
+        self,
+        predicate: Callable[[dict[str, Any]], bool],
+        timeout: float,
+        *,
+        after_monotonic: float | None = None,
     ) -> dict[str, Any] | None:
-        """Wait for the next intercepted Network event matching predicate."""
+        """Wait for a fresh intercepted Network event matching ``predicate``.
+
+        The engine keeps a bounded event window for diagnostics. Route calls
+        must not accidentally consume an older paused request from that
+        window, so callers can provide the monotonic start of their one-shot
+        wait.
+        """
         loop = asyncio.get_running_loop()
         deadline = loop.time() + max(0.0, timeout)
         while True:
             events = list(self._network_events)
             for event in events:
                 if event.get("method") != "Network.requestWillBeSent":
+                    continue
+                received_at = event.get("_kahin_received_at")
+                if after_monotonic is not None and (
+                    not isinstance(received_at, (int, float)) or received_at < after_monotonic
+                ):
                     continue
                 params = event.get("params") or {}
                 request_id = params.get("requestId")
@@ -782,39 +829,49 @@ class Mirage(BrowserEngine):
 
     def _track_chooser(self, data: dict[str, Any]) -> None:
         """Record Page.fileChooserOpened (file input clicked while
-        Page.setInterceptFileChooserDialog is enabled) into the pending slot
-        and set the event so wait_for_chooser can consume it (Gap C)."""
+        Page.setInterceptFileChooserDialog is enabled) into the bounded
+        per-session queue and set the event so wait_for_chooser can consume
+        it (Gap C)."""
         if data.get("method") == "Page.fileChooserOpened":
-            self._pending_chooser = data.get("params", {}) or {}
+            params = data.get("params", {}) or {}
             session_id = data.get("sessionId")
-            self._pending_chooser_session_id = session_id if isinstance(session_id, str) else None
+            owner = session_id if isinstance(session_id, str) else None
+            self._pending_choosers.append((owner, params))
             self._chooser_event.set()
 
-    async def wait_for_chooser(self, timeout: float) -> dict[str, Any] | None:
+    async def wait_for_chooser(
+        self, timeout: float, *, session_id: str | None = None,
+    ) -> dict[str, Any] | None:
         """Return the fileChooserOpened params, waiting up to ``timeout`` for
         one when nothing is pending yet; None on timeout.
 
         Covers both orders: the input was already clicked (pending chooser is
-        returned immediately) or the click will come after this call (the
-        event fires while we wait). The slot is cleared on consume, so a
-        second upload waits for a NEW chooser.
+        returned immediately) or the click will come after this call. When a
+        session is supplied, only that tab's chooser can be consumed; events
+        from another tab remain queued for their owner.
         """
-        if self._pending_chooser is None:
+        deadline = asyncio.get_running_loop().time() + max(0.0, timeout)
+        while True:
+            for index, (owner, chooser) in enumerate(self._pending_choosers):
+                if session_id is not None and owner != session_id:
+                    continue
+                del self._pending_choosers[index]
+                if not self._pending_choosers:
+                    self._chooser_event.clear()
+                # sessionId belongs to the event envelope, not to the Juggler
+                # params. Keep it private so upload_files can route the
+                # chooser to the page that actually opened it.
+                if owner is not None:
+                    return {**chooser, "_kahinSessionId": owner}
+                return chooser
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                return None
+            self._chooser_event.clear()
             try:
-                await asyncio.wait_for(self._chooser_event.wait(), timeout=timeout)
+                await asyncio.wait_for(self._chooser_event.wait(), timeout=remaining)
             except asyncio.TimeoutError:
                 return None
-        chooser = self._pending_chooser
-        session_id = self._pending_chooser_session_id
-        self._pending_chooser = None
-        self._pending_chooser_session_id = None
-        self._chooser_event.clear()
-        if chooser is not None and session_id is not None:
-            # sessionId belongs to the event envelope, not to the Juggler
-            # params. Keep it private so upload_files can route the chooser
-            # to the page that actually opened it.
-            chooser = {**chooser, "_kahinSessionId": session_id}
-        return chooser
 
     def _track_screencast(self, data: dict[str, Any]) -> None:
         """Queue Page.screencastFrame params (Gap D live screencast).
@@ -1045,8 +1102,7 @@ class Mirage(BrowserEngine):
             # A new interception mode starts a new chooser lifetime. Clear a
             # chooser event from a previous page/action before sending the
             # real Juggler command; events emitted afterwards remain visible.
-            self._pending_chooser = None
-            self._pending_chooser_session_id = None
+            self._pending_choosers.clear()
             self._chooser_event.clear()
         if method == "Page.startScreencast":
             # Clear the predecessor before the real start call. Frames emitted
@@ -1070,7 +1126,12 @@ class Mirage(BrowserEngine):
                     raise RuntimeError("Mirage not started")
                 self._process.stdin.write((json.dumps(msg) + "\n").encode())
                 await self._process.stdin.drain()
-            result = await asyncio.wait_for(fut, timeout=_REQUEST_TIMEOUT)
+            response_timeout = (
+                _PAGE_NAVIGATE_RESPONSE_TIMEOUT
+                if method == "Page.navigate"
+                else _REQUEST_TIMEOUT
+            )
+            result = await asyncio.wait_for(fut, timeout=response_timeout)
             if method == "Page.startScreencast":
                 screencast_id = result.get("screencastId")
                 if isinstance(screencast_id, str) and screencast_id:
@@ -1084,7 +1145,7 @@ class Mirage(BrowserEngine):
                 self._screencast_starting = False
                 self._screencast_starting_session_id = None
             self._pending.pop(request_id, None)
-            raise RuntimeError(f"Mirage: response timeout ({_REQUEST_TIMEOUT:.0f}s) for {method}")
+            raise RuntimeError(f"Mirage: response timeout ({response_timeout:.1f}s) for {method}")
         except asyncio.CancelledError:
             if method == "Page.startScreencast":
                 self._screencast_starting = False
@@ -1135,7 +1196,16 @@ class Mirage(BrowserEngine):
         The sessionId is learned from the Browser.attachedToTarget event the
         sidecar forwards right after Browser.newPage's reply.
         """
-        params: dict[str, Any] = {"url": url}
+        # Juggler's Browser.newPage already creates an about:blank document;
+        # sending a synthetic second Page.navigate to that same URL leaves a
+        # fresh target with a competing navigation in flight. The next real
+        # navigation can then be aborted or wait for the sidecar deadline.
+        # Keep the default tab creation a pure attach, and only ask the
+        # sidecar's combined flow to navigate when the caller supplied a real
+        # destination.
+        params: dict[str, Any] = {}
+        if url and url != "about:blank":
+            params["url"] = url
         if browser_context_id:
             params["browserContextId"] = browser_context_id
         result = await self.call("Browser.newPage", params)
@@ -1152,7 +1222,34 @@ class Mirage(BrowserEngine):
             if target_id not in self._sessions:
                 raise RuntimeError(f"target {target_id} detached before it became current")
             self._current_target = target_id
-            return {"targetId": target_id, "sessionId": self._sessions[target_id]}
+            session_id = self._sessions[target_id]
+        await self._wait_for_page_frame(session_id, deadline=min(deadline, loop.time() + 3.0))
+        return {"targetId": target_id, "sessionId": session_id}
+
+    async def _wait_for_page_frame(self, session_id: str, *, deadline: float) -> None:
+        """Wait until the sidecar has registered a main frame for a target.
+
+        ``Browser.attachedToTarget`` can precede the initial
+        ``Page.frameAttached``/execution-context events. Returning a new tab
+        in that gap makes an immediate Page.navigate race the target's
+        about:blank lifecycle and can leave the Juggler navigation promise
+        pending for its full 30-second deadline.
+        """
+        loop = asyncio.get_running_loop()
+        while loop.time() < deadline:
+            try:
+                tree = await asyncio.wait_for(
+                    self.call("Page.getFrameTree", session_id=session_id),
+                    timeout=min(0.5, max(0.05, deadline - loop.time())),
+                )
+            except Exception:
+                tree = None
+            frame_tree = tree.get("frameTree") if isinstance(tree, dict) else None
+            frame = frame_tree.get("frame") if isinstance(frame_tree, dict) else None
+            if isinstance(frame, dict) and isinstance(frame.get("id"), str) and frame["id"]:
+                return
+            await asyncio.sleep(0.05)
+        raise RuntimeError("new page frame did not become ready before the bounded deadline")
 
     async def ensure_page(self) -> dict[str, Any]:
         """Return the current tab, creating one lazily inside this browser.
@@ -1393,10 +1490,27 @@ class Mirage(BrowserEngine):
                 })
             return {"targetInfos": infos}
         if command == "createTarget":
+            requested_url = str(params.get("url", "about:blank"))
             page = await self.create_page(
-                url=str(params.get("url", "about:blank")),
+                url="about:blank",
                 browser_context_id=params.get("browserContextId"),
             )
+            if requested_url != "about:blank":
+                # Keep Target.createTarget's URL behavior on the same
+                # frame-ready navigation path as the native tab tool.
+                from kahin.tools.pilot import navigate as pilot_navigate  # noqa: PLC0415
+
+                raw_navigation = await pilot_navigate(url=requested_url, wait_until="load")
+                try:
+                    navigation = orjson.loads(raw_navigation)
+                except orjson.JSONDecodeError:
+                    navigation = {"error": raw_navigation[:1_000]}
+                if isinstance(navigation, dict) and navigation.get("error"):
+                    raise RuntimeError(f"Target.createTarget navigation failed: {navigation}")
+                # A bounded navigation recovery may replace a wedged target
+                # while keeping the same browser. Return the live target, not
+                # the attach primitive that was closed during recovery.
+                page = await self.ensure_page()
             return {"targetId": page["targetId"]}
         if command == "closeTarget":
             target_id = params.get("targetId")
@@ -1695,14 +1809,47 @@ class Mirage(BrowserEngine):
         the sidecar yet.
         """
         if not self.is_alive():
-            return {"alive": False, "state": "dead"}
+            return {
+                "alive": False,
+                "state": "dead",
+                "reason": self._death_reason or "sidecar_not_alive",
+                "pid": self._process.pid if self._process is not None else None,
+                "returncode": self._process.returncode if self._process is not None else None,
+                "stderr_log": str(self._stderr_path) if self._stderr_path is not None else None,
+            }
         try:
             result = await self.call("Browser.health")
         except Exception as exc:  # noqa: BLE001
-            self._mark_dead()
-            return {"alive": False, "state": "dead", "error": str(exc)}
+            process_alive = (
+                not self._dead
+                and self._process is not None
+                and self._process.returncode is None
+            )
+            if process_alive:
+                # A health RPC error is not proof that the sidecar or
+                # browser died. Keep the transport and process lock owned so
+                # a transient busy sidecar cannot create a second browser.
+                return {
+                    "alive": False,
+                    "state": "degraded",
+                    "reason": "health_probe_failed",
+                    "error": str(exc),
+                    "pid": self._process.pid,
+                    "returncode": self._process.returncode,
+                    "stderr_log": str(self._stderr_path) if self._stderr_path is not None else None,
+                }
+            self._mark_dead(f"health_error:{type(exc).__name__}")
+            return {
+                "alive": False,
+                "state": "dead",
+                "error": str(exc),
+                "reason": self._death_reason,
+                "pid": self._process.pid if self._process is not None else None,
+                "returncode": self._process.returncode if self._process is not None else None,
+                "stderr_log": str(self._stderr_path) if self._stderr_path is not None else None,
+            }
         if not result.get("alive"):
-            self._mark_dead()
+            self._mark_dead("browser_health_dead")
         return result
 
     def is_alive(self) -> bool:
@@ -1728,6 +1875,7 @@ class Mirage(BrowserEngine):
         return base64.b64decode(data)
 
     async def stop(self) -> None:
+        self._stopping = True
         self._dom_signal.set()
         self._reset_capture_state(wake_waiters=True)
         self._identity_config = None
@@ -1741,7 +1889,12 @@ class Mirage(BrowserEngine):
             reader.cancel()
             if reader is not asyncio.current_task():
                 try:
-                    await reader
+                    await asyncio.wait_for(asyncio.shield(reader), timeout=_READER_SHUTDOWN_TIMEOUT)
+                except TimeoutError:
+                    # A callback or a broken pipe must not turn browser_stop
+                    # into a 30-second MCP stall. The reader is already
+                    # cancelled; process teardown below is authoritative.
+                    reader.cancel()
                 except asyncio.CancelledError:
                     pass
                 except Exception:  # noqa: BLE001 - shutdown must continue
@@ -1768,13 +1921,29 @@ class Mirage(BrowserEngine):
                 pass
         wait_task = asyncio.create_task(proc.wait())
         try:
-            await asyncio.wait_for(asyncio.shield(wait_task), timeout=10)
+            await asyncio.wait_for(asyncio.shield(wait_task), timeout=_SIDECAR_SHUTDOWN_TIMEOUT)
+        except ProcessLookupError:
+            # The sidecar may already have been reaped by its reader/death
+            # path. Cleanup is idempotent; a dead child is already stopped.
+            pass
         except TimeoutError:
             try:
                 proc.kill()
             except ProcessLookupError:
                 pass
-            await wait_task
+            try:
+                await asyncio.wait_for(asyncio.shield(wait_task), timeout=_SIDECAR_KILL_TIMEOUT)
+            except TimeoutError:
+                # A sidecar stuck while its browser is dying must not hold an
+                # MCP shutdown request forever. The kill was already sent;
+                # cancel only the local waiter after the bounded reap window.
+                wait_task.cancel()
+                try:
+                    await wait_task
+                except BaseException:  # noqa: BLE001 - waiter is cancelled
+                    pass
+            except ProcessLookupError:
+                pass
         except asyncio.CancelledError:
             # A cancelled MCP request must still reap the sidecar before the
             # cancellation escapes; otherwise the next tool sees a cleared
