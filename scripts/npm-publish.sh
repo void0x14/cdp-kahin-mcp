@@ -28,9 +28,21 @@ if [[ -n "${CI_COMMIT_TAG:-}" && "$CI_COMMIT_TAG" != "v$LOCAL" ]]; then
 fi
 
 verify_registry_package() {
-  local package_dir archive manifest required
+  local package_dir archive manifest required attempt
   package_dir=$(mktemp -d)
-  archive=$(npm pack "@kahinmcp/kahin@$LOCAL" --silent --pack-destination "$package_dir")
+  archive=""
+  # The metadata API (npm view) propagates faster than the tarball CDN:
+  # right after a publish, npm pack can still 404 the new version. Retry
+  # instead of failing a successful release on CDN lag.
+  for attempt in 1 2 3 4 5 6; do
+    archive=$(npm pack "@kahinmcp/kahin@$LOCAL" --pack-destination "$package_dir" 2>"$query_err") && break
+    sleep 10
+  done
+  if [[ -z "$archive" ]]; then
+    tail -5 "$query_err" >&2
+    echo "registry tarball for $LOCAL is not reachable yet; release not confirmed" >&2
+    exit 1
+  fi
   manifest="$package_dir/manifest"
   tar -tzf "$package_dir/$archive" >"$manifest"
   for required in \
