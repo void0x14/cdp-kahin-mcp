@@ -44,6 +44,7 @@ def _bound_event(value: Any, depth: int = 0) -> Any:
 
 
 def _on_cdp_event(evt: EventData) -> None:
+    state._event_seq += 1
     params = _bound_event(evt.params)
     if evt.method == "Page.screencastFrame" and isinstance(params, dict):
         data = params.get("data")
@@ -51,6 +52,7 @@ def _on_cdp_event(evt: EventData) -> None:
             params["dataLength"] = len(data)
             params["data"] = "[screencast frame omitted from event history]"
     state._current_event_log.append({
+        "seq": state._event_seq,
         "event": evt.method,
         "params": params,
         "session_id": evt.session_id,

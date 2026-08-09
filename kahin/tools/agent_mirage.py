@@ -835,8 +835,8 @@ async def identity_report() -> str:
     name/config plus the runtime ``navigator.userAgent`` read from the live
     page (never a set_user_agent acknowledgement). Engines started without an
     identity report ``identity: null`` but still carry the active bounded
-    ``identityHash`` (fresh BrowserForge digest or the pinned identity's
-    config hash) and the enabled ``stealth`` launch policy — configured or
+    ``identityHash`` (the effective per-launch BrowserForge digest, including
+    launches seeded from a saved identity) and the enabled ``stealth`` launch policy — configured or
     not. Fingerprint payloads are never returned, only the hash.
     """
     async with _healer_ref.safe("kahin_identity_report"):

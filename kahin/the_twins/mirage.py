@@ -47,6 +47,7 @@ logger = logging.getLogger(__name__)
 
 _REQUEST_TIMEOUT = 30.0
 _PAGE_NAVIGATE_RESPONSE_TIMEOUT = 5.0
+_IPC_WRITE_TIMEOUT = 5.0
 _RESPONSE_BODY_RETRY_TIMEOUT = 5.0
 _RESPONSE_BODY_RETRY_INTERVAL = 0.1
 # asyncio.StreamReader defaults to 64 KiB. The sidecar deliberately returns
@@ -596,21 +597,13 @@ class Mirage(BrowserEngine):
         # Safe launch metadata for the surfaces (never the raw fingerprint
         # or proxy URL): the bound policy plus proxy presence only.
         self._launch_policy = {**policy, "proxy": self._proxy_url is not None}
-        # Active identity hash (crawler/rotation Task 1): every start
-        # resolves a bounded digest of the effective launch identity
-        # material. Explicit identities hash the original (unmutated)
-        # config — stable across boots and the pre-warm store key. Default
-        # launches have no pinned config; the effective material is the
-        # BrowserForge CAMOU_CONFIG_* fingerprint env generated for THIS
-        # launch plus the safe launch policy. Raw fingerprint payloads are
-        # never logged or returned; only the 16-hex digest is
-        # stored/exposed.
-        if self._identity_config is not None:
-            self._identity_hash = prewarm_hash
-        else:
-            self._identity_hash = _effective_identity_hash(
-                opts.get("env") or {}, self._launch_policy
-            )
+        # Every launch reports the effective CAMOU_CONFIG_* material actually
+        # handed to Camoufox, including launches seeded from a saved identity.
+        # The saved identity remains the configuration input, but does not
+        # freeze the per-launch fingerprint. A restart must either produce a
+        # different real digest or be rejected by the crawler rotation gate.
+        # Raw fingerprint payloads are never logged or returned.
+        self._identity_hash = _effective_identity_hash(env, self._launch_policy)
 
         # firefox_user_prefs -> <profile>/user.js (webgl etc. must be set
         # before the browser boots; the sidecar only mkdirs the profile).
@@ -1201,6 +1194,11 @@ class Mirage(BrowserEngine):
             msg["sessionId"] = sid
         fut: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
         self._pending[request_id] = fut
+        response_timeout = (
+            _PAGE_NAVIGATE_RESPONSE_TIMEOUT
+            if method == "Page.navigate"
+            else _REQUEST_TIMEOUT
+        )
         try:
             # Keep JSONL records intact when several MCP calls arrive at once;
             # pending replies remain fully concurrent behind this tiny write
@@ -1209,12 +1207,13 @@ class Mirage(BrowserEngine):
                 if self._process is None or self._process.stdin is None:
                     raise RuntimeError("Mirage not started")
                 self._process.stdin.write((json.dumps(msg) + "\n").encode())
-                await self._process.stdin.drain()
-            response_timeout = (
-                _PAGE_NAVIGATE_RESPONSE_TIMEOUT
-                if method == "Page.navigate"
-                else _REQUEST_TIMEOUT
-            )
+                try:
+                    await asyncio.wait_for(self._process.stdin.drain(), timeout=_IPC_WRITE_TIMEOUT)
+                except asyncio.TimeoutError as exc:
+                    self._mark_dead("stdin_write_timeout")
+                    raise RuntimeError(
+                        f"Mirage: stdin write timeout ({_IPC_WRITE_TIMEOUT:.1f}s); sidecar is not draining"
+                    ) from exc
             result = await asyncio.wait_for(fut, timeout=response_timeout)
             if method == "Page.startScreencast":
                 screencast_id = result.get("screencastId")

@@ -238,6 +238,11 @@ async def _engine_is_healthy(engine: Any) -> bool:
             return bool(engine.is_alive())
         except Exception:  # noqa: BLE001
             return False
+        if result.get("state") == "degraded":
+            # A failed Browser.health RPC is not proof that Firefox died.
+            # Keep the existing process/tab context reusable; treating this
+            # as dead makes idempotent browser_start erase agent context.
+            return bool(engine.is_alive())
         return bool(result.get("alive"))
     return bool(engine.is_alive())
 
@@ -287,8 +292,8 @@ def _engine_config_conflict(
 def _identity_start_summary(engine: Any) -> dict[str, Any] | None:
     """Expose bounded identity metadata without returning fingerprint data.
 
-    Always carries the active 16-hex ``hash`` (fresh BrowserForge digest or
-    the explicit identity's config hash) and the ``stealth`` launch policy
+    Always carries the active 16-hex effective per-launch BrowserForge digest
+    and the ``stealth`` launch policy
     actually bound on this start, whether or not an identity is configured.
     """
     if not isinstance(engine, Mirage):
@@ -651,7 +656,7 @@ async def _navigation_wait(
     frame_id: str | None,
     session_id: str | None,
     started_at: float,
-    event_start_index: int,
+    event_start_seq: int,
 ) -> dict[str, Any] | None:
     """Wait for a bounded document lifecycle state after navigation."""
     loop = asyncio.get_running_loop()
@@ -690,7 +695,10 @@ async def _navigation_wait(
         now = time.time()
         committed = False
         history = list(state._current_event_log)
-        for event in history[event_start_index:] if event_start_index < len(history) else []:
+        for event in history:
+            event_seq = event.get("seq")
+            if not isinstance(event_seq, int) or event_seq <= event_start_seq:
+                continue
             if event.get("session_id") != session_id:
                 continue
             event_name = event.get("event")
@@ -806,7 +814,7 @@ async def navigate(
                 # before the replacement Page.navigate is written.
                 await asyncio.sleep(0.05)
         navigation_started_at = time.time()
-        event_start_index = len(state._current_event_log)
+        event_start_seq = state._event_seq
         target_recovered = False
         navigation_result = await _safe_cdp("Page", "navigate", params)
         try:
@@ -835,7 +843,7 @@ async def navigate(
                     await _stop_mirage_page_loading(engine)
                 await asyncio.sleep(0.05)
                 navigation_started_at = time.time()
-                event_start_index = len(state._current_event_log)
+                event_start_seq = state._event_seq
                 navigation_result = await _safe_cdp("Page", "navigate", params)
                 try:
                     parsed_result = orjson.loads(navigation_result)
@@ -865,7 +873,7 @@ async def navigate(
             frame_id=frame_id,
             session_id=session_id,
             started_at=navigation_started_at,
-            event_start_index=event_start_index,
+            event_start_seq=event_start_seq,
         )
         if wait_error:
             return orjson.dumps(wait_error, option=orjson.OPT_INDENT_2).decode()

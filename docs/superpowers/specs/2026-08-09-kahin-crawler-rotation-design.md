@@ -35,7 +35,12 @@ Pause/resume açıkça çağrılmadıkça CAPTCHA/access-denied sonrası job dev
 
 Rotation policy varsayılan olarak 20 başarılı sayfa veya 15 dakika sınırından ilkine ulaşıldığında, sayfa sonucu ledger'a yazıldıktan sonra devreye girer. Mevcut browser stop edilir, tek browser slotu korunarak Mirage yeniden başlatılır; yeni launch identity hash'i önceki hash'ten farklı olmalıdır. Explicit saved identity verilmedikçe her rotation fresh BrowserForge identity kullanır.
 
-Navigation/engine failure sonrası queue korunur. Engine dead ise aynı launch ayarlarıyla tek recovery restart denenir; tekrar başarısızsa job `failed` olur ve structured error döner. Challenge sonrası rotation otomatik bypass stratejisi değildir: rate-limit backoff uygulanır, CAPTCHA/access-denied pause olur.
+Navigation/engine failure sonrası queue korunur. Engine dead/degraded ise aynı
+launch ayarlarıyla tek recovery restart denenir; tekrar başarısızsa job `failed`
+olur ve structured error döner. Her restart'ın effective fingerprint hash'i
+öncekinden farklı olmalıdır; aynı hash dürüstçe rotation failure olarak raporlanır.
+Challenge sonrası rotation otomatik bypass stratejisi değildir: rate-limit
+backoff uygulanır, CAPTCHA/access-denied pause olur.
 
 ## Crawler veri akışı
 

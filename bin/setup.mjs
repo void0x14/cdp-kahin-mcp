@@ -7,7 +7,7 @@
 // Client listesi, otomatik tespit yapan sistemlerden derlendi (add-mcp 15 ajan,
 // everymcp 15, mcpm 20+, getmcp 19, mcp-get 9, mcpkit): 22 client.
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
 import { spawn } from "node:child_process";
@@ -325,6 +325,37 @@ const KAHIN_HOME = process.env.KAHIN_HOME || join(homedir(), ".local", "share", 
 const KAHIN_VENV = join(KAHIN_HOME, "venv");
 const KAHIN_PY = process.platform === "win32" ? join(KAHIN_VENV, "Scripts", "python.exe") : join(KAHIN_VENV, "bin", "python");
 const KAHIN_WHEEL = join(dirname(fileURLToPath(import.meta.url)), "..", "lib", "kahin-0.3.8-py3-none-any.whl");
+const KAHIN_INSTALL_MARKER = join(KAHIN_HOME, ".install-state.json");
+const SETUP_COMMAND_TIMEOUT_MS = 120_000;
+
+function wheelStamp() {
+  try {
+    const info = statSync(KAHIN_WHEEL);
+    return `${info.size}:${Math.trunc(info.mtimeMs)}`;
+  } catch {
+    return null;
+  }
+}
+
+function installMarkerMatches(stamp) {
+  if (!stamp || !existsSync(KAHIN_INSTALL_MARKER)) return false;
+  try {
+    const marker = JSON.parse(readFileSync(KAHIN_INSTALL_MARKER, "utf8"));
+    return marker && marker.wheel === stamp && marker.python === KAHIN_PY;
+  } catch {
+    return false;
+  }
+}
+
+function writeInstallMarker(stamp) {
+  if (!stamp) return;
+  try {
+    mkdirSync(KAHIN_HOME, { recursive: true });
+    writeFileSync(KAHIN_INSTALL_MARKER, JSON.stringify({ wheel: stamp, python: KAHIN_PY }) + "\n");
+  } catch (err) {
+    process.stderr.write(`[kahin] install marker yazılamadı: ${err.message}\n`);
+  }
+}
 
 // Gömülü wheel'i venv'e kurar ve varsayılan Camoufox binary'sini hazırlar.
 // PyPI'a bağımlı DEĞİL — wheel paketle birlikte gelir; wheel'in bağımlılıkları
@@ -349,20 +380,39 @@ export async function installPython() {
       return { error: code };
     }
   }
-  log(`wheel kuruluyor: ${KAHIN_WHEEL}`);
-  const code = await run(KAHIN_PY, ["-m", "pip", "install", "--upgrade", KAHIN_WHEEL]);
-  if (code !== 0) {
-    log(`wheel kurulamadı (çıkış ${code})`);
-    return { error: code };
+  const stamp = wheelStamp();
+  if (installMarkerMatches(stamp)) {
+    log("Kahin wheel zaten güncel; pip kurulumu atlandı");
+  } else {
+    log(`wheel kuruluyor: ${KAHIN_WHEEL}`);
+    const code = await run(
+      KAHIN_PY,
+      ["-m", "pip", "install", "--upgrade", KAHIN_WHEEL],
+      SETUP_COMMAND_TIMEOUT_MS,
+    );
+    if (code !== 0) {
+      log(`wheel kurulamadı (çıkış ${code})`);
+      return { error: code };
+    }
+    writeInstallMarker(stamp);
+    log("kahin python paketi kuruldu/güncellendi");
   }
-  log("kahin python paketi kuruldu/güncellendi");
 
   if (process.env.KAHIN_SKIP_CAMOUFOX_FETCH) {
     log("Camoufox fetch atlandı (KAHIN_SKIP_CAMOUFOX_FETCH)");
     return { installed: true, camoufox: "skipped" };
   }
+  const readyCode = await run(
+    KAHIN_PY,
+    ["-c", "from pathlib import Path; from camoufox.pkgman import launch_path; raise SystemExit(0 if Path(launch_path()).exists() else 1)"],
+    15_000,
+  );
+  if (readyCode === 0) {
+    log("Camoufox browser zaten hazır; fetch atlandı");
+    return { installed: true, camoufox: "ready" };
+  }
   log("Camoufox browser hazırlanıyor (resmi camoufox fetch)...");
-  const browserCode = await run(KAHIN_PY, ["-m", "camoufox", "fetch"]);
+  const browserCode = await run(KAHIN_PY, ["-m", "camoufox", "fetch"], SETUP_COMMAND_TIMEOUT_MS);
   if (browserCode !== 0) {
     log(`Camoufox browser hazırlanamadı (çıkış ${browserCode}); kahin browser_start sırasında tekrar deneyecek`);
     return { installed: true, camoufox: "error", error: browserCode };
@@ -371,15 +421,28 @@ export async function installPython() {
   return { installed: true, camoufox: "ready" };
 }
 
-function run(cmd, args) {
+function run(cmd, args, timeoutMs = SETUP_COMMAND_TIMEOUT_MS) {
   return new Promise((resolve) => {
     const c = spawn(cmd, args, { stdio: ["ignore", "ignore", "pipe"] });
+    let timedOut = false;
+    let forceTimer;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      c.kill("SIGTERM");
+      forceTimer = setTimeout(() => c.kill("SIGKILL"), 5_000);
+    }, timeoutMs);
     c.on("error", (err) => {
+      clearTimeout(timer);
+      clearTimeout(forceTimer);
       process.stderr.write(`[kahin] ${cmd} başlatılamadı: ${err.message}\n`);
       resolve(1);
     });
     c.stderr.on("data", (d) => process.stderr.write(`[kahin] ${d}`));
-    c.on("close", (code) => resolve(code));
+    c.on("close", (code) => {
+      clearTimeout(timer);
+      clearTimeout(forceTimer);
+      resolve(timedOut ? 124 : code);
+    });
   });
 }
 

@@ -262,8 +262,10 @@ araçları kullanılır:
 
 Job varsayılan olarak aynı Mirage browser ve crawler tab'ını kullanır. 20 başarılı
 sayfa veya 900 saniyeden biri önce dolduğunda, tamamlanan sayfa ledger'a yazılır,
-engine aynı slotta yeniden başlatılır ve explicit identity verilmediyse fresh
-BrowserForge identity oluşur. Queue ve result cursor engine restart'tan etkilenmez.
+engine aynı slotta yeniden başlatılır ve saved/inline identity config ile
+başlatılmış olsa bile effective Camoufox launch fingerprint'i yeniden üretilir;
+önceki hash ile aynıysa rotation reddedilir. Queue ve result cursor engine
+restart'tan etkilenmez.
 Rotation bir CAPTCHA veya rate-limit kaçış mekanizması değildir. 429/503 için
 Retry-After ve bounded exponential backoff uygulanır; CAPTCHA/access-denied
 durumunda job `paused` kalır ve `kahin_crawl_resume` çağrısı bekler. Resume

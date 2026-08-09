@@ -61,8 +61,12 @@ _MAX_RETAINED_JOBS = 20
 _RESPONSE_MAX_BYTES = 8 * 1024 * 1024
 
 _NAVIGATE_TIMEOUT = 30.0
+_PAGE_OPERATION_TIMEOUT = 45.0
+_CHALLENGE_SETTLE_SECONDS = 0.1
+_CHALLENGE_RECHECK_SECONDS = 0.25
 _ENGINE_PROBE_TIMEOUT = 5.0
 _PAGE_SETTLE_TIMEOUT = 5.0
+_ROTATION_GATE_TIMEOUT = 15.0
 
 _BACKOFF_BASE_SECONDS = 1.0
 _BACKOFF_CAP_SECONDS = 60.0
@@ -70,6 +74,11 @@ _BACKOFF_MAX_RETRIES = 3
 _CHALLENGE_MAX_RETRIES = 3
 
 _TERMINAL = frozenset({"completed", "failed", "cancelled"})
+
+_ENGINE_FAILURE_CODES = frozenset({
+    "engine_dead", "engine_degraded", "engine_health_timeout", "connection_lost",
+    "cdp_command_failed", "challenge_probe_failed", "extraction_failed",
+})
 
 # Allowed job state transitions, guarded by the single per-job lock.
 _ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
@@ -270,9 +279,11 @@ class _CrawlJob:
         # bounded result ledger
         self.results: deque[dict[str, Any]] = deque(maxlen=_MAX_RESULTS_LEDGER)
         self._result_seq = 0
+        self._page_budget_urls: set[str] = set()
 
         # counters
         self.pages_fetched = 0
+        self.attempts = 0
         self.succeeded = 0
         self.failed = 0
         self.dropped = 0
@@ -331,13 +342,17 @@ class _CrawlJob:
         return url, depth
 
     def _requeue_front(self, url: str, depth: int) -> None:
+        if url in self._queued:
+            return
+        if len(self._queue) >= _MAX_QUEUE:
+            # Keep the URL marked visited when no bounded retry slot exists;
+            # the loss is explicit in ``dropped`` rather than silently making
+            # the same URL eligible for a later duplicate fetch.
+            self.dropped += 1
+            return
         self._visited.discard(url)
-        if url not in self._queued:
-            if len(self._queue) >= _MAX_QUEUE:
-                self.dropped += 1
-                return
-            self._queue.appendleft((url, depth))
-            self._queued.add(url)
+        self._queue.appendleft((url, depth))
+        self._queued.add(url)
 
     def _retry_bump(self, url: str, kind: str) -> int:
         entry = self._retries.setdefault(url, {"backoff": 0, "challenge": 0})
@@ -359,6 +374,7 @@ class _CrawlJob:
         identity_hash: str | None = None,
         error: dict[str, str] | None = None,
         paused: bool = False,
+        count_as_failure: bool = True,
     ) -> None:
         entry: dict[str, Any] = {
             "index": self._result_seq,
@@ -381,7 +397,7 @@ class _CrawlJob:
         self._result_seq += 1
         if status == "success":
             self.succeeded += 1
-        else:
+        elif count_as_failure:
             self.failed += 1
 
     def _record_failed(
@@ -450,7 +466,8 @@ def _policy_payload(job: _CrawlJob) -> dict[str, Any]:
 
 async def _enter_backoff(job: _CrawlJob, *, retry_after: float | None, attempt: int) -> None:
     capped = min(_BACKOFF_CAP_SECONDS, _BACKOFF_BASE_SECONDS * (2 ** max(0, attempt - 1)))
-    wait = max(float(retry_after or 0.0), capped)
+    bounded_retry_after = min(_BACKOFF_CAP_SECONDS, max(0.0, float(retry_after or 0.0)))
+    wait = max(bounded_retry_after, capped)
     job.backoff_retry_after = float(retry_after) if retry_after is not None else None
     job.backoff_attempt = attempt
     job.backoff_until = time.time() + wait
@@ -497,6 +514,38 @@ async def _inter_iteration_delay(job: _CrawlJob) -> None:
         await asyncio.sleep(min(remaining, 0.5))
 
 
+async def _pin_crawl_tab(job: _CrawlJob) -> str | None:
+    """Keep every crawl operation on the tab captured at job start."""
+    from kahin.the_twins.mirage import Mirage  # noqa: PLC0415
+
+    engine = state._current_engine
+    if not isinstance(engine, Mirage):
+        return None
+    target_id = job.tab_id
+    if target_id is None:
+        try:
+            page = await asyncio.wait_for(engine.ensure_page(), timeout=_PAGE_SETTLE_TIMEOUT)
+        except Exception as exc:  # noqa: BLE001 - caller returns structured state
+            return _json_error("kahin_crawl", f"crawl tab is unavailable: {exc}", "crawl_tab_unavailable")
+        target_id = page.get("targetId") if isinstance(page, dict) else None
+        if isinstance(target_id, str):
+            job.tab_id = target_id
+            return None
+    if not isinstance(target_id, str) or target_id not in engine._sessions:
+        return _json_error(
+            "kahin_crawl",
+            "the crawl tab was closed or detached",
+            "crawl_tab_lost",
+            tabId=target_id,
+        )
+    if engine._current_target != target_id:
+        try:
+            await asyncio.wait_for(engine.switch_page(target_id), timeout=_PAGE_SETTLE_TIMEOUT)
+        except Exception as exc:  # noqa: BLE001 - do not silently crawl another tab
+            return _json_error("kahin_crawl", f"could not reselect the crawl tab: {exc}", "crawl_tab_unavailable")
+    return None
+
+
 async def _engine_gate(job: _CrawlJob, url: str, depth: int) -> bool:
     """Health gate before a page fetch. Returns True when the worker may
     proceed; False when the URL was already accounted for (requeued, recorded
@@ -505,11 +554,20 @@ async def _engine_gate(job: _CrawlJob, url: str, depth: int) -> bool:
 
     err = await _require_engine()
     if err is None:
+        tab_error = await _pin_crawl_tab(job)
+        if tab_error:
+            payload = _loads(tab_error) or {}
+            code = str(payload.get("code") or "crawl_tab_unavailable")
+            message = str(payload.get("error") or tab_error)[:500]
+            job.last_error = {"code": code, "message": message}
+            job._record_failed(url, depth, code, message)
+            await _transition(job, "failed", code)
+            return False
         return True
     payload = _loads(err) or {}
     code = str(payload.get("code") or "engine_unavailable")
     message = str(payload.get("error") or err)[:500]
-    if code == "engine_dead":
+    if code in {"engine_dead", "engine_degraded", "engine_health_timeout"}:
         if not await _recover_engine(job, url=url, depth=depth):
             return False
         job._requeue_front(url, depth)
@@ -519,7 +577,8 @@ async def _engine_gate(job: _CrawlJob, url: str, depth: int) -> bool:
         job._record_failed(url, depth, code, "engine was stopped while the crawl was running")
         await _transition(job, "failed", code)
         return False
-    # Degraded/health-timeout: capped backoff, then retry the same URL.
+    # Other transient health errors use bounded backoff, then retry the same
+    # URL without opening another browser.
     attempt = job._retry_bump(url, "backoff")
     if attempt > _BACKOFF_MAX_RETRIES:
         job._record_failed(url, depth, code, message)
@@ -561,6 +620,7 @@ async def _handle_challenge(job: _CrawlJob, url: str, depth: int, challenge: dic
             identity_hash=_active_identity_hash(),
             error={"code": f"challenge_{kind}", "message": "paused until explicit resume"},
             paused=True,
+            count_as_failure=False,
         )
         job._requeue_front(url, depth)
         job.resume_event.clear()
@@ -583,8 +643,12 @@ async def _handle_challenge(job: _CrawlJob, url: str, depth: int, challenge: dic
 
 
 async def _extract_page(job: _CrawlJob, url: str, depth: int) -> dict[str, Any] | None:
-    """Bounded DOM/title/link extraction on the current tab. Returns the
-    bounded payload or None after recording a failed result."""
+    """Bounded DOM/title/link extraction on the current tab.
+
+    Failure evidence is left on the job for ``_process_url`` to classify as a
+    transport recovery or an ordinary page failure; this prevents recording a
+    failed result before a crashed engine gets one chance to retry the URL.
+    """
     from kahin.tools._common import _mirage_eval_result  # noqa: PLC0415
 
     raw = await _mirage_eval_result(_EXTRACT_JS)
@@ -593,17 +657,14 @@ async def _extract_page(job: _CrawlJob, url: str, depth: int) -> dict[str, Any] 
         code = str(payload.get("code") or "extraction_failed")[:200]
         message = str(payload.get("error") or raw)[:500]
         job.last_error = {"code": code, "message": message}
-        job._record_failed(url, depth, code, message)
         return None
     if not isinstance(raw, dict) or raw.get("exceptionDetails"):
         job.last_error = {"code": "extraction_javascript_error", "message": "page extraction raised"}
-        job._record_failed(url, depth, "extraction_javascript_error", "page extraction raised")
         return None
     result = raw.get("result") or {}
     value = result.get("value") if isinstance(result, dict) else None
     if not isinstance(value, dict):
         job.last_error = {"code": "extraction_invalid_payload", "message": "extraction returned an invalid payload"}
-        job._record_failed(url, depth, "extraction_invalid_payload", "extraction returned an invalid payload")
         return None
     return {
         "title": str(value.get("title") or "")[:_MAX_TITLE_LENGTH],
@@ -683,13 +744,13 @@ async def _start_for_rotation(
         return False
     engine = state._current_engine
     new_hash = getattr(engine, "_identity_hash", None) if engine is not None else None
-    if require_different and previous_hash and new_hash and new_hash == previous_hash:
+    if require_different and (not previous_hash or not new_hash or new_hash == previous_hash):
         job.last_error = {
             "code": "rotation_identity_unchanged",
             "message": "restarted engine reported the same identity hash; refusing to continue",
         }
         return False
-    if isinstance(engine, type(state._current_engine)):
+    if engine is not None:
         try:
             page = await asyncio.wait_for(engine.ensure_page(), timeout=_PAGE_SETTLE_TIMEOUT)
             if isinstance(page, dict) and isinstance(page.get("targetId"), str):
@@ -700,10 +761,11 @@ async def _start_for_rotation(
 
 
 async def _rotate_engine(job: _CrawlJob, *, reason: str) -> bool:
-    """Stop and restart the engine while preserving queue/result/job state.
-    Rotation uses a fresh identity unless an explicit identity was given;
-    recovery reuses the captured launch identity. Returns False when the job
-    reached a terminal state (the worker must stop)."""
+    """Stop/restart while preserving queue/result state.
+
+    The captured identity is the configuration input, but every restart must
+    report a different effective fingerprint digest.
+    """
     async with job.rotation_gate:
         async with job.lock:
             if job.state != "running" or job.cancel_requested:
@@ -724,7 +786,7 @@ async def _rotate_engine(job: _CrawlJob, *, reason: str) -> bool:
         if job.cancel_requested:
             return False
         if not await _start_for_rotation(
-            job, identity=identity, previous_hash=previous_hash, require_different=reason == "rotation",
+            job, identity=identity, previous_hash=previous_hash, require_different=True,
         ):
             await _transition(job, "failed", "rotation_start_failed")
             return False
@@ -752,6 +814,40 @@ async def _recover_engine(job: _CrawlJob, *, url: str, depth: int) -> bool:
     return await _rotate_engine(job, reason="recovery")
 
 
+def _looks_like_engine_failure(code: str, message: str) -> bool:
+    lowered = f"{code} {message}".lower()
+    return (
+        code in _ENGINE_FAILURE_CODES
+        or any(marker in lowered for marker in (
+            "sidecar exited", "mirage is dead", "transport closed",
+            "stdin write timeout", "connection lost", "health probe",
+        ))
+    )
+
+
+async def _recover_failed_page(
+    job: _CrawlJob,
+    *,
+    url: str,
+    depth: int,
+    code: str,
+    message: str,
+    force_health_probe: bool = False,
+) -> str:
+    """Give a suspect page one bounded engine recovery before failing it."""
+    if not force_health_probe and not _looks_like_engine_failure(code, message):
+        return "not_needed"
+    health = await _engine_health_payload()
+    if health is not None and health.get("alive"):
+        return "not_needed"
+    if job.cancel_requested:
+        return "terminal"
+    if await _recover_engine(job, url=url, depth=depth):
+        job._requeue_front(url, depth)
+        return "requeued"
+    return "terminal"
+
+
 async def _process_url(job: _CrawlJob, url: str, depth: int) -> None:
     if not await _engine_gate(job, url, depth):
         return
@@ -762,10 +858,19 @@ async def _process_url(job: _CrawlJob, url: str, depth: int) -> None:
     if nav.get("error"):
         code = str(nav.get("code") or "navigation_failed")[:200]
         message = str(nav.get("error"))[:500]
+        outcome = await _recover_failed_page(job, url=url, depth=depth, code=code, message=message)
+        if outcome != "not_needed":
+            return
         job.last_error = {"code": code, "message": message}
         job._record_failed(url, depth, code, message)
         return
 
+    # Juggler reports the load lifecycle just before the page's final DOM
+    # turn is observable on some fast local/HTTP responses. Give the document
+    # one bounded scheduling window before classifying its body as a
+    # challenge; otherwise a previous 429 page can be mistaken for the fresh
+    # 200 retry and consume the retry budget.
+    await asyncio.sleep(_CHALLENGE_SETTLE_SECONDS)
     from kahin.tools.agent_mirage import challenge_status  # noqa: PLC0415
 
     challenge_raw = await challenge_status()
@@ -773,9 +878,21 @@ async def _process_url(job: _CrawlJob, url: str, depth: int) -> None:
     if challenge.get("error"):
         code = str(challenge.get("code") or "challenge_probe_failed")[:200]
         message = str(challenge.get("error"))[:500]
+        outcome = await _recover_failed_page(job, url=url, depth=depth, code=code, message=message)
+        if outcome != "not_needed":
+            return
         job.last_error = {"code": code, "message": message}
         job._record_failed(url, depth, code, message)
         return
+    if challenge.get("detected") and challenge.get("kind") == "rate_limit":
+        # A navigation can expose the previous document's 429 body for one
+        # event-loop turn while its fresh response is being committed. A
+        # single bounded recheck avoids consuming another retry slot for that
+        # stale observation, while a real rate-limit page remains detected.
+        await asyncio.sleep(_CHALLENGE_RECHECK_SECONDS)
+        rechecked = _loads(await challenge_status()) or {}
+        if not rechecked.get("error") and not rechecked.get("detected"):
+            challenge = rechecked
     if challenge.get("detected"):
         decision = await _handle_challenge(job, url, depth, challenge)
         if decision in ("paused", "requeued", "failed_page"):
@@ -786,6 +903,25 @@ async def _process_url(job: _CrawlJob, url: str, depth: int) -> None:
     else:
         payload = await _extract_page(job, url, depth)
         if payload is None:
+            error = job.last_error or {
+                "code": "extraction_failed",
+                "message": "page extraction failed",
+            }
+            outcome = await _recover_failed_page(
+                job,
+                url=url,
+                depth=depth,
+                code=str(error.get("code") or "extraction_failed"),
+                message=str(error.get("message") or "page extraction failed"),
+            )
+            if outcome != "not_needed":
+                return
+            job._record_failed(
+                url,
+                depth,
+                str(error.get("code") or "extraction_failed"),
+                str(error.get("message") or "page extraction failed"),
+            )
             return
 
     links = [link for link in payload.get("links", []) if isinstance(link, str)]
@@ -831,21 +967,49 @@ async def _run_job(job: _CrawlJob) -> None:
                 job._queued.clear()
                 await _transition(job, "completed", "duration_limit")
                 return
-            if job.pages_fetched >= int(job.config["maxPages"]):
+            if not await _wait_runnable(job):
+                return
+            if (
+                job.pages_fetched >= int(job.config["maxPages"])
+                and job._queue
+                and job._queue[0][0] not in job._page_budget_urls
+            ):
                 job.dropped += len(job._queue)
                 job._queue.clear()
                 job._queued.clear()
                 await _transition(job, "completed", "page_limit")
-                return
-            if not await _wait_runnable(job):
                 return
             item = job._pop()
             if item is None:
                 await _transition(job, "completed", "queue_drained")
                 return
             url, depth = item
-            job.pages_fetched += 1
-            await _process_url(job, url, depth)
+            job.attempts += 1
+            if url not in job._page_budget_urls:
+                job._page_budget_urls.add(url)
+                job.pages_fetched += 1
+            try:
+                await asyncio.wait_for(
+                    _process_url(job, url, depth),
+                    timeout=_PAGE_OPERATION_TIMEOUT,
+                )
+            except asyncio.TimeoutError:
+                message = f"page operation exceeded {_PAGE_OPERATION_TIMEOUT:.0f}s"
+                job.last_error = {"code": "page_timeout", "message": message}
+                outcome = await _recover_failed_page(
+                    job,
+                    url=url,
+                    depth=depth,
+                    code="page_timeout",
+                    message=message,
+                    force_health_probe=True,
+                )
+                if outcome == "not_needed":
+                    job._record_failed(url, depth, "page_timeout", message)
+            finally:
+                job.in_progress = False
+                job.current_url = None
+                job.current_depth = None
             await _inter_iteration_delay(job)
     except asyncio.CancelledError:
         await _transition(job, "cancelled", "user_stop")
@@ -924,6 +1088,7 @@ def _status_payload(job: _CrawlJob, engine_health: dict[str, Any] | None) -> dic
             "queued": queued,
             "visited": len(job._visited),
             "pagesFetched": job.pages_fetched,
+            "attempts": job.attempts,
             "succeeded": job.succeeded,
             "failed": job.failed,
             "inProgress": in_progress,
@@ -1380,9 +1545,27 @@ async def crawl_stop(jobId: str | None = None) -> str:
         # arriving during reaping cannot be followed by a surprise new boot.
         job.cancel_requested = True
         job.resume_event.set()
-        async with job.rotation_gate:
+        try:
+            await asyncio.wait_for(job.rotation_gate.acquire(), timeout=_ROTATION_GATE_TIMEOUT)
+        except asyncio.TimeoutError:
+            async with job.lock:
+                state_now = job.state
+            return _json_error(
+                tool,
+                f"crawl rotation is still in progress after {_ROTATION_GATE_TIMEOUT:.0f}s",
+                "rotation_in_progress",
+                jobId=job.job_id,
+                state=state_now,
+            )
+        try:
             transition_err = await _transition(job, "cancelled", "user_stop")
             if transition_err:
+                async with job.lock:
+                    if job.state == "cancelled":
+                        return orjson.dumps(
+                            {"jobId": job.job_id, "state": "cancelled", "alreadyStopped": True},
+                            option=orjson.OPT_INDENT_2,
+                        ).decode()
                 return transition_err
             task = job.task
             if task is not None and not task.done():
@@ -1393,6 +1576,8 @@ async def crawl_stop(jobId: str | None = None) -> str:
                     pass
                 except Exception:  # noqa: BLE001 - stop must return structured JSON
                     pass
+        finally:
+            job.rotation_gate.release()
         return orjson.dumps(
             {
                 "jobId": job.job_id,

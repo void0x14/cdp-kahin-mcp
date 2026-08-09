@@ -24,6 +24,9 @@ _last_engine_death: dict[str, Any] | None = None
 # browser processes before either one publishes its engine to this module.
 _lifecycle_lock = asyncio.Lock()
 _current_event_log: deque[dict[str, Any]] = deque(maxlen=5000)
+# Monotonic event marker used by navigation waits. The bounded deque may
+# evict entries, so its current length is not a stable cursor.
+_event_seq = 0
 _network_requests: deque[dict[str, Any]] = deque(maxlen=10000)
 _console_messages: deque[dict[str, Any]] = deque(maxlen=5000)
 _browser_lock_file: Any = None
