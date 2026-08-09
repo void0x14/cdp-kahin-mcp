@@ -76,7 +76,15 @@ def score_checks(checks: list[dict[str, Any]]) -> dict[str, Any]:
 # payload-free policy — safe to expose in MCP surfaces:
 # - ``headless`` follows the engine's headless flag so fingerprint
 #   generation (screen/mediaDevices) matches the real headless/visible mode;
-# - ``humanize=True`` enables Camoufox's humanized input layer;
+# - ``humanize=False`` keeps Camoufox's C++ humanized input layer OFF. With
+#   humanize=True the browser expands every mousemove into a multi-point
+#   trajectory whose intermediate points each await a renderer ack; when a
+#   point's ack is dropped (event coalescing on short moves) the
+#   Page.dispatchMouseEvent call never resolves and the whole input channel
+#   wedges behind it. Kahin's own humanization (Bezier trajectories,
+#   jittered clicks, typing cadence in kahin/humanize.py) dispatches one
+#   point per RPC and waits for its response, so it is safe without the
+#   broken browser-side trajectory layer;
 # - ``enable_cache=True`` keeps Firefox's cache on (bounded memory cost,
 #   real crawl continuity);
 # - ``block_webgl=False`` keeps WebGL enabled with its sampled fingerprint —
@@ -89,7 +97,7 @@ def launch_policy(headless: bool = True) -> dict[str, Any]:
     """The fixed Camoufox launch policy bound on every Mirage start."""
     return {
         "headless": bool(headless),
-        "humanize": True,
+        "humanize": False,
         "enable_cache": True,
         "block_webgl": False,
         "main_world_eval": False,
