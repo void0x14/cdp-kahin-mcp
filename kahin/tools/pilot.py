@@ -1014,8 +1014,14 @@ async def screenshot(full_page: bool = False) -> str:
                     maxPayloadBytes=_MAX_SCREENSHOT_BYTES,
                     hint="Use the mobile viewport or a non-full-page screenshot.",
                 )
-            b64 = base64.b64encode(data).decode()
-            return orjson.dumps({"screenshot": b64, "format": "png"}, option=orjson.OPT_INDENT_2).decode()
+            from pathlib import Path as _P
+            import time as _t
+            out_dir = _P("screenshots")
+            out_dir.mkdir(parents=True, exist_ok=True)
+            fname = f"screenshot-{int(_t.time()*1000)}.png"
+            fpath = out_dir / fname
+            fpath.write_bytes(bytes(data))
+            return orjson.dumps({"path": str(fpath.resolve()), "format": "png", "bytes": len(data)}, option=orjson.OPT_INDENT_2).decode()
     except Exception as exc:  # noqa: BLE001 - visual tools must never leak exceptions
         return _json_error("kahin_screenshot", f"Screenshot failed: {exc}", "tool_failed")
 

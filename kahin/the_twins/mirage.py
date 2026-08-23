@@ -1366,7 +1366,47 @@ class Mirage(BrowserEngine):
                     self._current_target = next(iter(self._sessions))
                     target_id = self._current_target
                 return {"targetId": target_id, "sessionId": self._sessions[target_id]}
+            adopted = await self._adopt_existing_window()
+            if adopted is not None:
+                return adopted
             return await self.create_page("about:blank")
+
+    async def _adopt_existing_window(self) -> dict[str, Any] | None:
+        """Adopt the window Camoufox already opened at boot instead of opening
+        a second one via Browser.newPage (Juggler newPage creates a fresh
+        toplevel window, one tab per window).
+
+        The boot window is not announced through attachedToTarget, so
+        _sessions stays empty. Probe Target.getTargets and attach to the
+        first page target ourselves so no second window is ever spawned.
+        """
+        for _ in range(10):
+            try:
+                result = await self.call("Target.getTargets", {})
+            except Exception:
+                result = None
+            infos = (result or {}).get("targetInfos") or []
+            if infos:
+                break
+            await asyncio.sleep(0.1)
+        for info in infos:
+            tid = info.get("targetId")
+            if not isinstance(tid, str) or tid in self._sessions:
+                continue
+            info_type = info.get("type")
+            if info_type not in (None, "page"):
+                continue
+            try:
+                await self.call("Target.attachToTarget", {"targetId": tid})
+            except Exception:
+                continue
+            sid = self._sessions.get(tid)
+            if not sid:
+                continue
+            async with self._target_lock:
+                self._current_target = tid
+            return {"targetId": tid, "sessionId": sid}
+        return None
 
     async def close_page(self, target_id: str) -> dict[str, Any]:
         """Close a tab (Page.close) and forget its Juggler session."""
