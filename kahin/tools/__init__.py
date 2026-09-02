@@ -21,6 +21,7 @@ from kahin.tools import dialog_mirage  # noqa: F401
 from kahin.tools import dom_stream_mirage  # noqa: F401
 from kahin.tools import emulation_mirage  # noqa: F401
 from kahin.tools import engine  # noqa: F401
+from kahin.tools import extensions_mirage  # noqa: F401
 from kahin.tools import grimoire  # noqa: F401
 from kahin.tools import healer  # noqa: F401
 from kahin.tools import pilot  # noqa: F401
@@ -37,6 +38,7 @@ from kahin.tools import trainman  # noqa: F401
 from kahin.tools import trainman_mirage  # noqa: F401
 from kahin.tools import trainman_obscura  # noqa: F401
 from kahin.tools import upload_mirage  # noqa: F401
+from kahin.tools import visualization  # noqa: F401
 
 __all__ = [
     "agent_mirage",
@@ -48,6 +50,7 @@ __all__ = [
     "dialog_mirage",
     "dom_stream_mirage",
     "emulation_mirage",
+    "extensions_mirage",
     "engine",
     "grimoire",
     "healer",
@@ -64,4 +67,5 @@ __all__ = [
     "trainman_mirage",
     "trainman_obscura",
     "upload_mirage",
+    "visualization",
 ]

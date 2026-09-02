@@ -44,6 +44,9 @@ def test_server_initialize_and_list_tools() -> None:
     assert "kahin_pattern_suggest" in tool_names
     assert "kahin_pattern_forget" in tool_names
     assert "kahin_pattern_stats" in tool_names
+    assert "kahin_crawl_events" in tool_names
+    assert "kahin_visualize_data" in tool_names
+    assert "kahin_extension_prepare" in tool_names
     # Faz 9 Task 3: 32 existing + 65 new Juggler-native tools = 97.
     # Gap C: +2 upload tools (set_file_chooser_intercept, upload_files) = 99.
     # Gap D: +4 screencast tools (start, frame, stop, pending) = 103.
@@ -64,8 +67,9 @@ def test_server_initialize_and_list_tools() -> None:
     # Faz 3 Task 5: +2 proxy/geo + fingerprint report tools = 138.
     # Faz 4 Task 3: +1 engine stats tool (kahin_engine_stats) = 139.
     # Faz 4 crawler contract: +1 challenge status + 6 single-engine crawler
-    # lifecycle tools = 146.
-    assert len(tools) == 146
+    # lifecycle tools = 146. Live crawl event deltas and visualization add
+    # two observers = 148. Extension staging adds 1 = 149.
+    assert len(tools) == 149
     assert "kahin_mirage_dom_start" in tool_names
     assert "kahin_mirage_dom_snapshot" in tool_names
     assert "kahin_mirage_dom_events" in tool_names

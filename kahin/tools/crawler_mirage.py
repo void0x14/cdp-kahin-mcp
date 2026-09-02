@@ -48,6 +48,7 @@ logger = logging.getLogger(__name__)
 
 _MAX_QUEUE = 10_000
 _MAX_RESULTS_LEDGER = 10_000
+_MAX_EVENTS_PER_JOB = 10_000
 _MAX_RESULTS_PER_RESPONSE = 100
 _MAX_RESULT_LINKS = 100
 _MAX_TITLE_LENGTH = 500
@@ -59,6 +60,7 @@ _MAX_RECOVERY_IDENTITY_BYTES = 1 * 1024 * 1024
 _MAX_PROXY_LENGTH = 4_096
 _MAX_RETAINED_JOBS = 20
 _RESPONSE_MAX_BYTES = 8 * 1024 * 1024
+_EVENT_RESPONSE_MAX_BYTES = 2 * 1024 * 1024
 
 _NAVIGATE_TIMEOUT = 30.0
 _PAGE_OPERATION_TIMEOUT = 45.0
@@ -72,6 +74,7 @@ _BACKOFF_BASE_SECONDS = 1.0
 _BACKOFF_CAP_SECONDS = 60.0
 _BACKOFF_MAX_RETRIES = 3
 _CHALLENGE_MAX_RETRIES = 3
+_EVENT_WAIT_MAX_MS = 30_000
 
 _TERMINAL = frozenset({"completed", "failed", "cancelled"})
 
@@ -247,6 +250,89 @@ def _bounded_bool(value: Any, *, tool: str, field: str, default: bool) -> tuple[
     return value, None
 
 
+_EVENT_STRING_MAX = 500
+
+
+def _event_scalar(value: Any) -> Any:
+    """Keep event payloads JSON-safe and bounded."""
+    if isinstance(value, bool) or value is None:
+        return value
+    if isinstance(value, (int, float)):
+        return value
+    if isinstance(value, str):
+        return value[:_EVENT_STRING_MAX]
+    if isinstance(value, (list, tuple)):
+        return [_event_scalar(item) for item in value[:20]]
+    return str(value)[:_EVENT_STRING_MAX]
+
+
+def _event_payload(job: "_CrawlJob", *, cursor: int, limit: int) -> str:
+    """Serialize one bounded event window using monotonic event cursors."""
+    ledger = list(job.events)
+    oldest_cursor = (
+        int(ledger[0].get("index"))
+        if ledger and isinstance(ledger[0].get("index"), int)
+        else job._event_seq
+    )
+    start = max(cursor, oldest_cursor)
+    cursor_reset = cursor < oldest_cursor
+    selected = [
+        event
+        for event in ledger
+        if isinstance(event.get("index"), int) and int(event["index"]) >= start
+    ][:limit]
+    next_cursor = (
+        int(selected[-1]["index"]) + 1
+        if selected and isinstance(selected[-1].get("index"), int)
+        else start
+    )
+    has_more = any(
+        isinstance(event.get("index"), int) and int(event["index"]) >= next_cursor
+        for event in ledger
+    )
+    payload: dict[str, Any] = {
+        "jobId": job.job_id,
+        "cursor": start,
+        "oldestCursor": oldest_cursor,
+        "cursorReset": cursor_reset,
+        "limit": limit,
+        "count": len(selected),
+        "nextCursor": next_cursor,
+        "hasMore": has_more,
+        "events": selected,
+    }
+    raw = orjson.dumps(payload, option=orjson.OPT_INDENT_2).decode()
+    if len(raw) <= _EVENT_RESPONSE_MAX_BYTES:
+        return raw
+    payload["events"] = selected[: max(1, limit // 2)]
+    payload["count"] = len(payload["events"])
+    if payload["events"]:
+        payload["nextCursor"] = int(payload["events"][-1]["index"]) + 1
+        payload["hasMore"] = True
+    payload["truncated"] = True
+    return orjson.dumps(payload, option=orjson.OPT_INDENT_2).decode()
+
+
+async def _wait_for_events(
+    job: "_CrawlJob",
+    *,
+    cursor: int,
+    limit: int,
+    wait_ms: int,
+) -> str:
+    """Return events now or wait once for a newer event."""
+    if orjson.loads(_event_payload(job, cursor=cursor, limit=limit)).get("events") or wait_ms <= 0:
+        return _event_payload(job, cursor=cursor, limit=limit)
+    job.event_signal.clear()
+    if orjson.loads(_event_payload(job, cursor=cursor, limit=limit)).get("events"):
+        return _event_payload(job, cursor=cursor, limit=limit)
+    try:
+        await asyncio.wait_for(job.event_signal.wait(), timeout=wait_ms / 1000)
+    except asyncio.TimeoutError:
+        pass
+    return _event_payload(job, cursor=cursor, limit=limit)
+
+
 class _CrawlJob:
     """One crawl job. Every state transition is guarded by ``self.lock``."""
 
@@ -280,6 +366,13 @@ class _CrawlJob:
         self.results: deque[dict[str, Any]] = deque(maxlen=_MAX_RESULTS_LEDGER)
         self._result_seq = 0
         self._page_budget_urls: set[str] = set()
+
+        # Live progress ledger. Result cursors remain focused on page data;
+        # this separate bounded stream lets callers observe queue/state
+        # changes without repeatedly downloading the result window.
+        self.events: deque[dict[str, Any]] = deque(maxlen=_MAX_EVENTS_PER_JOB)
+        self._event_seq = 0
+        self.event_signal = asyncio.Event()
 
         # counters
         self.pages_fetched = 0
@@ -318,6 +411,21 @@ class _CrawlJob:
         self.launch_proxy: str | None = None
         self.task: asyncio.Task[Any] | None = None
 
+    def _record_event(self, kind: str, **payload: Any) -> None:
+        """Append one bounded progress event and wake long-poll readers."""
+        event: dict[str, Any] = {
+            "index": self._event_seq,
+            "kind": str(kind)[:_EVENT_STRING_MAX],
+            "at": time.time(),
+        }
+        for key, value in payload.items():
+            if key == "cookies" or key == "proxy":
+                continue
+            event[str(key)[:80]] = _event_scalar(value)
+        self.events.append(event)
+        self._event_seq += 1
+        self.event_signal.set()
+
     # --- bounded queue primitives -----------------------------------------
 
     def _enqueue(self, url: str, depth: int) -> bool:
@@ -339,6 +447,13 @@ class _CrawlJob:
         self.current_url = url
         self.current_depth = depth
         self.in_progress = True
+        self._record_event(
+            "page_started",
+            state=self.state,
+            currentUrl=url,
+            currentDepth=depth,
+            queued=len(self._queue),
+        )
         return url, depth
 
     def _requeue_front(self, url: str, depth: int) -> None:
@@ -399,6 +514,17 @@ class _CrawlJob:
             self.succeeded += 1
         elif count_as_failure:
             self.failed += 1
+        self._record_event(
+            "page_finished",
+            state=self.state,
+            url=url,
+            status=status,
+            depth=depth,
+            pagesFetched=self.pages_fetched,
+            succeeded=self.succeeded,
+            failed=self.failed,
+            queued=len(self._queue),
+        )
 
     def _record_failed(
         self, url: str, depth: int, code: str, message: str, *, paused: bool = False,
@@ -438,6 +564,17 @@ async def _transition(job: _CrawlJob, new_state: str, reason: str, **meta: Any) 
             job.current_depth = None
         for key, value in meta.items():
             setattr(job, key, value)
+        job._record_event(
+            "state",
+            state=new_state,
+            reason=reason,
+            stateSeq=job.state_seq,
+            queued=len(job._queue),
+            pagesFetched=job.pages_fetched,
+            succeeded=job.succeeded,
+            failed=job.failed,
+            currentUrl=job.current_url,
+        )
         return None
 
 
@@ -1438,6 +1575,52 @@ async def crawl_status(jobId: str | None = None) -> str:
             return err
         health = await _engine_health_payload()
         return orjson.dumps(_status_payload(job, health), option=orjson.OPT_INDENT_2).decode()
+
+
+@mcp.tool(name="kahin_crawl_events", annotations=_RO)
+async def crawl_events(
+    jobId: str | None = None,
+    cursor: int = 0,
+    limit: int = 100,
+    waitMs: int = 0,
+) -> str:
+    """Read live crawl progress deltas with an optional bounded long-poll."""
+    tool = "kahin_crawl_events"
+    async with _healer_ref.safe(tool, jobId=jobId, cursor=cursor, limit=limit, waitMs=waitMs):
+        job, err = _resolve_job(tool, jobId)
+        if err:
+            return err
+        if isinstance(cursor, bool) or not isinstance(cursor, int) or cursor < 0:
+            return _json_error(
+                tool, "cursor must be a non-negative integer", "invalid_argument", field="cursor",
+            )
+        limit_value, limit_err = _bounded_int(
+            limit,
+            tool=tool,
+            field="limit",
+            minimum=1,
+            maximum=_MAX_RESULTS_PER_RESPONSE,
+            default=100,
+        )
+        if limit_err:
+            return limit_err
+        wait_value, wait_err = _bounded_int(
+            waitMs,
+            tool=tool,
+            field="waitMs",
+            minimum=0,
+            maximum=_EVENT_WAIT_MAX_MS,
+            default=0,
+        )
+        if wait_err:
+            return wait_err
+        assert limit_value is not None and wait_value is not None
+        return await _wait_for_events(
+            job,
+            cursor=cursor,
+            limit=limit_value,
+            wait_ms=wait_value,
+        )
 
 
 @mcp.tool(name="kahin_crawl_results", annotations=_RO)
