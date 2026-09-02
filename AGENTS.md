@@ -66,7 +66,7 @@ kahin_pattern_query(context="doggystyle")
 kahin_pattern_suggest(partial="navig")
 ```
 
-## Tool Listesi (146 adet)
+## Tool Listesi (149 adet)
 
 Juggler/Mirage yüzeyinin ajana dönük, uçtan uca sözleşmesi:
 [docs/juggler-ai-native.md](docs/juggler-ai-native.md)
@@ -298,6 +298,7 @@ identity rotasyonu tam fingerprint özetini değiştirmek zorundadır
 | `kahin_crawl_start` | Tek Mirage browser/tab üzerinde bounded background crawler job başlatır; varsayılan rotation 20 sayfa veya 900 saniyedir |
 | `kahin_crawl_status` | Job state, queue, sonuç, challenge, rotation, recovery ve engine health özetini döndürür |
 | `kahin_crawl_results` | Opaque cursor ile en fazla 100 bounded crawl sonucunu döndürür |
+| `kahin_crawl_events` | Bounded monotonic cursor ve opsiyonel long-poll ile canlı crawl ilerleme delta'larını okur |
 | `kahin_crawl_pause` / `kahin_crawl_resume` | Challenge sonrası açık insan/provider kararıyla job'ı durdurur/devam ettirir; bypass yapmaz |
 | `kahin_crawl_stop` | Background job'ı durdurur; browser'ı otomatik kapatmaz |
 
@@ -305,6 +306,17 @@ Crawler tek engine slotunu korur; ikinci browser veya gizli crawler tabı açmaz
 429/503 için Retry-After ve bounded backoff uygular. CAPTCHA/access-denied
 durumunda `paused` kalır; resume challenge çözmez ve identity rotation'ı
 rate-limit kaçış yolu olarak kullanmaz.
+### VISUALIZATION (1)
+
+| Tool | Ne işe yarar? |
+|------|---------------|
+| `kahin_visualize_data` | Bounded satırlardan deterministik line/bar/scatter/pie SVG grafiği ve özet üretir |
+
+### EXTENSIONS (1)
+
+| Tool | Ne işe yarar? |
+|------|---------------|
+| `kahin_extension_prepare` | Gerçek WebExtension'ı güvenle stage eder ve Camoufox yerel uyumluluk raporunu döner |
 
 ### Faz 4 — Performans (Zig sidecar + metrik yüzeyi)
 

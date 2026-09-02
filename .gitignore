@@ -18,3 +18,8 @@ zig-out/
 dist/
 npm/*.tgz
 camoufox-harness/core/root
+
+# Never track
+.codex/
+.ffs/
+.playwright-mcp/

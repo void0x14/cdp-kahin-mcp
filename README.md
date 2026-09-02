@@ -16,7 +16,7 @@ AI modeller Chrome'un içine girip sayfa gezip kod çalıştırabilir ama CDP'yi
 
 56 domain, 667 komut, 237 event, 609 type — Chrome 148 protokolü gömülü.
 
-## 146 Tool · 5 Kategori Ailesi · 2 Engine
+## 149 Tool · 5 Kategori Ailesi · 2 Engine
 
 Tool'lar engine-ayrımlı kategori dosyalarında (`kahin/tools/`): paylaşılan çekirdek + Obscura + Camoufox aileleri.
 
@@ -30,10 +30,12 @@ Tool'lar engine-ayrımlı kategori dosyalarında (`kahin/tools/`): paylaşılan 
 |  PROPHECY — Pattern DB | Kullanım desenlerini öğren, sorgula, öner | 5 |
 |  HEALER | Hata istatistikleri | 1 |
 |  MIRAGE — Camoufox Native (104) | Juggler protokolü üstünde gerçek-zamanlı DOM stream, DOM, Reliability, Input, PageEx, Tab, Network, Storage, Emulation, Dialog/Download/Worker/WS, Upload, Screencast, Accessibility, Engine sağlığı/istatistik, Agent-native snapshot/form/state/identity/status/challenge, Stealth audit/insansı girdi/identity rotasyonu/proxy-geo | 104 |
-|  ORBIT — Long Crawler (6) | Tek Mirage browser/tab üzerinde bounded background crawl, sonuç cursor'ı, rate-limit backoff, challenge pause/resume, rotation ve cancel | 6 |
+|  ORBIT — Long Crawler (7) | Tek Mirage browser/tab üzerinde bounded background crawl, canlı crawl event stream (`kahin_crawl_events`), sonuç cursor'ı, rate-limit backoff, challenge pause/resume, rotation ve cancel | 7 |
+|  VISUALIZATION (1) | Deterministik SVG görselleştirme (`kahin_visualize_data`) | 1 |
+|  EXTENSIONS (1) | Güvenli WebExtension hazırlama ve uyumluluk raporu (`kahin_extension_prepare`) | 1 |
 |  OBSCURA — Ayrı kategori | Obscura'ya özel tool'lar (hazırlanıyor) | 0 |
 
-**Toplam: 146 tool.**
+**Toplam: 149 tool.**
 
 ## Bir satırda özet
 

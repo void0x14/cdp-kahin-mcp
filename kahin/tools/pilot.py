@@ -12,6 +12,7 @@ import asyncio
 import base64
 import logging
 import time
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
@@ -21,7 +22,7 @@ from kahin import _state as state
 from kahin._mcp import mcp
 from kahin.oracle import _on_cdp_event, _on_console_event, _on_engine_death, _on_network_event
 from kahin.the_twins.capabilities import capabilities_for
-from kahin.the_twins.mirage import Mirage
+from kahin.the_twins.mirage import Mirage, _profile_directory
 from kahin.the_twins.shadow import Obscura
 from kahin.tools._common import (
     _DW,
@@ -49,6 +50,7 @@ _NAVIGATE_WAIT_UNTIL = ("commit", "domcontentloaded", "load", "networkidle")
 _NAVIGATE_IDLE_QUIET = 0.5
 _NAVIGATE_MAX_TIMEOUT = 120.0
 _MAX_IDENTITY_PAYLOAD = 16 * 1024 * 1024
+_MAX_PROFILE_DIR_LENGTH = 4_096
 
 
 def _json_error(tool: str, message: str, code: str = "tool_error", **details: Any) -> str:
@@ -289,6 +291,57 @@ def _engine_config_conflict(
     }
 
 
+def _profile_config_conflict(
+    engine: Any,
+    *,
+    persistent: bool,
+    profile_dir: Path | None,
+) -> dict[str, Any] | None:
+    """Reject a reuse request that would silently choose another profile."""
+    active_persistent = bool(getattr(engine, "_persistent_profile", False))
+    active_path = getattr(engine, "_profile_dir", None)
+    if active_persistent == persistent and (
+        not persistent or active_path == profile_dir
+    ):
+        return None
+    return {
+        "error": "Engine already running with a different profile configuration.",
+        "hint": "Stop the engine with kahin_browser_stop, then start again with the requested profile.",
+        "code": "engine_config_conflict",
+        "requested": {
+            "persistent_profile": persistent,
+            "profile_dir": str(profile_dir) if profile_dir is not None else None,
+        },
+        "active": {
+            "persistent_profile": active_persistent,
+            "profile_dir": str(active_path) if isinstance(active_path, Path) else None,
+        },
+    }
+def _addons_start_summary(engine: Any) -> list[str]:
+    addons = getattr(engine, "_addons", None)
+    if isinstance(addons, list):
+        return [str(item) for item in addons]
+    return []
+
+
+def _addons_config_conflict(
+    engine: Any,
+    *,
+    addons: list[str] | None,
+) -> dict[str, Any] | None:
+    active_addons = getattr(engine, "_addons", []) or []
+    requested_addons = addons or []
+    if active_addons == requested_addons:
+        return None
+    return {
+        "error": "Engine already running with a different addons configuration.",
+        "hint": "Stop the engine with kahin_browser_stop, then start again with the requested addons.",
+        "code": "engine_config_conflict",
+        "requested": {"addons": requested_addons},
+        "active": {"addons": active_addons},
+    }
+
+
 def _identity_start_summary(engine: Any) -> dict[str, Any] | None:
     """Expose bounded identity metadata without returning fingerprint data.
 
@@ -309,6 +362,14 @@ def _identity_start_summary(engine: Any) -> dict[str, Any] | None:
     }
 
 
+def _profile_start_summary(engine: Any) -> dict[str, Any]:
+    path = getattr(engine, "_profile_dir", None)
+    return {
+        "persistent": bool(getattr(engine, "_persistent_profile", False)),
+        "path": str(path) if isinstance(path, Path) else None,
+    }
+
+
 @mcp.tool(name="kahin_browser_start", annotations=_RW)
 async def browser_start(
     engine: str = "mirage",
@@ -316,6 +377,9 @@ async def browser_start(
     port: int = 0,
     identity: str | dict[str, Any] | None = None,
     proxy: str | None = None,
+    persistent_profile: bool = True,
+    profile_dir: str | None = None,
+    addons: list[str] | None = None,
 ) -> str:
     """Start or reuse one browser engine.
 
@@ -336,6 +400,10 @@ async def browser_start(
     The summary always carries the active bounded ``identity.hash`` (fresh
     BrowserForge digest or the pinned identity's config hash) and the
     enabled ``identity.stealth`` launch policy, configured or not.
+    By default the Mirage profile is persistent, so native cookies and web
+    storage survive a clean browser restart. Set ``persistent_profile=False``
+    for a disposable profile; ``profile_dir`` selects an explicit absolute
+    persistent directory.
     """
     if not isinstance(engine, str):
         return _json_error("kahin_browser_start", "engine must be a string", "invalid_argument", field="engine")
@@ -350,6 +418,99 @@ async def browser_start(
             "reserved_port",
             field="port",
         )
+    if not isinstance(persistent_profile, bool):
+        return _json_error(
+            "kahin_browser_start",
+            "persistent_profile must be a boolean",
+            "invalid_argument",
+            field="persistent_profile",
+        )
+    if profile_dir is not None:
+        profile_dir, profile_error = _validate_text(
+            profile_dir,
+            tool="kahin_browser_start",
+            field="profile_dir",
+            maximum=_MAX_PROFILE_DIR_LENGTH,
+        )
+        if profile_error:
+            return profile_error
+        if not persistent_profile:
+            return _json_error(
+                "kahin_browser_start",
+                "profile_dir requires persistent_profile=true",
+                "invalid_argument",
+                field="profile_dir",
+            )
+        try:
+            _profile_directory(True, profile_dir)
+        except ValueError as exc:
+            return _json_error(
+                "kahin_browser_start",
+                str(exc),
+                "invalid_argument",
+                field="profile_dir",
+            )
+    try:
+        requested_profile, requested_persistent = _profile_directory(
+            persistent_profile,
+            profile_dir,
+        )
+    except ValueError as exc:
+        return _json_error(
+            "kahin_browser_start",
+            str(exc),
+            "invalid_argument",
+            field="profile_dir",
+        )
+    if addons is not None:
+        if not isinstance(addons, list):
+            return _json_error(
+                "kahin_browser_start",
+                "addons must be a list of staged addon directory paths",
+                "invalid_argument",
+                field="addons",
+            )
+        if len(addons) > 16:
+            return _json_error(
+                "kahin_browser_start",
+                "addons exceeds maximum 16 extensions",
+                "invalid_argument",
+                field="addons",
+            )
+        for idx, item in enumerate(addons):
+            if not isinstance(item, str) or not item.strip():
+                return _json_error(
+                    "kahin_browser_start",
+                    "addon item must be a non-empty string",
+                    "invalid_argument",
+                    field=f"addons[{idx}]",
+                )
+            if len(item) > 4096:
+                return _json_error(
+                    "kahin_browser_start",
+                    "addon path exceeds 4096 characters",
+                    "invalid_argument",
+                    field=f"addons[{idx}]",
+                )
+            from kahin.extensions import inspect_extension
+            try:
+                report = inspect_extension(item)
+                if not report.get("compatible"):
+                    unsupported_str = ", ".join(report.get("unsupported", []))
+                    return _json_error(
+                        "kahin_browser_start",
+                        f"Addon '{item}' is not compatible: {unsupported_str}",
+                        "addon_incompatible",
+                        field=f"addons[{idx}]",
+                        unsupported=report.get("unsupported", []),
+                    )
+            except (OSError, ValueError) as exc:
+                return _json_error(
+                    "kahin_browser_start",
+                    str(exc),
+                    "invalid_argument",
+                    field=f"addons[{idx}]",
+                )
     if identity is not None and not isinstance(identity, (str, dict)):
         return _json_error(
             "kahin_browser_start",
@@ -469,6 +630,19 @@ async def browser_start(
                         # active configuration is a conflict, never silently
                         # ignored (Faz 3 Task 5).
                         if current_kind == "mirage":
+                            profile_conflict = _profile_config_conflict(
+                                current,
+                                persistent=requested_persistent,
+                                profile_dir=requested_profile,
+                            )
+                            if profile_conflict is not None:
+                                return orjson.dumps(profile_conflict, option=orjson.OPT_INDENT_2).decode()
+                            addons_conflict = _addons_config_conflict(
+                                current,
+                                addons=addons,
+                            )
+                            if addons_conflict is not None:
+                                return orjson.dumps(addons_conflict, option=orjson.OPT_INDENT_2).decode()
                             conflict = _engine_config_conflict(
                                 current,
                                 proxy=proxy_value,
@@ -495,6 +669,8 @@ async def browser_start(
                             "engine": current_kind,
                             "capabilities": capabilities_for(current_kind),
                             "identity": _identity_start_summary(current),
+                            "profile": _profile_start_summary(current),
+                            "addons": _addons_start_summary(current),
                             "message": "Engine already running; reusing the existing browser and tabs.",
                             "port": current_port or 0,
                             "tabs": tabs,
@@ -546,6 +722,9 @@ async def browser_start(
                         "identity": identity_config,
                         "identity_name": identity_name,
                         "proxy": proxy_value,
+                        "persistent_profile": persistent_profile,
+                        "profile_dir": profile_dir,
+                        "addons": addons,
                     }
                 await asyncio.wait_for(
                     candidate.start(headless=headless, port=actual_port, **start_kwargs),
@@ -611,6 +790,8 @@ async def browser_start(
                 "engine": "mirage" if engine == "camoufox" else engine,
                 "capabilities": capabilities_for("mirage" if engine == "camoufox" else engine),
                 "identity": _identity_start_summary(candidate),
+                "profile": _profile_start_summary(candidate),
+                "addons": _addons_start_summary(candidate),
                 "port": actual_port,
                 "tabs": tabs,
                 "hint": "Reuse this browser; for separate work create/switch a Mirage tab.",

@@ -78,6 +78,41 @@ _PREWARM_METADATA_MAX = 4096  # bytes written per identity
 _PREWARM_READ_MAX = 8192  # refuse metadata files larger than this
 _PREWARM_CACHE: dict[str, dict[str, Any]] = {}
 
+_PROFILE_DIR_ENV = "KAHIN_PROFILE_DIR"
+_PROFILE_DIR_MAX_LENGTH = 4096
+
+
+def _profile_directory(
+    persistent: bool,
+    configured: str | None,
+) -> tuple[Path | None, bool]:
+    """Resolve the browser profile policy without touching the filesystem.
+
+    The default profile is deliberately stable so Firefox can retain its
+    native cookies, web storage and other session data between launches.
+    Tests and callers that need a disposable browser can opt out explicitly;
+    the old temporary-profile behavior is preserved for that path.
+    """
+    if not persistent:
+        return None, False
+    if configured is not None:
+        if not isinstance(configured, str) or not configured.strip():
+            raise ValueError("profile directory must be a non-empty absolute path")
+        raw = configured.strip()
+    else:
+        raw = os.environ.get(_PROFILE_DIR_ENV, "").strip()
+    if raw:
+        path = Path(raw).expanduser()
+    else:
+        data_home = os.environ.get("XDG_DATA_HOME", "").strip()
+        root = Path(data_home).expanduser() if data_home else Path.home() / ".local" / "share"
+        path = root / "kahin" / "profile"
+    if len(str(path)) > _PROFILE_DIR_MAX_LENGTH:
+        raise ValueError(f"profile directory exceeds {_PROFILE_DIR_MAX_LENGTH} characters")
+    if not path.is_absolute():
+        raise ValueError("profile directory must be an absolute path")
+    return path, True
+
 
 def _profile_cache_dir() -> Path:
     """Bounded cache root for per-identity pre-warm metadata."""
@@ -378,6 +413,8 @@ class Mirage(BrowserEngine):
         self._stderr_file = None
         self._stderr_path: Path | None = None
         self._profile_dir: Path | None = None
+        self._persistent_profile = False
+        self._addons: list[str] = []
         # Active identity applied at launch (Faz 2 Task 5): the resolved
         # fingerprint config plus the saved identity name it came from.
         # Retained only while this engine is running, for
@@ -495,6 +532,32 @@ class Mirage(BrowserEngine):
         self._prewarm_info = None
         self._launch_policy = None
         self._started_monotonic = None
+        self._persistent_profile = False
+        configured_profile = kwargs.get("profile_dir")
+        persistent_profile = kwargs.get("persistent_profile", True)
+        if not isinstance(persistent_profile, bool):
+            raise ValueError("persistent_profile must be a boolean")
+        profile_dir, self._persistent_profile = _profile_directory(
+            persistent_profile,
+            configured_profile,
+        )
+        addons_input = kwargs.get("addons")
+        validated_addons: list[str] = []
+        if addons_input is not None:
+            if not isinstance(addons_input, (list, tuple)):
+                raise ValueError("addons must be a list of staged addon directory paths")
+            if len(addons_input) > 16:
+                raise ValueError("addons exceeds maximum 16 extensions")
+            from kahin.extensions import inspect_extension
+            for item in addons_input:
+                if not isinstance(item, str) or not item.strip():
+                    raise ValueError("addon item must be a non-empty string")
+                report = inspect_extension(item)
+                if not report.get("compatible"):
+                    unsupported_str = ", ".join(report.get("unsupported", []))
+                    raise ValueError(f"Addon '{item}' is not compatible: {unsupported_str}")
+                validated_addons.append(report["path"])
+        self._addons = validated_addons
         identity_config = kwargs.get("identity")
         identity_name = kwargs.get("identity_name")
         self._identity_config = (
@@ -541,6 +604,8 @@ class Mirage(BrowserEngine):
         launch_kwargs: dict[str, Any] = {
             **policy,
         }
+        if self._addons:
+            launch_kwargs["addons"] = self._addons
         if validated_proxy_url is not None:
             # Camoufox uses this native proxy config for proxy-aware
             # fingerprint geo alignment. The raw URL is passed only to the
@@ -620,7 +685,10 @@ class Mirage(BrowserEngine):
 
         # firefox_user_prefs -> <profile>/user.js (webgl etc. must be set
         # before the browser boots; the sidecar only mkdirs the profile).
-        profile_dir = Path(tempfile.mkdtemp(prefix="kahin-fp-"))
+        if profile_dir is None:
+            profile_dir = Path(tempfile.mkdtemp(prefix="kahin-fp-"))
+        else:
+            profile_dir.mkdir(parents=True, exist_ok=True)
         self._profile_dir = profile_dir
         profile_t0 = time.monotonic()
         try:
@@ -2063,5 +2131,6 @@ class Mirage(BrowserEngine):
 
     def _remove_profile(self) -> None:
         profile, self._profile_dir = self._profile_dir, None
-        if profile is not None:
+        persistent, self._persistent_profile = self._persistent_profile, False
+        if profile is not None and not persistent:
             shutil.rmtree(profile, ignore_errors=True)

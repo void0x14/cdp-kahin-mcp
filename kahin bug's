@@ -1,0 +1,7 @@
+kahin bug's
+
+- pdf ve js sayfalarında crawl yapamadı,openai luna
+bu bızden kaynaklı da olabilir model kanyaklı da olaiblir.Ama hiç bir önemı yok derhal düzeltemlıyız
+sürekli fallback olarak firtecrawl veya playwright gibi araçlara düşmek istemiyorum.Ben bosdunamı bu aracı tasarladım?
+Bu aracın playwrghttnda firecrawldan dsa iyi olacagını savundum?
+ONların yapabildiği her şeyi yapacaz ustune kendı ozellıklerımızı ve onların hiç bırının yapamadıklarını da yapcaz
